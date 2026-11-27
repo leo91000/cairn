@@ -5,7 +5,32 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import Fastify from 'fastify'
 import { z } from 'zod'
 
-export async function mcpProvider(options: { clientSecret?: string, beforeAuthorize?: () => Promise<void> } = {}) {
+export async function mcpProvider(options: {
+  clientSecret?: string
+  beforeAuthorize?: () => Promise<void>
+  perToolAuthorization?: boolean
+  dynamicRegistration?: boolean
+  resourceMetadata?:
+    | 'advertised'
+    | 'advertised-bare-origin'
+    | 'advertised-root-slash'
+    | 'query'
+    | 'unadvertised-query'
+    | 'root'
+    | 'root-query'
+    | 'unadvertised-root-query'
+    | 'root-fallback'
+    | 'root-fallback-slash'
+    | 'unadvertised-root-fallback'
+    | 'unadvertised-root-slash'
+    | 'unadvertised-root-bare'
+    | 'unadvertised-path-slash'
+    | 'unadvertised-path-alias'
+    | 'double-path-slash'
+    | 'wrong-resource'
+    | 'different-spelling'
+    | 'different-authority'
+} = {}) {
   // The manager outlives this fixture and can retain HTTP/SSE connections.
   // Closing the provider must also close those sockets, without waiting for the client.
   const app = Fastify({ forceCloseConnections: true })
@@ -15,21 +40,60 @@ export async function mcpProvider(options: { clientSecret?: string, beforeAuthor
   let accessToken = 'fixture-access-token'
   let refreshes = 0
   let exchanges = 0
-  const metadata = () => ({ resource: `${origin}/mcp`, authorization_servers: [origin], scopes_supported: ['tools:read'] })
-  app.get('/.well-known/oauth-protected-resource/mcp', metadata)
-  app.get('/.well-known/oauth-protected-resource', metadata)
+  const metadataRoot = '/.well-known/oauth-protected-resource'
+  const rootSlash = options.resourceMetadata?.endsWith('root-slash')
+  const rootBare = options.resourceMetadata === 'unadvertised-root-bare'
+  const fallbackWithSlash = options.resourceMetadata === 'root-fallback-slash'
+  const rootFallback = options.resourceMetadata?.endsWith('root-fallback') || fallbackWithSlash
+  const rootQuery = options.resourceMetadata === 'root-query' || options.resourceMetadata === 'unadvertised-root-query'
+  const advertisedRoot = options.resourceMetadata === 'advertised-bare-origin' || options.resourceMetadata === 'advertised-root-slash'
+  const pathAlias = options.resourceMetadata === 'unadvertised-path-alias'
+  const pathSlash = options.resourceMetadata === 'unadvertised-path-slash' || pathAlias
+  const doublePathSlash = options.resourceMetadata === 'double-path-slash'
+  const usesRootMetadata = options.resourceMetadata === 'root' || rootQuery || rootSlash || rootBare || advertisedRoot
+  const metadataPath = options.resourceMetadata === 'advertised' || advertisedRoot
+    ? '/resource-metadata'
+    : usesRootMetadata ? metadataRoot : `${metadataRoot}/mcp${doublePathSlash ? '/' : ''}`
+  let mcpPath = '/mcp'
+  if (rootQuery || rootSlash || rootBare || advertisedRoot)
+    mcpPath = '/'
+  if (pathSlash)
+    mcpPath = '/mcp/'
+  if (doublePathSlash)
+    mcpPath = '/mcp//'
+  let resourcePath = (usesRootMetadata && !rootSlash) || rootFallback || options.resourceMetadata === 'wrong-resource'
+    ? ''
+    : options.resourceMetadata === 'different-spelling' ? '/tenant/../mcp' : mcpPath
+  if (fallbackWithSlash)
+    resourcePath = '/'
+  if (pathAlias)
+    resourcePath = '/mcp'
+  const resourceQuery = options.resourceMetadata === 'query' || options.resourceMetadata === 'unadvertised-query' || rootQuery ? '?tenant=fixture' : ''
+  const metadata = () => {
+    const resourceOrigin = options.resourceMetadata === 'different-authority' ? origin.replace('127.0.0.1', '127.1') : origin
+    return { resource: `${resourceOrigin}${resourcePath}${resourceQuery}`, authorization_servers: [origin], scopes_supported: ['tools:read'] }
+  }
+
+  app.get(metadataPath, (request, reply) => {
+    if (request.url !== `${metadataPath}${resourceQuery}`)
+      return reply.code(404).send()
+    return metadata()
+  })
+  if (!options.resourceMetadata || rootFallback)
+    app.get(metadataRoot, metadata)
   app.get('/.well-known/oauth-authorization-server', () => ({
     issuer: origin,
     authorization_endpoint: `${origin}/authorize`,
     token_endpoint: `${origin}/token`,
-    registration_endpoint: `${origin}/register`,
+    registration_endpoint: options.dynamicRegistration === false ? undefined : `${origin}/register`,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
     token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
     code_challenge_methods_supported: ['S256'],
     authorization_response_iss_parameter_supported: true,
   }))
-  app.post('/register', request => ({ ...(request.body as object), client_id: 'fixture-client' }))
+  if (options.dynamicRegistration !== false)
+    app.post('/register', request => ({ ...(request.body as object), client_id: 'fixture-client' }))
   app.get('/authorize', async (request, reply) => {
     await options.beforeAuthorize?.()
     const query = request.query as Record<string, string>
@@ -71,9 +135,21 @@ export async function mcpProvider(options: { clientSecret?: string, beforeAuthor
     server.registerTool('admin_reset', { title: 'Reset workspace', description: 'Restricted administrative action.', inputSchema: z.object({}) }, async () => ({ content: [{ type: 'text', text: 'reset' }] }))
     return server
   })
-  app.all('/mcp', async (request, reply) => {
-    if (request.headers.authorization !== `Bearer ${accessToken}`)
-      return reply.code(401).header('WWW-Authenticate', `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`).send({ error: 'unauthorized' })
+  app.all(mcpPath, async (request, reply) => {
+    const rpc = request.body as { method?: string, params?: { name?: string } } | null
+    const protectedTool = rpc?.method === 'tools/call' && rpc.params?.name === 'admin_reset'
+    const challenge = options.resourceMetadata?.startsWith('unadvertised-')
+      ? 'Bearer'
+      : `Bearer resource_metadata="${origin}${metadataPath}${resourceQuery}"`
+    if ((!options.perToolAuthorization || protectedTool) && request.headers.authorization !== `Bearer ${accessToken}`)
+      return reply.code(401).header('WWW-Authenticate', challenge).send({ error: 'unauthorized' })
+    if (options.resourceMetadata === 'advertised' && rpc?.method === 'server/discover') {
+      reply.raw.setHeader('WWW-Authenticate', [
+        String.raw`Basic realm="description with resource_metadata=\"https://other.invalid/\""`,
+        `Basic realm="Café", Negotiate resource_metadata=, Bearer RESOURCE_METADATA = "${origin}${metadataPath}"`,
+      ])
+    }
+
     reply.hijack()
     await toNodeHandler(handler)(request.raw, reply.raw, request.body)
   })

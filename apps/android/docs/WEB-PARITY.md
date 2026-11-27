@@ -789,6 +789,9 @@ human management URL for agents; status never consumes another session's callbac
 PKCE, refresh and private-network/metadata protection remain in the existing
 protocol implementations. The shared corpus qualifies Rust/TS/Kotlin; browser MCP
 journeys and `McpJourneyCases` (JVM/device) cover the clients.
+Both apps can start explicit OAuth when MCP discovery is public and only some
+tools require authorization. Test connection can still read the anonymous catalog
+for a connection configured with no authentication.
 
 
 A15 account contracts: Connections on web and Android use generated Rust account,

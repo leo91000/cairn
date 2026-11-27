@@ -1277,7 +1277,14 @@ async fn official_clients_negotiate_modern_and_legacy_protocols_and_enforce_scop
 const OAUTH_PROVIDER: &str = r"
 import { mcpProvider } from './tests/fixtures/mcp-provider.ts';
 import { createInterface } from 'node:readline';
-const provider = await mcpProvider();
+const mode = process.argv[1];
+const challengedDiscovery = mode.startsWith('401-');
+const defaultMetadata = mode === 'per-tool' || mode.endsWith('canonical-authority');
+const provider = await mcpProvider(mode === 'per-server' ? {} : {
+    perToolAuthorization: !challengedDiscovery,
+    dynamicRegistration: false,
+    resourceMetadata: defaultMetadata ? undefined : challengedDiscovery ? mode.slice(4) : mode,
+});
 console.log(provider.origin);
 for await (const line of createInterface({ input: process.stdin })) {
     if (line === 'expire') {
@@ -1305,7 +1312,200 @@ async fn consent_callback(http: &reqwest::Client, consent: &Value) -> HashMap<St
 }
 
 #[tokio::test]
-async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provider() {
+async fn oauth_connects_when_discovery_is_public_and_tools_require_authorization() {
+    let (mut provider, _stdin, mut output) = oauth_provider("per-tool");
+    let origin = output.next_line().await.unwrap().unwrap();
+    let endpoint = format!("{origin}/mcp");
+    let root = TempDir::new().unwrap();
+    let s = Service::new(config(&root)).await.unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
+    let anonymous = s
+        .mcp_fixture(
+            json!({
+                "name": "Anonymous tools",
+                "url": endpoint,
+                "auth": "none",
+                "allowPrivateNetwork": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let anonymous_id = anonymous["id"].as_str().unwrap();
+    let tested = s.mcps.test(&s, anonymous_id).await.unwrap();
+    assert_eq!(
+        tested.server.state,
+        cairn_contracts::ConnectionState::Connected
+    );
+    assert!(
+        tested
+            .server
+            .tools
+            .iter()
+            .any(|tool| tool["name"] == "echo")
+    );
+    let mut client = Client::connect_server(&s, &tested.server).await.unwrap();
+    let echo = client
+        .request(
+            "tools/call",
+            json!({ "name": "echo", "arguments": { "message": "anonymous" } }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(echo["content"][0]["text"], "anonymous");
+    let protected = client
+        .request(
+            "tools/call",
+            json!({ "name": "admin_reset", "arguments": {} }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(protected.status, 401);
+    client.close().await;
+
+    let item = s
+        .mcp_fixture(
+            json!({
+                "name": "Per-tool OAuth",
+                "url": endpoint,
+                "auth": "oauth",
+                "clientId": "pre-registered-client",
+                "allowPrivateNetwork": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let id = item["id"].as_str().unwrap();
+    let app = router(s.clone()).await.unwrap();
+    let start = async |role: InstallationRole, native: bool| {
+        let body = json!({ "native": native });
+        let mut request = common::request("POST", &format!("/api/mcps/{id}/connect"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(InstallationIdentity::trusted(role, "native-account"));
+        common::send(&app, request).await
+    };
+    assert_eq!(
+        start(InstallationRole::Member, true).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    let callback = cairn_installation::mcps::callback_url(&s).await.unwrap();
+    for native in [false, true] {
+        let response = start(InstallationRole::Owner, native).await;
+        let status = response.status();
+        let consent = common::read_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{consent}");
+        let url = url::Url::parse(consent["url"].as_str().unwrap()).unwrap();
+        assert_eq!(url.origin().ascii_serialization(), origin);
+        assert_eq!(url.path(), "/authorize");
+        let query: HashMap<_, _> = url.query_pairs().collect();
+        assert_eq!(query["client_id"], "pre-registered-client");
+        assert_eq!(query["resource"], endpoint);
+        assert_eq!(query["scope"], "tools:read");
+        assert_eq!(query["code_challenge_method"], "S256");
+        assert_eq!(query["code_challenge"].len(), 43);
+        assert!(!query["state"].is_empty());
+        assert_eq!(query["redirect_uri"], callback);
+    }
+    provider.kill().await.unwrap();
+}
+
+#[tokio::test]
+async fn oauth_validates_advertised_and_well_known_resources() {
+    for (mode, endpoint_path, expected_resource) in [
+        ("advertised", "/mcp", Some("/mcp")),
+        ("query", "/mcp?tenant=fixture", Some("/mcp?tenant=fixture")),
+        ("root", "/mcp", Some("")),
+        ("root-fallback", "/mcp", Some("")),
+        ("root-fallback-slash", "/mcp", Some("/")),
+        ("root-query", "?tenant=fixture", Some("?tenant=fixture")),
+        ("wrong-resource", "/mcp", None),
+        ("different-spelling", "/mcp", None),
+        ("different-authority", "/mcp", None),
+        ("canonical-authority", "/mcp", Some("/mcp")),
+        ("401-canonical-authority", "/mcp", Some("/mcp")),
+        (
+            "401-query",
+            "/mcp?tenant=fixture",
+            Some("/mcp?tenant=fixture"),
+        ),
+        ("401-query", "/mcp?tenant=other", None),
+        ("401-advertised-bare-origin", "", Some("")),
+        ("401-advertised-root-slash", "/", Some("/")),
+        ("401-unadvertised-root-slash", "/", Some("/")),
+        ("401-unadvertised-root-slash", "", Some("/")),
+        (
+            "401-unadvertised-root-query",
+            "/?tenant=fixture",
+            Some("?tenant=fixture"),
+        ),
+        ("unadvertised-root-bare", "/", Some("")),
+        ("401-unadvertised-root-bare", "/", Some("")),
+        ("401-unadvertised-root-fallback", "/mcp", Some("")),
+        ("401-root-fallback", "/mcp", None),
+        ("401-unadvertised-path-slash", "/mcp/", Some("/mcp/")),
+        ("401-unadvertised-path-alias", "/mcp/", None),
+        ("double-path-slash", "/mcp//", Some("/mcp//")),
+        (
+            "401-unadvertised-query",
+            "/mcp?tenant=fixture",
+            Some("/mcp?tenant=fixture"),
+        ),
+    ] {
+        let (mut provider, _stdin, mut output) = oauth_provider(mode);
+        let origin = output.next_line().await.unwrap().unwrap();
+        let configured_origin = if mode.ends_with("canonical-authority") {
+            origin.replace("127.0.0.1", "127.1")
+        } else {
+            origin.clone()
+        };
+        let root = TempDir::new().unwrap();
+        let s = Service::new(config(&root)).await.unwrap();
+        common::relay_fixture::claimed(&s).await.unwrap();
+        let item = s
+            .mcp_fixture(
+                json!({
+                    "name": "OAuth metadata fixture",
+                    "url": format!("{configured_origin}{endpoint_path}"),
+                    "auth": "oauth",
+                    "clientId": "pre-registered-client",
+                    "allowPrivateNetwork": true,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let id = item["id"].as_str().unwrap();
+        let result = s.mcps.connect(&s, id, "metadata-session").await;
+        if let Some(resource_path) = expected_resource {
+            let consent = result.unwrap_or_else(|error| panic!("{mode}: {error}"));
+            let url = url::Url::parse(consent["url"].as_str().unwrap()).unwrap();
+            let query: HashMap<_, _> = url.query_pairs().collect();
+            assert_eq!(
+                query["resource"],
+                format!("{origin}{resource_path}"),
+                "{mode}"
+            );
+        } else {
+            assert_eq!(
+                result.unwrap_err().message,
+                "OAuth resource does not match the configured MCP server."
+            );
+        }
+        provider.kill().await.unwrap();
+    }
+}
+
+fn oauth_provider(
+    mode: &str,
+) -> (
+    tokio::process::Child,
+    tokio::process::ChildStdin,
+    tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+) {
     let mut provider = tokio::process::Command::new("node")
         .args([
             "--import",
@@ -1313,6 +1513,7 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
             "--input-type=module",
             "-e",
             OAUTH_PROVIDER,
+            mode,
         ])
         .current_dir(common::repository())
         .stdin(std::process::Stdio::piped())
@@ -1321,8 +1522,14 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let mut stdin = provider.stdin.take().unwrap();
-    let mut output = BufReader::new(provider.stdout.take().unwrap()).lines();
+    let stdin = provider.stdin.take().unwrap();
+    let output = BufReader::new(provider.stdout.take().unwrap()).lines();
+    (provider, stdin, output)
+}
+
+#[tokio::test]
+async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provider() {
+    let (mut provider, mut stdin, mut output) = oauth_provider("per-server");
     let origin = output.next_line().await.unwrap().unwrap();
     let root = TempDir::new().unwrap();
     let s = Service::new(config(&root)).await.unwrap();
