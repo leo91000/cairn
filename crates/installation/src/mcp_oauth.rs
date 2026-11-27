@@ -151,20 +151,27 @@ async fn protected_resource(
     let path_and_query = &endpoint[url::Position::BeforePath..];
     let root = format!("{origin}/.well-known/oauth-protected-resource");
     let has_advertised_url = advertised.is_some();
-    let resource_suffix = if has_advertised_url {
-        // An advertised document must identify the actual probe URL.
-        path_and_query
-    } else if endpoint.path() == "/" {
-        // Use the authority-only form for a derived root well-known URL.
+    let configured_path = server.url.split('?').next().unwrap_or(&server.url);
+    let configured_has_path = configured_path
+        .split_once("://")
+        .is_some_and(|(_, authority_and_path)| authority_and_path.contains('/'));
+    // A URL parser inserts a slash on an authority-only endpoint. Keep an
+    // explicitly configured slash for well-known identity validation.
+    let implicit_root_slash = endpoint.path() == "/" && !configured_has_path;
+    let resource_suffix = if !has_advertised_url && implicit_root_slash {
         &path_and_query[1..]
     } else {
         path_and_query
     };
-    let metadata_url = advertised.unwrap_or_else(|| format!("{root}{resource_suffix}"));
+    let metadata_url = advertised.unwrap_or_else(|| {
+        let metadata_path = endpoint.path().trim_end_matches('/');
+        let query = &endpoint[url::Position::AfterPath..];
+        format!("{root}{metadata_path}{query}")
+    });
     let (metadata_url, resource, expected_path_and_query) =
         match get(s, server, &metadata_url, authorize.clone()).await {
             Ok(resource) => (metadata_url, resource, resource_suffix),
-            Err(error) if has_advertised_url => return Err(error),
+            Err(error) if has_advertised_url || metadata_url == root => return Err(error),
             Err(_) => {
                 let resource = get(s, server, &root, authorize.clone())
                     .await
