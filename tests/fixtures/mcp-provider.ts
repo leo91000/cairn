@@ -18,6 +18,8 @@ export async function mcpProvider(options: {
     | 'unadvertised-query'
     | 'root'
     | 'root-query'
+    | 'root-fallback'
+    | 'unadvertised-root-fallback'
     | 'unadvertised-root-slash'
     | 'unadvertised-path-slash'
     | 'double-path-slash'
@@ -36,6 +38,7 @@ export async function mcpProvider(options: {
   let exchanges = 0
   const metadataRoot = '/.well-known/oauth-protected-resource'
   const rootSlash = options.resourceMetadata?.endsWith('root-slash')
+  const rootFallback = options.resourceMetadata?.endsWith('root-fallback')
   const advertisedRoot = options.resourceMetadata === 'advertised-bare-origin' || options.resourceMetadata === 'advertised-root-slash'
   const pathSlash = options.resourceMetadata === 'unadvertised-path-slash'
   const doublePathSlash = options.resourceMetadata === 'double-path-slash'
@@ -50,7 +53,7 @@ export async function mcpProvider(options: {
     mcpPath = '/mcp/'
   if (doublePathSlash)
     mcpPath = '/mcp//'
-  const resourcePath = (usesRootMetadata && !rootSlash) || options.resourceMetadata === 'wrong-resource'
+  const resourcePath = (usesRootMetadata && !rootSlash) || rootFallback || options.resourceMetadata === 'wrong-resource'
     ? ''
     : options.resourceMetadata === 'different-spelling' ? '/tenant/../mcp' : mcpPath
   const resourceQuery = options.resourceMetadata === 'query' || options.resourceMetadata === 'unadvertised-query' || options.resourceMetadata === 'root-query' ? '?tenant=fixture' : ''
@@ -64,7 +67,7 @@ export async function mcpProvider(options: {
       return reply.code(404).send()
     return metadata()
   })
-  if (!options.resourceMetadata)
+  if (!options.resourceMetadata || rootFallback)
     app.get(metadataRoot, metadata)
   app.get('/.well-known/oauth-authorization-server', () => ({
     issuer: origin,

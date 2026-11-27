@@ -138,48 +138,68 @@ async fn probe(
     advertised_metadata(&response.headers)
 }
 
-/// Protected resource metadata and the URL it was read from. Without an explicit
-/// challenge URL, the path-specific well-known location falls back to the root one.
-async fn protected_resource(
+struct ProtectedResourceMetadata {
+    url: String,
+    document: Value,
+    authorization_server: String,
+}
+
+async fn resource_document(
     s: &Service,
     server: &McpServer,
-    endpoint: &url::Url,
-    resource_suffix: &str,
-    advertised: Option<String>,
+    url: &str,
+    expected_resource: &str,
     authorize: Authorization,
-) -> Result<(String, Value)> {
-    let origin = &endpoint[..url::Position::BeforePath];
-    let root = format!("{origin}/.well-known/oauth-protected-resource");
-    let has_advertised_url = advertised.is_some();
-    let metadata_url = advertised.unwrap_or_else(|| {
-        let path = endpoint.path();
-        let metadata_path = path.strip_suffix('/').unwrap_or(path);
-        let query = &endpoint[url::Position::AfterPath..];
-        format!("{root}{metadata_path}{query}")
-    });
-    let (metadata_url, resource, expected_path_and_query) =
-        match get(s, server, &metadata_url, authorize.clone()).await {
-            Ok(resource) => (metadata_url, resource, resource_suffix),
-            Err(error) if has_advertised_url || metadata_url == root => return Err(error),
-            Err(_) => {
-                let resource = get(s, server, &root, authorize.clone())
-                    .await
-                    .map_err(|_| {
-                        Error::bad_gateway("OAuth protected resource metadata is unavailable.")
-                    })?;
-                (root, resource, "")
-            }
-        };
-
-    let resource_id = text(&resource, "resource");
-    valid_url(server, resource_id)?;
-    // Bind metadata to the resource used to locate this document (RFC 9728 §3.3).
-    if resource_id.strip_prefix(origin) != Some(expected_path_and_query) {
+) -> Result<ProtectedResourceMetadata> {
+    let document = get(s, server, url, authorize).await?;
+    let resource = text(&document, "resource");
+    valid_url(server, resource)?;
+    if resource != expected_resource {
         return Err(Error::bad(
             "OAuth resource does not match the configured MCP server.",
         ));
     }
-    Ok((metadata_url, resource))
+    let authorization_server = document["authorization_servers"]
+        .as_array()
+        .and_then(|servers| servers.first())
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::bad("OAuth authorization server is missing."))?
+        .to_owned();
+    valid_url(server, &authorization_server)?;
+    Ok(ProtectedResourceMetadata {
+        url: url.to_owned(),
+        document,
+        authorization_server,
+    })
+}
+
+/// Try advertised metadata first. Without an advertised URL, validate each
+/// well-known candidate before accepting it (RFC 9728 §3.3).
+async fn protected_resource(
+    s: &Service,
+    server: &McpServer,
+    endpoint: &url::Url,
+    probe_url: &str,
+    advertised: Option<String>,
+    authorize: Authorization,
+) -> Result<ProtectedResourceMetadata> {
+    if let Some(url) = advertised {
+        return resource_document(s, server, &url, probe_url, authorize).await;
+    }
+
+    let origin = &endpoint[..url::Position::BeforePath];
+    let root = format!("{origin}/.well-known/oauth-protected-resource");
+    let path = endpoint.path();
+    let metadata_path = path.strip_suffix('/').unwrap_or(path);
+    let query = &endpoint[url::Position::AfterPath..];
+    let metadata_url = format!("{root}{metadata_path}{query}");
+    let candidate = resource_document(s, server, &metadata_url, probe_url, authorize.clone()).await;
+    if candidate.is_ok() || metadata_url == root {
+        return candidate;
+    }
+    resource_document(s, server, &root, origin, authorize)
+        .await
+        .or(candidate)
 }
 
 async fn discover(
@@ -203,27 +223,22 @@ async fn discover(
     };
     let probe_url = format!("{origin}{resource_suffix}");
     let advertised = probe(server, &probe_url, authorize.clone()).await?;
-    let (resource_metadata_url, resource) = protected_resource(
+    let resource = protected_resource(
         s,
         server,
         &endpoint,
-        resource_suffix,
+        &probe_url,
         advertised,
         authorize.clone(),
     )
     .await?;
-    let authorization_server = resource["authorization_servers"]
-        .as_array()
-        .and_then(|servers| servers.first())
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::bad("OAuth authorization server is missing."))?
-        .to_owned();
     let metadata =
-        authorization_metadata(s, server, &authorization_server, authorize.clone()).await?;
+        authorization_metadata(s, server, &resource.authorization_server, authorize.clone())
+            .await?;
     let discovery = OAuthDiscovery {
-        authorization_server_url: authorization_server,
-        resource_metadata_url,
-        resource_metadata: resource,
+        authorization_server_url: resource.authorization_server,
+        resource_metadata_url: resource.url,
+        resource_metadata: resource.document,
         authorization_server_metadata: metadata,
     };
     let stored = discovery.clone();

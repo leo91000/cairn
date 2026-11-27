@@ -1419,6 +1419,7 @@ async fn oauth_validates_advertised_and_well_known_resources() {
         ("advertised", "/mcp", Some("/mcp")),
         ("query", "/mcp?tenant=fixture", Some("/mcp?tenant=fixture")),
         ("root", "/mcp", Some("")),
+        ("root-fallback", "/mcp", Some("")),
         ("root-query", "?tenant=fixture", Some("?tenant=fixture")),
         ("wrong-resource", "/mcp", None),
         ("different-spelling", "/mcp", None),
@@ -1434,6 +1435,8 @@ async fn oauth_validates_advertised_and_well_known_resources() {
         ("401-advertised-bare-origin", "", Some("")),
         ("401-advertised-root-slash", "/", Some("/")),
         ("401-unadvertised-root-slash", "/", Some("/")),
+        ("401-unadvertised-root-fallback", "/mcp", Some("")),
+        ("401-root-fallback", "/mcp", None),
         ("401-unadvertised-path-slash", "/mcp/", Some("/mcp/")),
         ("double-path-slash", "/mcp//", Some("/mcp//")),
         (
