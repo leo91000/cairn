@@ -9,7 +9,8 @@ export async function mcpProvider(options: {
   clientSecret?: string
   beforeAuthorize?: () => Promise<void>
   perToolAuthorization?: boolean
-  preRegisteredClientId?: string
+  dynamicRegistration?: boolean
+  resourceMetadata?: 'advertised' | 'query' | 'root' | 'wrong-resource'
 } = {}) {
   // The manager outlives this fixture and can retain HTTP/SSE connections.
   // Closing the provider must also close those sockets, without waiting for the client.
@@ -20,21 +21,32 @@ export async function mcpProvider(options: {
   let accessToken = 'fixture-access-token'
   let refreshes = 0
   let exchanges = 0
-  const metadata = () => ({ resource: `${origin}/mcp`, authorization_servers: [origin], scopes_supported: ['tools:read'] })
-  app.get('/.well-known/oauth-protected-resource/mcp', metadata)
-  app.get('/.well-known/oauth-protected-resource', metadata)
+  const metadataRoot = '/.well-known/oauth-protected-resource'
+  const metadataPath = options.resourceMetadata === 'advertised'
+    ? '/resource-metadata'
+    : options.resourceMetadata === 'root' ? metadataRoot : `${metadataRoot}/mcp`
+  const resourcePath = options.resourceMetadata === 'root' || options.resourceMetadata === 'wrong-resource' ? '' : '/mcp'
+  const resourceQuery = options.resourceMetadata === 'query' ? '?tenant=fixture' : ''
+  const metadata = () => ({ resource: `${origin}${resourcePath}${resourceQuery}`, authorization_servers: [origin], scopes_supported: ['tools:read'] })
+  app.get(metadataPath, (request, reply) => {
+    if (request.url !== `${metadataPath}${resourceQuery}`)
+      return reply.code(404).send()
+    return metadata()
+  })
+  if (!options.resourceMetadata)
+    app.get(metadataRoot, metadata)
   app.get('/.well-known/oauth-authorization-server', () => ({
     issuer: origin,
     authorization_endpoint: `${origin}/authorize`,
     token_endpoint: `${origin}/token`,
-    registration_endpoint: options.preRegisteredClientId ? undefined : `${origin}/register`,
+    registration_endpoint: options.dynamicRegistration === false ? undefined : `${origin}/register`,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
     token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
     code_challenge_methods_supported: ['S256'],
     authorization_response_iss_parameter_supported: true,
   }))
-  if (!options.preRegisteredClientId)
+  if (options.dynamicRegistration !== false)
     app.post('/register', request => ({ ...(request.body as object), client_id: 'fixture-client' }))
   app.get('/authorize', async (request, reply) => {
     await options.beforeAuthorize?.()
@@ -80,8 +92,11 @@ export async function mcpProvider(options: {
   app.all('/mcp', async (request, reply) => {
     const rpc = request.body as { method?: string, params?: { name?: string } } | null
     const protectedTool = rpc?.method === 'tools/call' && rpc.params?.name === 'admin_reset'
+    const challenge = `Bearer resource_metadata="${origin}${metadataPath}${resourceQuery}"`
     if ((!options.perToolAuthorization || protectedTool) && request.headers.authorization !== `Bearer ${accessToken}`)
-      return reply.code(401).header('WWW-Authenticate', `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`).send({ error: 'unauthorized' })
+      return reply.code(401).header('WWW-Authenticate', challenge).send({ error: 'unauthorized' })
+    if (options.resourceMetadata === 'advertised' && rpc?.method === 'server/discover')
+      reply.raw.setHeader('WWW-Authenticate', ['Basic realm="fixture"', challenge])
     reply.hijack()
     await toNodeHandler(handler)(request.raw, reply.raw, request.body)
   })

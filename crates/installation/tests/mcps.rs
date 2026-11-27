@@ -1277,10 +1277,12 @@ async fn official_clients_negotiate_modern_and_legacy_protocols_and_enforce_scop
 const OAUTH_PROVIDER: &str = r"
 import { mcpProvider } from './tests/fixtures/mcp-provider.ts';
 import { createInterface } from 'node:readline';
-const provider = await mcpProvider(process.argv[1] === 'per-tool' ? {
+const mode = process.argv[1];
+const provider = await mcpProvider(mode === 'per-server' ? {} : {
     perToolAuthorization: true,
-    preRegisteredClientId: 'pre-registered-client',
-} : {});
+    dynamicRegistration: false,
+    resourceMetadata: mode === 'per-tool' ? undefined : mode,
+});
 console.log(provider.origin);
 for await (const line of createInterface({ input: process.stdin })) {
     if (line === 'expire') {
@@ -1400,6 +1402,53 @@ async fn oauth_connects_when_discovery_is_public_and_tools_require_authorization
         assert_eq!(query["redirect_uri"], callback);
     }
     provider.kill().await.unwrap();
+}
+
+#[tokio::test]
+async fn oauth_public_discovery_validates_advertised_and_well_known_resources() {
+    for (mode, endpoint_path, expected_resource) in [
+        ("advertised", "/mcp", Some("/mcp")),
+        ("query", "/mcp?tenant=fixture", Some("/mcp?tenant=fixture")),
+        ("root", "/mcp", Some("")),
+        ("wrong-resource", "/mcp", None),
+    ] {
+        let (mut provider, _stdin, mut output) = oauth_provider(mode);
+        let origin = output.next_line().await.unwrap().unwrap();
+        let root = TempDir::new().unwrap();
+        let s = Service::new(config(&root)).await.unwrap();
+        common::relay_fixture::claimed(&s).await.unwrap();
+        let item = s
+            .mcp_fixture(
+                json!({
+                    "name": "OAuth metadata fixture",
+                    "url": format!("{origin}{endpoint_path}"),
+                    "auth": "oauth",
+                    "clientId": "pre-registered-client",
+                    "allowPrivateNetwork": true,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let id = item["id"].as_str().unwrap();
+        let result = s.mcps.connect(&s, id, "metadata-session").await;
+        if let Some(resource_path) = expected_resource {
+            let consent = result.unwrap_or_else(|error| panic!("{mode}: {error}"));
+            let url = url::Url::parse(consent["url"].as_str().unwrap()).unwrap();
+            let query: HashMap<_, _> = url.query_pairs().collect();
+            assert_eq!(
+                query["resource"],
+                format!("{origin}{resource_path}"),
+                "{mode}"
+            );
+        } else {
+            assert_eq!(
+                result.unwrap_err().message,
+                "OAuth resource does not match the configured MCP server."
+            );
+        }
+        provider.kill().await.unwrap();
+    }
 }
 
 fn oauth_provider(

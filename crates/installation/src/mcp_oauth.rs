@@ -76,13 +76,12 @@ fn valid_url(server: &McpServer, value: &str) -> Result<url::Url> {
     Ok(url)
 }
 
-/// Probes without credentials for a challenge before trying well-known metadata.
-async fn challenge(
-    _s: &Service,
+/// Probes without credentials for a resource metadata challenge.
+async fn probe(
     server: &McpServer,
     endpoint: &url::Url,
     authorize: Authorization,
-) -> Result<String> {
+) -> Result<(bool, String)> {
     authorize.recheck().await?;
     let probe = Frame::strict(Message::Request {
         id: 1,
@@ -100,20 +99,20 @@ async fn challenge(
     )
     .await?;
     // Discovery can be public even when individual tools require OAuth.
-    if (200..300).contains(&response.status) {
-        return Ok(String::new());
-    }
-    if response.status != 401 {
+    let public_discovery = (200..300).contains(&response.status);
+    if !public_discovery && response.status != 401 {
         return Err(Error::bad(
             "The server did not request OAuth. Use Test connection or choose no authentication.",
         ));
     }
-    Ok(response
+    let challenge = response
         .headers
-        .get("www-authenticate")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_owned())
+        .get_all("www-authenticate")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok((public_discovery, challenge))
 }
 
 /// Protected resource metadata and the URL it was read from. Without an explicit
@@ -123,32 +122,56 @@ async fn protected_resource(
     server: &McpServer,
     endpoint: &url::Url,
     challenge: &str,
+    public_discovery: bool,
     authorize: Authorization,
 ) -> Result<(String, Value)> {
     let origin = endpoint.origin().ascii_serialization();
+    let root = format!("{origin}/.well-known/oauth-protected-resource");
     let advertised = RESOURCE_METADATA
         .captures(challenge)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_owned());
     let metadata_url = advertised.unwrap_or_else(|| {
-        format!(
-            "{origin}/.well-known/oauth-protected-resource{}",
-            endpoint.path().trim_end_matches('/')
-        )
+        if !public_discovery {
+            return format!("{root}{}", endpoint.path().trim_end_matches('/'));
+        }
+        let path = if endpoint.path() == "/" {
+            ""
+        } else {
+            endpoint.path()
+        };
+        let query = &endpoint[url::Position::AfterPath..];
+        format!("{root}{path}{query}")
     });
-    match get(s, server, &metadata_url, authorize.clone()).await {
-        Ok(resource) => Ok((metadata_url, resource)),
-        Err(error) if challenge.contains("resource_metadata=") => Err(error),
+    let mut expected = endpoint.clone();
+    let (metadata_url, resource) = match get(s, server, &metadata_url, authorize.clone()).await {
+        Ok(resource) => (metadata_url, resource),
+        Err(error) if challenge.contains("resource_metadata=") => return Err(error),
         Err(_) => {
-            let root = format!("{origin}/.well-known/oauth-protected-resource");
             let resource = get(s, server, &root, authorize.clone())
                 .await
                 .map_err(|_| {
                     Error::bad_gateway("OAuth protected resource metadata is unavailable.")
                 })?;
-            Ok((root, resource))
+            expected.set_path("/");
+            expected.set_query(None);
+            (root, resource)
         }
+    };
+
+    let resource_url = valid_url(server, text(&resource, "resource"))?;
+    // Bind public discovery to the resource used to locate this document (RFC 9728 §3.3).
+    let matches_resource = if public_discovery {
+        resource_url == expected
+    } else {
+        resource_covers(&resource_url, endpoint)
+    };
+    if !matches_resource {
+        return Err(Error::bad(
+            "OAuth resource does not match the configured MCP server.",
+        ));
     }
+    Ok((metadata_url, resource))
 }
 
 /// Whether the advertised resource is the endpoint or one of its path ancestors.
@@ -167,15 +190,16 @@ async fn discover(
     authorize: Authorization,
 ) -> Result<OAuthDiscovery> {
     let endpoint = valid_url(server, &server.url)?;
-    let challenge = challenge(s, server, &endpoint, authorize.clone()).await?;
-    let (resource_metadata_url, resource) =
-        protected_resource(s, server, &endpoint, &challenge, authorize.clone()).await?;
-    let resource_url = valid_url(server, text(&resource, "resource"))?;
-    if !resource_covers(&resource_url, &endpoint) {
-        return Err(Error::bad(
-            "OAuth resource does not match the configured MCP server.",
-        ));
-    }
+    let (public_discovery, challenge) = probe(server, &endpoint, authorize.clone()).await?;
+    let (resource_metadata_url, resource) = protected_resource(
+        s,
+        server,
+        &endpoint,
+        &challenge,
+        public_discovery,
+        authorize.clone(),
+    )
+    .await?;
     let authorization_server = resource["authorization_servers"]
         .as_array()
         .and_then(|servers| servers.first())
