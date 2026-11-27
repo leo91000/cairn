@@ -26,10 +26,11 @@ use std::{collections::HashMap, sync::LazyLock};
 const PENDING_TTL_MS: i64 = 600_000;
 const EXPIRED: &str = "Authorization session expired. Start again from MCPs.";
 
-static RESOURCE_METADATA: LazyLock<regex::Regex> = LazyLock::new(|| {
-    // Consume other quoted strings whole so their descriptions cannot look like parameters.
-    regex::Regex::new(
-        r#""(?:[^"\\]|\\.)*"|(?:^|[ \t,])(?i:resource_metadata)[ \t]*=[ \t]*(?:"((?:[^"\\]|\\.)*)"|([^ \t,]*))"#,
+static RESOURCE_METADATA: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
+    // An absolute metadata URL requires quotes in an auth parameter. Read the
+    // raw field and consume other quoted strings as a whole.
+    regex::bytes::Regex::new(
+        r#"(?-u)"(?:[^"\\]|\\.)*"|(?:^|[ \t,])(?i:resource_metadata)[ \t]*=[ \t]*"((?:[^"\\]|\\.)*)""#,
     )
     .unwrap()
 });
@@ -81,27 +82,29 @@ fn valid_url(server: &McpServer, value: &str) -> Result<url::Url> {
     Ok(url)
 }
 
-fn advertised_metadata(headers: &HeaderMap) -> Option<String> {
-    let parameter = headers
+fn advertised_metadata(headers: &HeaderMap) -> Result<Option<String>> {
+    let quoted = headers
         .get_all("www-authenticate")
         .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| RESOURCE_METADATA.captures_iter(value))
-        .find(|capture| capture.get(1).is_some() || capture.get(2).is_some())?;
-    let Some(quoted) = parameter.get(1) else {
-        return parameter.get(2).map(|value| value.as_str().to_owned());
+        .flat_map(|value| RESOURCE_METADATA.captures_iter(value.as_bytes()))
+        .find_map(|capture| capture.get(1));
+    let Some(quoted) = quoted else {
+        return Ok(None);
     };
 
-    let mut characters = quoted.as_str().chars();
-    let mut url = String::new();
-    while let Some(character) = characters.next() {
-        url.push(if character == '\\' {
-            characters.next()?
-        } else {
-            character
-        });
+    let mut url = Vec::with_capacity(quoted.len());
+    let mut escaped = false;
+    for &byte in quoted.as_bytes() {
+        if byte == b'\\' && !escaped {
+            escaped = true;
+            continue;
+        }
+        url.push(byte);
+        escaped = false;
     }
-    Some(url)
+    String::from_utf8(url)
+        .map(Some)
+        .map_err(|_| Error::bad("Unsupported authorization URL."))
 }
 
 /// Probes without credentials for a resource metadata challenge.
@@ -133,7 +136,7 @@ async fn probe(
             "The server did not request OAuth. Use Test connection or choose no authentication.",
         ));
     }
-    Ok((public_discovery, advertised_metadata(&response.headers)))
+    Ok((public_discovery, advertised_metadata(&response.headers)?))
 }
 
 /// Protected resource metadata and the URL it was read from. Without an explicit
@@ -200,10 +203,11 @@ fn same_resource_identifier(resource: &str, expected: &url::Url) -> bool {
     else {
         return false;
     };
-    // MCP permits case differences in the scheme and host, and a bare origin.
+    // MCP permits case differences in the scheme and host. A bare origin can
+    // omit the slash that URL parsing inserts before the query or end of input.
     resource_origin.eq_ignore_ascii_case(origin)
         && (resource_path_and_query == path_and_query
-            || (path_and_query == "/" && resource_path_and_query.is_empty()))
+            || (expected.path() == "/" && resource_path_and_query == &path_and_query[1..]))
 }
 
 /// Whether the advertised resource is the endpoint or one of its path ancestors.

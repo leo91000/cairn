@@ -10,7 +10,7 @@ export async function mcpProvider(options: {
   beforeAuthorize?: () => Promise<void>
   perToolAuthorization?: boolean
   dynamicRegistration?: boolean
-  resourceMetadata?: 'advertised' | 'query' | 'root' | 'wrong-resource' | 'different-spelling'
+  resourceMetadata?: 'advertised' | 'query' | 'root' | 'root-query' | 'wrong-resource' | 'different-spelling'
 } = {}) {
   // The manager outlives this fixture and can retain HTTP/SSE connections.
   // Closing the provider must also close those sockets, without waiting for the client.
@@ -22,13 +22,14 @@ export async function mcpProvider(options: {
   let refreshes = 0
   let exchanges = 0
   const metadataRoot = '/.well-known/oauth-protected-resource'
+  const usesRootMetadata = options.resourceMetadata === 'root' || options.resourceMetadata === 'root-query'
   const metadataPath = options.resourceMetadata === 'advertised'
     ? '/resource-metadata'
-    : options.resourceMetadata === 'root' ? metadataRoot : `${metadataRoot}/mcp`
-  const resourcePath = options.resourceMetadata === 'root' || options.resourceMetadata === 'wrong-resource'
+    : usesRootMetadata ? metadataRoot : `${metadataRoot}/mcp`
+  const resourcePath = usesRootMetadata || options.resourceMetadata === 'wrong-resource'
     ? ''
     : options.resourceMetadata === 'different-spelling' ? '/tenant/../mcp' : '/mcp'
-  const resourceQuery = options.resourceMetadata === 'query' ? '?tenant=fixture' : ''
+  const resourceQuery = options.resourceMetadata === 'query' || options.resourceMetadata === 'root-query' ? '?tenant=fixture' : ''
   const metadata = () => ({ resource: `${origin}${resourcePath}${resourceQuery}`, authorization_servers: [origin], scopes_supported: ['tools:read'] })
   app.get(metadataPath, (request, reply) => {
     if (request.url !== `${metadataPath}${resourceQuery}`)
@@ -91,7 +92,7 @@ export async function mcpProvider(options: {
     server.registerTool('admin_reset', { title: 'Reset workspace', description: 'Restricted administrative action.', inputSchema: z.object({}) }, async () => ({ content: [{ type: 'text', text: 'reset' }] }))
     return server
   })
-  app.all('/mcp', async (request, reply) => {
+  app.all(options.resourceMetadata === 'root-query' ? '/' : '/mcp', async (request, reply) => {
     const rpc = request.body as { method?: string, params?: { name?: string } } | null
     const protectedTool = rpc?.method === 'tools/call' && rpc.params?.name === 'admin_reset'
     const challenge = `Bearer resource_metadata="${origin}${metadataPath}${resourceQuery}"`
@@ -100,7 +101,7 @@ export async function mcpProvider(options: {
     if (options.resourceMetadata === 'advertised' && rpc?.method === 'server/discover') {
       reply.raw.setHeader('WWW-Authenticate', [
         String.raw`Basic realm="description with resource_metadata=\"https://other.invalid/\""`,
-        `Bearer RESOURCE_METADATA = "${origin}${metadataPath}"`,
+        `Basic realm="Café", Negotiate resource_metadata=, Bearer RESOURCE_METADATA = "${origin}${metadataPath}"`,
       ])
     }
 

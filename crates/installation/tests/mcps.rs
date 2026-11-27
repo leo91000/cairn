@@ -1417,6 +1417,7 @@ async fn oauth_public_discovery_validates_advertised_and_well_known_resources() 
         ("advertised", "/mcp", Some("/mcp")),
         ("query", "/mcp?tenant=fixture", Some("/mcp?tenant=fixture")),
         ("root", "/mcp", Some("")),
+        ("root-query", "?tenant=fixture", Some("?tenant=fixture")),
         ("wrong-resource", "/mcp", None),
         ("different-spelling", "/mcp", None),
     ] {
