@@ -243,6 +243,166 @@ fn background_preparation_yields_to_foreground_intent_and_then_finishes() {
 }
 
 #[tokio::test]
+async fn background_preparation_discards_missing_and_evicted_archives_while_storage_is_busy() {
+    use std::{sync::Arc, time::Duration};
+
+    let (_root, bases, archive, _) = fixture().await;
+    let storage =
+        crate::file_lock::exclusive(&bases.state.join("storage.lock"), "fixture storage owner")
+            .unwrap();
+    let warm = Arc::new(super::bases_warmer::Warmer::default());
+    let budget = Arc::new(tokio::sync::Mutex::new(
+        json!({ "limits": { "diskMiB": 16384 } }),
+    ));
+    let stop = CancellationToken::new();
+    let missing = Archive {
+        hash: "c".repeat(64),
+        ..archive.clone()
+    };
+    warm.enqueue(
+        bases.clone(),
+        json!({ "archives": [missing], "diskMiB": 128, "individual": true }),
+        budget.clone(),
+        stop.clone(),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), warm.wait_idle())
+        .await
+        .expect("a missing archive must not compete for the storage lock");
+
+    let delayed = budget.lock().await;
+    warm.enqueue(
+        bases.clone(),
+        json!({ "archives": [&archive], "diskMiB": 128, "individual": true }),
+        budget.clone(),
+        stop,
+    )
+    .await
+    .unwrap();
+    tokio::fs::remove_file(
+        bases
+            .data
+            .join("project-archives")
+            .join(format!("{}.zip", archive.hash)),
+    )
+    .await
+    .unwrap();
+    drop(delayed);
+    tokio::time::timeout(Duration::from_secs(2), warm.wait_idle())
+        .await
+        .expect("an evicted archive must be discarded while storage is still busy");
+    drop(storage);
+}
+
+#[tokio::test]
+async fn one_unreadable_warming_group_does_not_block_later_projects() {
+    use std::{sync::Arc, time::Duration};
+
+    let (_root, bases, archive, policy) = fixture().await;
+    super::atomic_write(
+        &bases.state.join("storage-policy.json"),
+        &serde_json::to_vec(&policy).unwrap(),
+    )
+    .await
+    .unwrap();
+    let unreadable = Archive {
+        project_id: crate::config::id(),
+        ..archive.clone()
+    };
+    let key = bases.key(std::slice::from_ref(&unreadable), 128).unwrap();
+    std::fs::create_dir_all(
+        bases
+            .state
+            .join("native-bases")
+            .join(key)
+            .join("ready.json"),
+    )
+    .unwrap();
+    let budget = Arc::new(tokio::sync::Mutex::new(json!({
+        "limits": { "diskMiB": 16384 },
+    })));
+
+    let storage =
+        crate::file_lock::exclusive(&bases.state.join("storage.lock"), "fixture storage owner")
+            .unwrap();
+    let warmer = Arc::new(super::bases_warmer::Warmer::default());
+    warmer
+        .enqueue(
+            bases.clone(),
+            json!({ "archives": [&unreadable], "diskMiB": 128, "individual": true }),
+            budget.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), warmer.wait_idle())
+        .await
+        .expect("a readiness error must back off without waiting for storage");
+    drop(storage);
+
+    // A fresh warmer has no backoff record and must still reach the next group
+    // when readiness checking the first one encounters the same I/O error.
+    let warmer = Arc::new(super::bases_warmer::Warmer::default());
+    warmer
+        .enqueue(
+            bases.clone(),
+            json!({ "archives": [unreadable, archive], "diskMiB": 128, "individual": true }),
+            budget,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(60), warmer.wait_idle())
+        .await
+        .unwrap();
+    assert!(bases.lookup(&[archive], 128).await.unwrap().is_some());
+}
+
+#[test]
+fn warming_acknowledgement_does_not_wait_for_filesystem_workers() {
+    use std::{sync::Arc, time::Duration};
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (_root, bases, archive, _) = fixture().await;
+            let (entered, entry) = tokio::sync::oneshot::channel();
+            let (release, proceed) = std::sync::mpsc::channel();
+            let blocking = tokio::task::spawn_blocking(move || {
+                entered.send(()).unwrap();
+                proceed.recv().unwrap();
+            });
+            entry.await.unwrap();
+
+            let warmer = Arc::new(super::bases_warmer::Warmer::default());
+            let stop = CancellationToken::new();
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                warmer.enqueue(
+                    bases,
+                    json!({ "archives": [archive], "diskMiB": 128, "individual": true }),
+                    Arc::new(tokio::sync::Mutex::new(json!({
+                        "limits": { "diskMiB": 16384 },
+                    }))),
+                    stop.clone(),
+                ),
+            )
+            .await;
+            stop.cancel();
+            release.send(()).unwrap();
+            blocking.await.unwrap();
+            warmer.wait_idle().await;
+            result
+                .expect("queue acknowledgement must not wait for a filesystem probe")
+                .unwrap();
+        });
+}
+
+#[tokio::test]
 #[ignore = "executed by the isolated background preparation wrapper"]
 async fn background_preparation_yields_to_foreground_intent_and_then_finishes_child() {
     use std::{sync::Arc, time::Duration};

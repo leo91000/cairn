@@ -256,7 +256,7 @@ impl Controller {
         Fut: std::future::Future<Output = Result<T>> + Send + 'static,
     {
         uuid(id)?;
-        let pool = disk::lock(&self.state).await?;
+        let pool = disk::observed_lock(&self.state, "native_storage_live_access", id).await?;
         let live_access = {
             let active = self.active.lock().await;
             let attempt = active
@@ -296,7 +296,7 @@ impl Controller {
         filesystem: &Path,
         policy: &storage::policy::Policy,
     ) -> Result<(disk::Preparation, u64)> {
-        let _pool = disk::lock(&self.state).await?;
+        let _pool = disk::observed_lock(&self.state, "native_storage_reserve_copy", "").await?;
         let physical = disk::physical_headroom(&self.state, filesystem, policy, None)?;
         let budget = maximum
             .min(self.disk_growth().await?)

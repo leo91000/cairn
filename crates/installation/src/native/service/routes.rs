@@ -105,7 +105,9 @@ pub(super) async fn route(controller: Controller, request: Request) -> Result<Re
             if value != previous {
                 // Do not hold the budget mutex while waiting for storage:
                 // foreground transfers query health with their disk lease held.
-                let _disk = disk::lock(&controller.state).await?;
+                let _disk =
+                    disk::observed_lock(&controller.state, "native_storage_node_budget", "")
+                        .await?;
                 super::super::spares::discard_unclaimed(&controller.state, None).await?;
                 let limit = budget.limits.disk_mi_b.saturating_mul(disk::MIB);
                 let used = disk::used(&controller.data, &controller.state).await?;
@@ -149,7 +151,8 @@ pub(super) async fn route(controller: Controller, request: Request) -> Result<Re
                 .apply_relief(&controller.state, &configuration)
                 .await?
             {
-                let _disk = disk::lock(&controller.state).await?;
+                let _disk =
+                    disk::observed_lock(&controller.state, "native_storage_policy", "").await?;
                 controller
                     .storage_policy
                     .apply(&controller.state, configuration)
@@ -298,8 +301,13 @@ pub(super) async fn route(controller: Controller, request: Request) -> Result<Re
             status
         }
         ("POST", ["disks", run, action @ ("delete" | "prune")]) => {
-            let _disk = disk::lock(&controller.state).await?;
             uuid(run)?;
+            let operation = if *action == "delete" {
+                "native_storage_delete"
+            } else {
+                "native_storage_prune"
+            };
+            let _disk = disk::observed_lock(&controller.state, operation, run).await?;
             let _staging = if *action == "delete" {
                 Some(disk::lock_staging(&controller.state, run).await?)
             } else {

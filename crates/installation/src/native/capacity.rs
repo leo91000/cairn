@@ -257,8 +257,10 @@ fn retained_credits(state: &Path, active: &HashSet<String>) -> Result<HashMap<St
     // Diagnostic ownership follows storage -> workspace ordering without
     // advertising foreground intent or waiting behind real storage work.
     // A busy sample grants no retained credit and still refreshes health.
-    let _storage = match crate::file_lock::exclusive(
-        &state.join("storage.lock"),
+    let _storage = match super::disk::try_storage_lock(
+        state,
+        "native_storage_retained_credits",
+        "",
         "Native retained capacity observation is busy.",
     ) {
         Ok(storage) => storage,

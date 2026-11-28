@@ -583,7 +583,7 @@ impl Controller {
     /// wait bounded too, and observe stop markers without blocking DELETE.
     async fn start_storage(&self, id: &str, plan: &Value) -> Result<disk::StorageGuard> {
         let (deadline, time_limited) = disk_admission_deadline(plan, DISK_RELEASE_WAIT);
-        let waiting = disk::lock(&self.state);
+        let waiting = disk::observed_lock(&self.state, "native_storage_admission", id);
         tokio::pin!(waiting);
         let mut acquired = None;
         loop {
@@ -1138,7 +1138,7 @@ impl Controller {
                     () = stop.cancelled() => {
                         return Err(self.preparation_stopped(id, plan).await);
                     }
-                    result = tokio::time::timeout_at(deadline, disk::lock(&self.state)) => {
+                    result = tokio::time::timeout_at(deadline, disk::observed_lock(&self.state, "native_storage_mount", id)) => {
                         match result {
                             Ok(result) => result?,
                             Err(_) => return Err(self.disk_admission_timeout(id, time_limited).await),
@@ -1559,7 +1559,9 @@ impl Controller {
             tokio::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o755)).await?;
         }
         {
-            let _pool = disk::lock(&self.state).await?;
+            let _pool =
+                disk::observed_lock(&self.state, "native_storage_release_base", text(plan, "id"))
+                    .await?;
             super::bases::release_pin(
                 &self.data.join("runs").join(text(plan, "runId")),
                 text(plan, "id"),

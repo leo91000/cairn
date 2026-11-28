@@ -1,6 +1,7 @@
 mod chat_files;
 pub(crate) mod chat_tools;
 pub mod code_mode;
+pub(crate) mod gateway_catalog;
 mod model_result;
 
 use crate::{
@@ -1197,6 +1198,9 @@ async fn proxy(
     method: &str,
     params: Value,
 ) -> Result<Value> {
+    if method == "tools/list" {
+        return gateway_catalog::list(s, id, bearer).await;
+    }
     let _guard = s.mcps.lock(id).await;
     let (server, scope, authority) = s.mcps.grant_authorized(s, id, bearer).await?;
     let authorize = crate::authorization::Authorization::live(s, authority.clone());
@@ -1214,16 +1218,6 @@ async fn proxy(
             _ => false,
         };
         let result = match method {
-            "tools/list" => client.discover().await.and_then(|tools| {
-                for tool in &tools {
-                    model_result::validate_descriptor(tool)?;
-                }
-                let tools = tools
-                    .into_iter()
-                    .filter(|tool| scope.allows(text(tool, "name")))
-                    .collect::<Vec<_>>();
-                Ok(json!({ "tools": tools }))
-            }),
             _ if unsupported => Ok(empty_listing(method).unwrap_or_default()),
             "tools/call"
             | "resources/list"
@@ -1247,7 +1241,7 @@ async fn proxy(
     if let Err(error) = &result {
         // Recheck the same gateway grant before publishing a failure after network work.
         s.mcps
-            .record_discovery_live(s, server, &Err(error.clone()), authorize)
+            .record_discovery_live(s, server, Err(error.clone()), authorize)
             .await?;
     }
     result

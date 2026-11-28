@@ -95,6 +95,15 @@ pub(crate) fn try_record(record: impl FnOnce(Delivery) + Send + 'static) -> bool
     if !super::enabled() {
         return false;
     }
+    try_record_detached(record)
+}
+
+/// Defer subscriber filtering as well as writing. Callers that own storage
+/// locks must not run a subscriber predicate before offering the report.
+pub(crate) fn try_record_detached(record: impl FnOnce(Delivery) + Send + 'static) -> bool {
+    if !tracing::level_enabled!(tracing::Level::INFO) {
+        return false;
+    }
     let report = Report {
         queued_at: Instant::now(),
         dispatch: tracing::dispatcher::get_default(Clone::clone),

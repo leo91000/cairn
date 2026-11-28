@@ -148,8 +148,15 @@ pub(crate) async fn stage(
         }
         return Ok(None);
     }
-    let _disk =
-        await_preparation(stop, crate::native::disk::lock(&crate::native::state_dir())).await?;
+    let storage_guard = await_preparation(
+        stop,
+        crate::native::disk::observed_lock(
+            &crate::native::state_dir(),
+            "native_storage_archive_stage",
+            &session.attempt,
+        ),
+    )
+    .await?;
     if let Some(disk_mib) = base_disk_mib {
         let lookup = crate::native::bases::request(
             "lookup",
@@ -182,7 +189,7 @@ pub(crate) async fn stage(
             return Ok(Some(key.to_owned()));
         }
     }
-    let _guard = await_preparation(stop, async { Ok(lock().lock().await) }).await?;
+    let archive_guard = await_preparation(stop, async { Ok(lock().lock().await) }).await?;
     let data = crate::nodes::node_data_dir();
     clean_interrupted_downloads(&data).await?;
     let pins = root.join("project-archives");
@@ -255,6 +262,8 @@ pub(crate) async fn stage(
         crate::skills::private_dir(&root.join("workspace").join(&descriptor.project_id)).await?;
     }
     check_preparing(stop)?;
+    drop(archive_guard);
+    drop(storage_guard);
     if let Some(disk_mib) = base_disk_mib {
         let _ = crate::native::bases::request(
             "warm",
@@ -268,7 +277,14 @@ pub(crate) async fn stage(
 pub(crate) async fn abandon_stage(root: &Path, pressure: bool, attempt: &str) -> Result<()> {
     crate::native::bases::release_pin(root, attempt).await?;
     let _disk = if crate::native::enabled() {
-        Some(crate::native::disk::lock(&crate::native::state_dir()).await?)
+        Some(
+            crate::native::disk::observed_lock(
+                &crate::native::state_dir(),
+                "native_storage_archive_cleanup",
+                attempt,
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -317,7 +333,12 @@ async fn prefetch_into(
         // A best-effort warmer never queues behind active filesystem mutation.
         let state = crate::native::state_dir();
         let _disk = if crate::native::enabled() {
-            match crate::file_lock::exclusive(&state.join("storage.lock"), "Native storage busy.") {
+            match crate::native::disk::try_storage_lock(
+                &state,
+                "native_storage_archive_prefetch",
+                &descriptor.project_id,
+                "Native storage busy.",
+            ) {
                 Ok(guard) => Some(guard),
                 Err(error) if error.status == 409 => return Ok(()),
                 Err(error) => return Err(error),

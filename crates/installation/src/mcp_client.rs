@@ -9,14 +9,15 @@ use crate::{
     },
     service::Service,
     store::Db,
-    validation::text,
+    validation::{encoded_size, text},
 };
 use reqwest::{
     Method,
     header::{HeaderMap, HeaderValue},
 };
 use serde_json::{Map, Value, json};
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
+use tokio::time::{Instant, timeout_at};
 
 pub const MODERN: &str = "2026-07-28";
 
@@ -32,6 +33,11 @@ pub const VERSIONS: &[&str] = &[
 /// Offered to servers without the modern protocol, and chosen for legacy clients.
 pub const LEGACY: &str = "2025-11-25";
 const MAX_TOOLS: usize = 1000;
+const UPSTREAM_ACCESS_DENIED: &str = "mcp-upstream-access-denied";
+
+pub(crate) fn upstream_access_denied(error: &Error) -> bool {
+    error.code.as_deref() == Some(UPSTREAM_ACCESS_DENIED)
+}
 
 pub fn client_info() -> Value {
     json!({
@@ -83,9 +89,48 @@ struct HttpTransport {
     allow_private: bool,
     bearer: String,
     session: Option<String>,
+    response_budget: Option<usize>,
+    on_access_denied: Option<DenialCallback>,
+    catalogue_credential: Option<CatalogueCredential>,
+}
+
+type DenialCallback = Box<dyn Fn() + Send + Sync>;
+
+fn report_access_denied(handler: &Option<DenialCallback>, status: u16) {
+    if matches!(status, 401 | 403)
+        && let Some(handler) = handler
+    {
+        handler();
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CatalogueCredential {
+    pub(crate) fingerprint: Option<blake3::Hash>,
+    pub(crate) expires_at: Option<i64>,
+}
+
+pub(crate) struct DiscoveredCatalogue {
+    pub(crate) tools: Vec<Value>,
+    pub(crate) publication: Option<crate::mcp_server::gateway_catalog::CataloguePublication>,
 }
 
 impl Client {
+    pub(crate) fn catalogue_publication(
+        &self,
+        s: &Service,
+        server: &McpServer,
+    ) -> Option<crate::mcp_server::gateway_catalog::CataloguePublication> {
+        match &self.transport {
+            Transport::Http(http) => http.catalogue_credential.map(|credential| {
+                s.mcps
+                    .gateway_catalogs
+                    .register(&server.id, server.revision, credential)
+            }),
+            Transport::Stdio(_) => None,
+        }
+    }
+
     /// Connects with the stored credentials, refreshing OAuth tokens that expired
     /// or that the server rejects.
     pub async fn connect_server(s: &Service, server: &McpServer) -> Result<Self> {
@@ -111,6 +156,41 @@ impl Client {
         Self::connect_authorized(s, server, Authorization::live(s, authority)).await
     }
 
+    /// Background discovery owns a credential snapshot. Refreshing OAuth is
+    /// left to live requests, which serialize the exchange and its commit.
+    pub(crate) async fn begin_catalog_refresh(
+        s: &Service,
+        server: &McpServer,
+        authorize: Authorization,
+        deadline: Instant,
+        response_budget: usize,
+        on_access_denied: Option<DenialCallback>,
+    ) -> Result<Self> {
+        if !server.is_http() {
+            return Err(Error::bad("Background catalogue discovery requires HTTP."));
+        }
+        timeout_at(deadline, async {
+            authorize.recheck().await?;
+            let secrets = s.mcps.server_secrets(s, &server.id).await?;
+            let authorize = Some(authorize);
+            let mut transport = Self::transport(s, server, &secrets, &authorize).await?;
+            if let Transport::Http(http) = &mut transport {
+                http.response_budget = Some(response_budget);
+                http.on_access_denied = on_access_denied;
+            }
+            Ok::<_, Error>(Self::new(transport, MODERN, authorize))
+        })
+        .await
+        .map_err(|_| Error::timeout("MCP catalogue connection timed out."))?
+    }
+
+    pub(crate) async fn negotiate_catalog_refresh(&mut self) -> Result<()> {
+        if !self.probe_modern().await? {
+            self.open_legacy_session().await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn connect_authorized(
         s: &Service,
         server: &McpServer,
@@ -119,21 +199,21 @@ impl Client {
         let authorize = authorize.for_service(s);
         let refreshable =
             |secrets: &McpSecrets| server.uses_oauth() && !secrets.refresh_token().is_empty();
-        let mut secrets = s.mcps.server_secrets(s, &server.id).await?;
+        let (mut secrets, mut credentials) = s.mcps.server_credentials(s, &server.id).await?;
         let expired = secrets
             .token_expires_at
             .is_some_and(|time| time <= crate::config::now());
         if expired && refreshable(&secrets) {
             crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
-            secrets = s.mcps.server_secrets(s, &server.id).await?;
+            (secrets, credentials) = s.mcps.server_credentials(s, &server.id).await?;
         }
         authorize.recheck().await?;
-        let first = Self::open(s, server, &secrets, authorize.clone()).await;
+        let first = Self::open(s, server, &secrets, credentials, authorize.clone()).await;
         if first.as_ref().is_err_and(Error::is_unauthorized) && refreshable(&secrets) {
             crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
-            let secrets = s.mcps.server_secrets(s, &server.id).await?;
+            let (secrets, credentials) = s.mcps.server_credentials(s, &server.id).await?;
             authorize.recheck().await?;
-            return Self::open(s, server, &secrets, authorize.clone()).await;
+            return Self::open(s, server, &secrets, credentials, authorize).await;
         }
         first
     }
@@ -151,21 +231,27 @@ impl Client {
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
-        Self::list_tools_live(s, server, Authorization::new(s, authorize)).await
+        Self::list_tools_live(s, server, Authorization::new(s, authorize))
+            .await
+            .map(|catalogue| catalogue.tools)
     }
 
     pub(crate) async fn list_tools_live(
         s: &Service,
         server: &McpServer,
         authorize: Authorization,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<DiscoveredCatalogue> {
         let authorize = authorize.for_service(s);
         let mut client = Self::connect_authorized(s, server, authorize.clone()).await?;
         authorize.recheck().await?;
+        let publication = client.catalogue_publication(s, server);
         let tools = client.discover().await;
         client.close().await;
         authorize.recheck().await?;
-        tools
+        Ok(DiscoveredCatalogue {
+            tools: tools?,
+            publication,
+        })
     }
 
     fn new(transport: Transport, protocol: &str, authorization: Option<Authorization>) -> Self {
@@ -186,37 +272,57 @@ impl Client {
         s: &Service,
         server: &McpServer,
         secrets: &McpSecrets,
+        credentials: Option<blake3::Hash>,
         authorize: Authorization,
     ) -> Result<Self> {
         let authorization = Some(authorize);
-        let mut client = Self::new(
-            Self::transport(s, server, secrets, &authorization).await?,
-            MODERN,
-            authorization,
-        );
-        match client.request("server/discover", json!({})).await {
+        let mut transport = Self::transport(s, server, secrets, &authorization).await?;
+        if let Transport::Http(http) = &mut transport {
+            http.catalogue_credential = Some(CatalogueCredential {
+                fingerprint: credentials,
+                expires_at: if server.uses_oauth() {
+                    secrets.token_expires_at
+                } else {
+                    None
+                },
+            });
+            let mcps = Arc::clone(&s.mcps);
+            let (id, revision) = (server.id.clone(), server.revision);
+            http.on_access_denied = Some(Box::new(move || {
+                mcps.gateway_catalogs
+                    .invalidate_matching(&id, revision, credentials);
+            }));
+        }
+        let mut client = Self::new(transport, MODERN, authorization);
+        match client.probe_modern().await {
+            Ok(true) => Ok(client),
+            Ok(false) => client.initialize_legacy(s, server, secrets).await,
+            Err(error) => {
+                client.close().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// True when the modern session is ready, false when legacy negotiation
+    /// is appropriate for this transport and response.
+    async fn probe_modern(&mut self) -> Result<bool> {
+        match self.request("server/discover", json!({})).await {
             Ok(discovery) => {
                 let modern = discovery["supportedVersions"]
                     .as_array()
                     .is_some_and(|versions| versions.iter().any(|v| v == MODERN));
                 if !modern {
-                    client.close().await;
                     return Err(unsupported_version());
                 }
-                client.capabilities = discovery["capabilities"].clone();
-                Ok(client)
+                self.capabilities = discovery["capabilities"].clone();
+                Ok(true)
             }
-            Err(error) if [401, 403].contains(&error.status) => {
-                client.close().await;
+            Err(error) if [401, 403].contains(&error.status) || upstream_access_denied(&error) => {
                 Err(error)
             }
-            Err(error) if [400, 405, 501].contains(&error.status) || client.is_stdio() => {
-                client.initialize_legacy(s, server, secrets).await
-            }
-            Err(error) => {
-                client.close().await;
-                Err(error)
-            }
+            Err(error) if [400, 405, 501].contains(&error.status) || self.is_stdio() => Ok(false),
+            Err(error) => Err(error),
         }
     }
 
@@ -238,23 +344,25 @@ impl Client {
         } else {
             self
         };
-        client.protocol = LEGACY.into();
+        client.open_legacy_session().await?;
+        Ok(client)
+    }
+
+    async fn open_legacy_session(&mut self) -> Result<()> {
+        self.protocol = LEGACY.into();
         let params = json!({
             "protocolVersion": LEGACY,
             "capabilities": {},
             "clientInfo": client_info(),
         });
-        let result = client.request("initialize", params).await?;
+        let result = self.request("initialize", params).await?;
         let version = text(&result, "protocolVersion");
         if !VERSIONS[1..].contains(&version) {
             return Err(unsupported_version());
         }
-        client.protocol = version.into();
-        client.capabilities = result["capabilities"].clone();
-        client
-            .notify("notifications/initialized", json!({}))
-            .await?;
-        Ok(client)
+        self.protocol = version.into();
+        self.capabilities = result["capabilities"].clone();
+        self.notify("notifications/initialized", json!({})).await
     }
 
     async fn transport(
@@ -274,6 +382,9 @@ impl Client {
                 allow_private: server.allow_private_network,
                 bearer: bearer.into(),
                 session: None,
+                response_budget: None,
+                on_access_denied: None,
+                catalogue_credential: None,
             }));
         }
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
@@ -346,6 +457,18 @@ impl Client {
     }
 
     pub async fn discover(&mut self) -> Result<Vec<Value>> {
+        self.discover_tools(None).await
+    }
+
+    pub(crate) async fn discover_catalog(
+        &mut self,
+        bytes: usize,
+        pages: usize,
+    ) -> Result<Vec<Value>> {
+        self.discover_tools(Some((bytes, pages))).await
+    }
+
+    async fn discover_tools(&mut self, mut budget: Option<(usize, usize)>) -> Result<Vec<Value>> {
         if self.capabilities.get("tools").is_none() {
             return Ok(vec![]);
         }
@@ -353,25 +476,35 @@ impl Client {
         let mut cursors = HashSet::new();
         let mut cursor = Value::Null;
         loop {
+            if let Some((_, pages)) = &mut budget {
+                *pages = pages.checked_sub(1).ok_or_else(|| {
+                    Error::too_large("MCP catalogue exceeds the background page limit.")
+                })?;
+            }
             let params = if cursor.is_null() {
                 json!({})
             } else {
                 json!({ "cursor": cursor })
             };
             let page = self.request("tools/list", params).await?;
+            if let Some((bytes, _)) = &mut budget {
+                *bytes = bytes.checked_sub(encoded_size(&page)?).ok_or_else(|| {
+                    Error::too_large("MCP catalogue exceeds the background byte limit.")
+                })?;
+            }
             let Some(batch) = page["tools"].as_array() else {
                 return Err(Error::bad_gateway(
                     "MCP server returned an invalid tool catalog.",
                 ));
             };
-            tools.extend(batch.iter().cloned());
             cursor = page["nextCursor"].clone();
             let repeated = !cursor.is_null() && !cursors.insert(cursor.to_string());
-            if tools.len() > MAX_TOOLS || repeated {
+            if tools.len().saturating_add(batch.len()) > MAX_TOOLS || repeated {
                 return Err(Error::bad_gateway(
                     "Tool catalog is too large or has an invalid cursor.",
                 ));
             }
+            tools.extend(batch.iter().cloned());
             if cursor.is_null() {
                 return Ok(tools);
             }
@@ -393,12 +526,25 @@ impl Client {
             }
         }
     }
+
+    pub(crate) async fn close_catalog_refresh(self) {
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.close()).await;
+    }
 }
 
 fn check_status(status: u16) -> Result<()> {
     match status {
         200..=299 => Ok(()),
-        401 => Err(Error::unauthorized("Sign in to connect this server.")),
+        401 => Err(Error::coded(
+            401,
+            UPSTREAM_ACCESS_DENIED,
+            "Sign in to connect this server.",
+        )),
+        403 => Err(Error::coded(
+            502,
+            UPSTREAM_ACCESS_DENIED,
+            "MCP request failed.",
+        )),
         400 | 405 => Err(Error::new(status, "MCP protocol negotiation failed.")),
         _ => Err(Error::bad_gateway("MCP request failed.")),
     }
@@ -427,16 +573,41 @@ impl HttpTransport {
         headers(&self.bearer, protocol, self.session.as_deref())
     }
 
-    async fn post(&self, headers: HeaderMap, frame: &Frame) -> Result<network::Response> {
+    async fn post(
+        &mut self,
+        headers: HeaderMap,
+        frame: &Frame,
+        legacy_initialize: bool,
+    ) -> Result<network::Response> {
         let body = serde_json::to_vec(frame)?;
-        network::fetch(
+        let session = &mut self.session;
+        let on_access_denied = &self.on_access_denied;
+        let response = network::fetch_with_response_limit(
             &self.url,
             Method::POST,
             headers,
             Some(body),
             self.allow_private,
+            self.response_budget,
+            |status, headers| {
+                report_access_denied(on_access_denied, status);
+                if legacy_initialize
+                    && (200..300).contains(&status)
+                    && let Some(value) = headers
+                        .get("mcp-session-id")
+                        .and_then(|value| value.to_str().ok())
+                {
+                    // Successful headers can allocate an upstream session
+                    // even if the initialize body times out or is too large.
+                    *session = Some(value.to_owned());
+                }
+            },
         )
-        .await
+        .await?;
+        if let Some(remaining) = &mut self.response_budget {
+            *remaining = remaining.saturating_sub(response.bytes.len());
+        }
+        Ok(response)
     }
 
     async fn request(
@@ -458,9 +629,10 @@ impl HttpTransport {
                 headers.insert("mcp-name", value);
             }
         }
+        let legacy_initialize = self.response_budget.is_some() && !modern && method == "initialize";
         let method = method.to_owned();
         let frame = Frame::strict(Message::Request { id, method, params });
-        let response = self.post(headers, &frame).await?;
+        let response = self.post(headers, &frame, legacy_initialize).await?;
         check_status(response.status)?;
         if !modern
             && let Some(value) = response
@@ -478,14 +650,19 @@ impl HttpTransport {
         response_result(&reply, id)
     }
 
-    async fn notify(&self, protocol: &str, method: &str, params: Value) -> Result<()> {
+    async fn notify(&mut self, protocol: &str, method: &str, params: Value) -> Result<()> {
         let method = method.to_owned();
         let frame = Frame::strict(Message::Notification { method, params });
-        let response = self.post(self.headers(protocol)?, &frame).await?;
-        if !(200..300).contains(&response.status) {
-            return Err(Error::bad_gateway("MCP initialization failed."));
+        let response = self.post(self.headers(protocol)?, &frame, false).await?;
+        match response.status {
+            200..=299 => Ok(()),
+            401 | 403 => Err(Error::coded(
+                502,
+                UPSTREAM_ACCESS_DENIED,
+                "MCP initialization failed.",
+            )),
+            _ => Err(Error::bad_gateway("MCP initialization failed.")),
         }
-        Ok(())
     }
 
     /// Ends a legacy session. Best effort: the server expires abandoned sessions.
@@ -498,7 +675,15 @@ impl HttpTransport {
         };
         let _ = tokio::time::timeout(
             Duration::from_secs(5),
-            network::fetch(&self.url, Method::DELETE, headers, None, self.allow_private),
+            network::fetch_with_response_limit(
+                &self.url,
+                Method::DELETE,
+                headers,
+                None,
+                self.allow_private,
+                self.response_budget.map(|_| 4096),
+                |status, _| report_access_denied(&self.on_access_denied, status),
+            ),
         )
         .await;
     }
@@ -647,7 +832,14 @@ createInterface({ input: process.stdin }).on('line', async line => {
         };
         let authorization = Authorization::new(&service, authorization);
         let pending = tokio::spawn(async move {
-            Client::open(&service, &server, &McpSecrets::default(), authorization).await
+            Client::open(
+                &service,
+                &server,
+                &McpSecrets::default(),
+                None,
+                authorization,
+            )
+            .await
         });
         tokio::time::timeout(Duration::from_secs(10), async {
             while !tokio::fs::try_exists(&probing).await.unwrap() {

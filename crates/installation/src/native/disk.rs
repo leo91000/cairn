@@ -6,7 +6,7 @@ use std::{
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub(crate) const MIB: u64 = 1_048_576;
@@ -678,9 +678,92 @@ pub(crate) async fn recover_exports(state: &Path) -> Result<()> {
 pub(crate) struct StorageGuard {
     _storage: crate::file_lock::Guard,
     _priority: crate::file_lock::Guard,
+    _observation: Option<StorageObservation>,
 }
 
+pub(crate) struct StorageOwnership {
+    _lock: crate::file_lock::Guard,
+    _observation: Option<StorageObservation>,
+}
+
+struct StorageObservation {
+    operation: &'static str,
+    id: String,
+    acquired: Instant,
+    acquired_at_ms: i64,
+    wait_ms: u64,
+}
+
+impl StorageObservation {
+    fn new(operation: &'static str, id: &str, started: Instant) -> Option<Self> {
+        if !tracing::level_enabled!(tracing::Level::INFO) {
+            return None;
+        }
+
+        let acquired = Instant::now();
+        let safe_id = if id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            id
+        } else {
+            crate::performance::identity(id)
+        };
+        Some(Self {
+            operation,
+            id: safe_id.to_owned(),
+            acquired,
+            acquired_at_ms: crate::config::now(),
+            wait_ms: acquired.duration_since(started).as_millis() as u64,
+        })
+    }
+}
+
+impl Drop for StorageObservation {
+    fn drop(&mut self) {
+        let operation = self.operation;
+        let id = std::mem::take(&mut self.id);
+        let acquired_at_ms = self.acquired_at_ms;
+        let wait_ms = self.wait_ms;
+        let held_ms = self.acquired.elapsed().as_millis() as u64;
+        crate::performance::try_record_detached(move |delivery| {
+            tracing::info!(
+                target: "cairn_performance",
+                operation = "native_storage_lock",
+                owner = operation,
+                id,
+                acquired_at_ms,
+                wait_ms,
+                held_ms,
+                dropped_reports_total = delivery.dropped_reports_total,
+                "Native storage ownership released"
+            );
+        });
+    }
+}
+
+pub(crate) fn try_storage_lock(
+    state: &Path,
+    operation: &'static str,
+    id: &str,
+    busy: &'static str,
+) -> Result<StorageOwnership> {
+    let started = Instant::now();
+    let lock = crate::file_lock::exclusive(&state.join("storage.lock"), busy)?;
+    Ok(StorageOwnership {
+        _lock: lock,
+        _observation: StorageObservation::new(operation, id, started),
+    })
+}
+
+#[cfg(test)]
 pub(crate) async fn lock(state: &Path) -> Result<StorageGuard> {
+    observed_lock(state, "native_storage_test", "").await
+}
+
+pub(crate) async fn observed_lock(
+    state: &Path,
+    operation: &'static str,
+    id: &str,
+) -> Result<StorageGuard> {
+    let started = Instant::now();
     tokio::time::timeout(Duration::from_secs(300), async {
         // Every foreground waiter holds shared intent, across processes. The
         // warmer probes this lock and cancels its network transfer promptly.
@@ -705,6 +788,7 @@ pub(crate) async fn lock(state: &Path) -> Result<StorageGuard> {
                     return Ok(StorageGuard {
                         _storage: owner,
                         _priority: priority,
+                        _observation: StorageObservation::new(operation, id, started),
                     });
                 }
                 Err(error) if error.status == 409 => {

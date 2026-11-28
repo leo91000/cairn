@@ -56,38 +56,47 @@ impl Warmer {
         let disk_mib = value["diskMiB"]
             .as_u64()
             .ok_or_else(|| Error::bad("Missing native base size."))?;
-        let groups = if value["individual"] == true {
+        let individual = value["individual"] == true;
+        let groups = if individual {
             archives.into_iter().map(|archive| vec![archive]).collect()
         } else {
             vec![archives]
         };
-        let mut queue = self.queue.lock().await;
+        let mut candidates = Vec::new();
         for archives in groups {
             if !Bases::eligible(&archives, disk_mib) {
                 continue;
             }
             let key = bases.key(&archives, disk_mib)?;
-            if value["individual"] != true {
-                queue.failures.remove(&key);
+            candidates.push(Job {
+                archives,
+                disk_mib,
+                key,
+            });
+        }
+        if candidates.is_empty() {
+            return Ok(());
+        }
+
+        let mut queue = self.queue.lock().await;
+        for job in candidates {
+            if !individual {
+                queue.failures.remove(&job.key);
             }
             if queue
                 .failures
-                .get(&key)
+                .get(&job.key)
                 .is_some_and(|failure| failure.retry_at > Instant::now())
             {
                 continue;
             }
-            if queue.jobs.iter().any(|job| job.key == key) {
+            if queue.jobs.iter().any(|queued| queued.key == job.key) {
                 continue;
             }
             if queue.jobs.len() == 64 {
                 queue.jobs.pop_front();
             }
-            queue.jobs.push_back(Job {
-                archives,
-                disk_mib,
-                key,
-            });
+            queue.jobs.push_back(job);
         }
         if queue.running {
             return Ok(());
@@ -118,6 +127,14 @@ impl Warmer {
                 };
                 job
             };
+            match bases.can_warm(&job.archives, job.disk_mib).await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    self.warming_failed(&job.key, &error).await;
+                    continue;
+                }
+            }
             let limits = budget.lock().await;
             let limit = limits["limits"]["diskMiB"]
                 .as_u64()
@@ -138,8 +155,10 @@ impl Warmer {
                 }
                 Err(_) => continue,
             };
-            let owner = match crate::file_lock::exclusive(
-                &bases.state.join("storage.lock"),
+            let owner = match super::disk::try_storage_lock(
+                &bases.state,
+                "native_storage_base_warmer",
+                &job.key,
                 "Native storage is busy.",
             ) {
                 Ok(owner) => owner,
@@ -167,6 +186,9 @@ impl Warmer {
             let result = tokio::task::spawn_blocking(move || {
                 let _owner = owner;
                 handle.block_on(async {
+                    if !worker.can_warm(&work.archives, work.disk_mib).await? {
+                        return Ok(());
+                    }
                     let policy =
                         match tokio::fs::read(worker.state.join("storage-policy.json")).await {
                             Ok(bytes) => crate::storage::policy::from_persisted(&bytes)?,
@@ -198,43 +220,51 @@ impl Warmer {
             let _ = watcher.await;
             if build_stop.is_cancelled() && !stop.is_cancelled() {
                 self.retry(job).await;
-            } else if !matches!(result, Ok(Ok(()))) {
-                let mut queue = self.queue.lock().await;
-                if queue.failures.len() >= 128 && !queue.failures.contains_key(&job.key) {
-                    let oldest = queue
-                        .failures
-                        .iter()
-                        .min_by_key(|(_, failure)| failure.retry_at)
-                        .map(|(key, _)| key.clone());
-                    if let Some(key) = oldest {
-                        queue.failures.remove(&key);
-                    }
-                }
-                let failure = queue.failures.entry(job.key.clone()).or_insert(Failure {
-                    attempts: 0,
-                    retry_at: Instant::now(),
-                });
-                failure.attempts = failure.attempts.saturating_add(1).min(6);
-                let seconds = if failure.attempts >= 6 {
-                    3600
-                } else {
-                    10u64 << (failure.attempts - 1)
-                };
-                failure.retry_at = Instant::now() + Duration::from_secs(seconds);
-                match &result {
-                    Ok(Err(error)) => {
-                        tracing::warn!(key = %job.key, retry_seconds = seconds, status = error.status, message = %error.message, "Native base warming failed; publication was not completed");
-                    }
+            } else {
+                match result {
+                    Ok(Err(error)) => self.warming_failed(&job.key, &error).await,
                     Err(error) => {
+                        let seconds = self.backoff(&job.key).await;
                         tracing::warn!(key = %job.key, retry_seconds = seconds, %error, "Native base warming worker did not finish");
                     }
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => {
+                        self.queue.lock().await.failures.remove(&job.key);
+                    }
                 }
-            } else {
-                self.queue.lock().await.failures.remove(&job.key);
             }
             drop(cancellation);
         }
+    }
+
+    async fn warming_failed(&self, key: &str, error: &Error) {
+        let seconds = self.backoff(key).await;
+        tracing::warn!(key, retry_seconds = seconds, status = error.status, message = %error.message, "Native base warming failed; publication was not completed");
+    }
+
+    async fn backoff(&self, key: &str) -> u64 {
+        let mut queue = self.queue.lock().await;
+        if queue.failures.len() >= 128 && !queue.failures.contains_key(key) {
+            let oldest = queue
+                .failures
+                .iter()
+                .min_by_key(|(_, failure)| failure.retry_at)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = oldest {
+                queue.failures.remove(&key);
+            }
+        }
+        let failure = queue.failures.entry(key.to_owned()).or_insert(Failure {
+            attempts: 0,
+            retry_at: Instant::now(),
+        });
+        failure.attempts = failure.attempts.saturating_add(1).min(6);
+        let seconds = if failure.attempts >= 6 {
+            3600
+        } else {
+            10u64 << (failure.attempts - 1)
+        };
+        failure.retry_at = Instant::now() + Duration::from_secs(seconds);
+        seconds
     }
 
     async fn retry(&self, job: Job) {

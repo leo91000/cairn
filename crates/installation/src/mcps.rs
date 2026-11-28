@@ -43,6 +43,7 @@ const KNOWN_FAILURES: [&str; 3] = [
 #[derive(Default)]
 pub struct Mcps {
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub(super) gateway_catalogs: crate::mcp_server::gateway_catalog::Catalogs,
 }
 
 pub async fn callback_url(s: &Service) -> Result<String> {
@@ -237,14 +238,14 @@ fn record_failure(server: &mut McpServer, error: &Error) {
 
 impl Mcps {
     pub async fn lock(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        self.locks
+        let connection = self
+            .locks
             .lock()
             .await
             .entry(id.into())
             .or_default()
-            .clone()
-            .lock_owned()
-            .await
+            .clone();
+        connection.lock_owned().await
     }
 
     pub async fn server(&self, s: &Service, id: &str) -> Result<McpServer> {
@@ -260,6 +261,14 @@ impl Mcps {
     }
 
     pub async fn server_secrets(&self, s: &Service, id: &str) -> Result<McpSecrets> {
+        Ok(self.server_credentials(s, id).await?.0)
+    }
+
+    pub(crate) async fn server_credentials(
+        &self,
+        s: &Service,
+        id: &str,
+    ) -> Result<(McpSecrets, Option<blake3::Hash>)> {
         let id = id.to_owned();
         let ciphertext = s
             .store
@@ -269,10 +278,11 @@ impl Mcps {
             })
             .await?;
         match ciphertext {
-            Some(bytes) => Ok(serde_json::from_slice(
-                &s.vault.decrypt_bytes(&id, &bytes)?,
-            )?),
-            None => Ok(McpSecrets::default()),
+            Some(bytes) => Ok((
+                serde_json::from_slice(&s.vault.decrypt_bytes(&id, &bytes)?)?,
+                Some(blake3::hash(&bytes)),
+            )),
+            None => Ok((McpSecrets::default(), None)),
         }
     }
 
@@ -585,6 +595,12 @@ impl Mcps {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        let result = result
+            .clone()
+            .map(|tools| crate::mcp_client::DiscoveredCatalogue {
+                tools,
+                publication: None,
+            });
         self.record_discovery_live(
             s,
             server,
@@ -598,22 +614,59 @@ impl Mcps {
         &self,
         s: &Service,
         mut server: McpServer,
-        result: &Result<Vec<Value>>,
+        result: Result<crate::mcp_client::DiscoveredCatalogue>,
         authorize: crate::authorization::Authorization,
     ) -> Result<()> {
         authorize.recheck().await?;
-        match result {
-            Ok(tools) => server.record_success(tools.clone(), now()),
-            Err(error) => record_failure(&mut server, error),
-        }
-        let record = server;
+        let revoked = result
+            .as_ref()
+            .err()
+            .filter(|error| {
+                error.is_unauthorized() && !crate::mcp_client::upstream_access_denied(error)
+            })
+            .map(|_| server.id.clone());
+        let publication = match result {
+            Ok(catalogue) => {
+                server.record_success(catalogue.tools, now());
+                catalogue.publication
+            }
+            Err(error) => {
+                record_failure(&mut server, &error);
+                None
+            }
+        };
+        let id = server.id.clone();
+        let candidate = publication.map(|publication| {
+            let tools = crate::mcp_server::gateway_catalog::management_candidate(&server.tools);
+            (publication, tools)
+        });
+        let publish_authority = authorize.clone();
         s.store
             .transaction(move |db| {
                 authorize.authorize(db)?;
-                db.save_mcp_server(&record)?;
-                Ok(())
+                db.save_mcp_server(&server)
             })
-            .await
+            .await?;
+        if let Some((publication, tools)) = candidate {
+            // The durable management result is already committed. Its optional
+            // gateway cache still has to pass the current local authority check.
+            let mcps = Arc::clone(&s.mcps);
+            let _ = s
+                .store
+                .write(move |db| {
+                    publish_authority.check_local(db)?;
+                    let credentials = db.mcp_credentials(&id)?;
+                    if publication.matches_credentials(credentials.as_deref().map(blake3::hash)) {
+                        mcps.gateway_catalogs.insert(publication, tools);
+                    }
+                    Ok(())
+                })
+                .await;
+        }
+        if let Some(id) = revoked {
+            self.gateway_catalogs.invalidate(&id);
+        }
+        Ok(())
     }
 
     pub async fn test(&self, s: &Service, id: &str) -> Result<McpView> {
@@ -650,7 +703,7 @@ impl Mcps {
             })
             .await?;
         let tools = crate::mcp_client::Client::list_tools_live(s, &server, authorize.clone()).await;
-        self.record_discovery_live(s, server, &tools, authorize)
+        self.record_discovery_live(s, server, tools, authorize)
             .await?;
         self.view(s, &self.server(s, id).await?).await
     }
@@ -869,6 +922,19 @@ mod management_authorization_tests {
         plugin_grant_fixture::{Fixture, contribution, support},
     };
     use std::sync::{Arc, atomic::Ordering};
+
+    #[tokio::test]
+    async fn queued_work_for_one_connection_does_not_hold_the_lock_map() {
+        let mcps = Mcps::default();
+        let _first = mcps.lock("first").await;
+        let mut waiting = std::pin::pin!(mcps.lock("first"));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+
+        let other = tokio::time::timeout(std::time::Duration::from_secs(1), mcps.lock("other"))
+            .await
+            .expect("a different connection must remain available");
+        drop(other);
+    }
 
     #[tokio::test]
     async fn connection_updates_recheck_delegation_after_waiting_for_the_lock() {
