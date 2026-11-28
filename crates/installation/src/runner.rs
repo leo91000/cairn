@@ -11,7 +11,7 @@ pub(crate) use broker::validate as validate_plan;
 pub(crate) use client::cleanup_result as client_cleanup_result;
 pub(crate) use client::{
     ControllerResult, NATIVE_CLEANUP_RETIREMENT_QUERY, observe_cleanup_retirement,
-    observe_plain_finalization, plain_finalization, wait_for_exit,
+    observe_plain_finalization_failure, plain_finalization_failure, wait_for_exit,
 };
 pub use client::{TerminalReason, client};
 

@@ -127,6 +127,7 @@ async fn stop_and_expiration_during_native_delete_preserve_the_fence() {
         (false, NativeDeleteResponse::Deferred),
         (false, NativeDeleteResponse::Stopped),
         (true, NativeDeleteResponse::Stopped),
+        (false, NativeDeleteResponse::Aborted),
         (false, NativeDeleteResponse::FlushFailed),
         (false, NativeDeleteResponse::Flushed),
     ] {
@@ -138,6 +139,7 @@ async fn stop_and_expiration_during_native_delete_preserve_the_fence() {
 enum NativeDeleteResponse {
     Deferred,
     Stopped,
+    Aborted,
     FlushFailed,
     Flushed,
 }
@@ -167,7 +169,13 @@ async fn request_during_native_delete(stop: bool, response: NativeDeleteResponse
             "StatusCode": crate::runner::CONTROLLER_FAILED,
             "FinalizationFailed": true,
         }),
-        NativeDeleteResponse::Stopped | NativeDeleteResponse::Flushed => json!({}),
+        NativeDeleteResponse::Stopped => json!({}),
+        NativeDeleteResponse::Aborted => json!({ "StatusCode": 0, "PhysicalFinalized": true }),
+        NativeDeleteResponse::Flushed => json!({
+            "StatusCode": 0,
+            "PhysicalFinalized": true,
+            "NativeCleanupRetired": { "attemptId": attempt },
+        }),
     };
     let app = Router::new().route(
         "/runs/{attempt}",
@@ -181,7 +189,7 @@ async fn request_during_native_delete(stop: bool, response: NativeDeleteResponse
             }
         }),
     );
-    let app = if response == NativeDeleteResponse::Flushed {
+    let app = if response == NativeDeleteResponse::Aborted {
         app.route(
             "/runs/{attempt}/wait",
             post(|| async { Json(json!({ "StatusCode": 0, "PhysicalFinalized": true })) }),
@@ -302,7 +310,7 @@ async fn request_during_native_delete(stop: bool, response: NativeDeleteResponse
                 stopped.error.as_deref(),
                 Some("Native disk cleanup is still in progress."),
             ),
-            NativeDeleteResponse::Stopped => assert_eq!(
+            NativeDeleteResponse::Stopped | NativeDeleteResponse::Aborted => assert_eq!(
                 stopped.error.as_deref(),
                 Some("Native disk cleanup could not be confirmed before the environment expired."),
             ),

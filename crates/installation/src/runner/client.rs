@@ -510,22 +510,24 @@ pub(crate) async fn observe_cleanup_retirement(
     wait_result(http, url, token, NATIVE_CLEANUP_RETIREMENT_QUERY).await
 }
 
-/// Plain, attempt-scoped finalization. Structured native receipts are
-/// evaluated against current cleanup state through the controller's DELETE path.
-pub(crate) fn plain_finalization(value: &Value) -> Option<ControllerResult> {
+/// Plain, attempt-scoped flush failure. A structured Native receipt must be
+/// evaluated against current cleanup state by the controller's DELETE path.
+pub(crate) fn plain_finalization_failure(value: &Value) -> Option<ControllerResult> {
     if !value["NativeCleanup"].is_null() {
         return None;
     }
-    terminal_result(value, "").ok()
+    terminal_result(value, "")
+        .ok()
+        .filter(|result| result.finalization_failed)
 }
 
-pub(crate) async fn observe_plain_finalization(
+pub(crate) async fn observe_plain_finalization_failure(
     http: &reqwest::Client,
     url: &str,
     token: &str,
 ) -> Result<Option<ControllerResult>> {
     let value = wait_value(http, url, token, "").await?;
-    Ok(plain_finalization(&value))
+    Ok(plain_finalization_failure(&value))
 }
 
 async fn wait_result(
@@ -752,13 +754,13 @@ mod tests {
             "StatusCode": super::super::CONTROLLER_FAILED,
             "FinalizationFailed": true,
         });
-        assert!(plain_finalization(&receipt).is_some_and(|result| result.finalization_failed));
+        assert!(plain_finalization_failure(&receipt).is_some());
         receipt["NativeCleanup"] = json!({
             "attemptId": "different-attempt",
             "workloadFenced": true,
             "message": "Pending Native cleanup",
         });
-        assert!(plain_finalization(&receipt).is_none());
+        assert!(plain_finalization_failure(&receipt).is_none());
     }
 
     #[tokio::test]

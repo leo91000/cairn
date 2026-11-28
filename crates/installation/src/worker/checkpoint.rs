@@ -587,13 +587,8 @@ impl RunCheckpoint {
     }
 
     pub(super) fn native_flush_confirmed(&self) -> bool {
-        self.runner_id().is_some_and(|attempt| {
-            self.native_flushed_attempt.as_deref() == Some(attempt)
-                || self.progress.as_ref().is_some_and(|progress| {
-                    progress.runner_id.as_deref() == Some(attempt)
-                        && progress.finalized_at.is_some()
-                })
-        })
+        self.runner_id()
+            .is_some_and(|attempt| self.native_flushed_attempt.as_deref() == Some(attempt))
     }
 
     /// Project the closing attempt without loading its workspace plan or provider progress.

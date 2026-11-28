@@ -91,6 +91,8 @@ turn's end time to distinguish its inputs from later messages.
 If expiration precedes receipt persistence, detachment preserves the original
 turn end and any explicit Stop or confirmed flush. Without a verdict it records
 that cleanup could not be confirmed.
+The native stop response identifies a matching clean disk retirement separately
+from generic physical finalization, which also covers an aborted close.
 The live manager checkpoint serializes fencing and reloads its durable evidence
 before heartbeat or output persistence can overwrite it. After its final
 checkpoint write, the live worker hands that attempt to deferred recovery.

@@ -154,7 +154,7 @@ impl Controller {
         let Ok(bytes) = tokio::fs::read(self.file(id, "exit")).await else {
             return json!({});
         };
-        let Ok(result) = serde_json::from_slice::<Value>(&bytes) else {
+        let Ok(mut result) = serde_json::from_slice::<Value>(&bytes) else {
             return json!({});
         };
         if crate::runner::client_cleanup_result(&result, id).is_some()
@@ -163,6 +163,17 @@ impl Controller {
             // A new fence must not report that the verified close is still pending.
             tracing::debug!(attempt = id, "Ignoring superseded native cleanup receipt");
             return json!({ "NativeCleanupRetired": { "attemptId": id } });
+        }
+        if result["PhysicalFinalized"] == true
+            && result["FinalizationFailed"] != true
+            && self
+                .cleanup_status(id)
+                .await
+                .is_ok_and(|status| status["flushed"] == true)
+        {
+            // Physical finalization also covers an aborted disk. Keep the
+            // legacy exit fields and attest native flush separately.
+            result["NativeCleanupRetired"] = json!({ "attemptId": id });
         }
         result
     }
@@ -757,6 +768,32 @@ mod tests {
 
             assert_eq!(result.unwrap(), pending);
         });
+    }
+
+    #[tokio::test]
+    async fn a_plain_native_exit_attests_flush_only_when_the_disk_was_flushed() {
+        let (_root, controller) = super::super::tests::fixture().await;
+        private_dir(&controller.state.join("native-cleanup"))
+            .await
+            .unwrap();
+        for completion in [block::Completion::Aborted, block::Completion::Flushed] {
+            let run = crate::config::id();
+            let attempt = crate::config::id();
+            std::fs::write(controller.file(&attempt, "run"), run).unwrap();
+            let exit = json!({ "StatusCode": 0, "PhysicalFinalized": true });
+            std::fs::write(controller.file(&attempt, "exit"), exit.to_string()).unwrap();
+            std::fs::write(
+                controller.file(&attempt, "cleanup-result"),
+                serde_json::to_vec(&Completed { completion }).unwrap(),
+            )
+            .unwrap();
+            let stopped = controller.stopped_result(&attempt).await;
+            let mut expected = exit;
+            if completion == block::Completion::Flushed {
+                expected["NativeCleanupRetired"] = json!({ "attemptId": attempt });
+            }
+            assert_eq!(stopped, expected);
+        }
     }
 
     #[tokio::test]
