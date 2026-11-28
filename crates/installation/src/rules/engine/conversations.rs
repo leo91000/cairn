@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS hook_rule_conversations(
  created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),
  UNIQUE(creator_account_id,key)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS hook_rule_conversations_rule ON hook_rule_conversations(rule_id);
 CREATE TABLE IF NOT EXISTS hook_rule_conversation_values(
  chat_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
  name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 40),

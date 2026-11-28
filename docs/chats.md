@@ -106,7 +106,7 @@ The message is stored and displayed exactly as typed. When a reply starts, or a 
 
 ## Execution and recovery
 
-All executions, including missions, use the chat protocol. Codex uses app-server `thread/start`, `thread/resume`, `turn/start` and `turn/steer`, tested against Codex 0.154.0. Steering includes the active `expectedTurnId`. If that turn has already finished, the message remains pending for the next turn.
+All executions use the conversation protocol. Codex uses app-server `thread/start`, `thread/resume`, `turn/start` and `turn/steer`, tested against Codex 0.154.0. Steering includes the active `expectedTurnId`. If that turn has already finished, the message remains pending for the next turn.
 
 `Chats` owns durable user messages and dispatch. `Worker` owns account selection, project locks, timeout budgets, restart fencing and execution. The Rust coding-agent adapters map engine notifications to the shared Activity format. Each active reply has a supervised process; idle chats hold no account or worker slot. Restricted agents run the same adapter inside the isolated environment, with a read-only inbox containing only that run's steering messages.
 
@@ -122,8 +122,7 @@ Validation includes authenticated API boundaries, restricted project access, liv
 
 Codex, Claude Code and OpenCode use the same `cairn_workspace.ask_questions`
 interface. It creates a questionnaire and immediately returns its ID. The agent
-can continue independent work, or report `needs_input` and end its turn while it
-waits. A **Your input** card opens the questionnaire on web; Android presents the
+can continue independent work or end its turn while it waits for the answer. A **Your input** card opens the questionnaire on web; Android presents the
 same choices in its native dialog.
 
 Each question defaults to single choice, or can allow multiple choices with
@@ -133,7 +132,7 @@ replace a missing choice. Recommendations are visible and never preselected.
 Every question needs a response before the group is submitted in one operation.
 
 Questionnaires survive navigation, restarts, turn completion and coding-agent
-changes. A `completed` outcome retires unanswered questionnaires; `needs_input`
+changes. A `completed` outcome retires unanswered questionnaires; `blocked`
 keeps them. Manual withdrawal supplies neither an answer nor approval. Answers
 steer an active turn or start a continuation, including when the ordinary queue
 is paused. Selected option IDs and labels remain separate from the comment in

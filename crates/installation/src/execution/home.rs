@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::{path::Path, time::Duration};
 
 /// Skills are installed below this guest directory.
-const GUEST_SKILLS: &str = "/home/node/.agents/skills";
+pub(super) const GUEST_SKILLS: &str = "/home/node/.agents/skills";
 
 /// Plugin run credentials (see `plugins::run_credentials`) live under these paths; the
 /// record of every file written lives beside the home, outside the guest.
@@ -181,7 +181,11 @@ pub(super) async fn configure_git(
 }
 
 /// Copies the selected skills into the home and points their snapshot at the guest copy.
-async fn install_skills(home: &Path, skills: &Value, config: &Config) -> Result<Vec<Value>> {
+pub(super) async fn install_skills(
+    home: &Path,
+    skills: &Value,
+    config: &Config,
+) -> Result<Vec<Value>> {
     let mut installed = Vec::new();
     for (index, skill) in skills.as_array().into_iter().flatten().enumerate() {
         let relative = format!("{index}/{}", text(skill, "name"));

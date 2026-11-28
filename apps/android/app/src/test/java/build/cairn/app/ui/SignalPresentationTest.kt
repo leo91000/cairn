@@ -465,12 +465,10 @@ class SignalPresentationTest {
     fun `dock selection follows the section a screen belongs to`() {
         assertEquals("fil", dockSelection("fil"))
         assertEquals("fil", dockSelection("chat/{id}"))
-        // A mission opened from the Fil reads beside its conversations.
-        assertEquals("fil", dockSelection("fil/run/{id}"))
         assertEquals("fil", dockSelection("new-chat?agent={agent}&project={project}"))
         assertEquals("fil", dockSelection("search"))
-        assertEquals("missions", dockSelection("rules"))
-        assertEquals("missions", dockSelection("run/{id}"))
+        assertEquals("rules", dockSelection("rules?agent={agent}&instance={instance}&rule={rule}"))
+        assertEquals("atelier", dockSelection("run/{id}"))
         assertEquals("atelier", dockSelection("atelier"))
         assertEquals("atelier", dockSelection("connections"))
         assertEquals("atelier", dockSelection("runs"))

@@ -50,12 +50,14 @@ private fun focusedRoute(route: String) =
         route == "search" ||
         route.startsWith("rules/edit/")
 
-internal fun dockSelection(route: String): String =
-    when {
-        route in topLevel -> route
-        route.startsWith("chat/") || route.startsWith("new-chat") || route == "search" -> "fil"
+internal fun dockSelection(route: String): String {
+    val page = route.substringBefore('?')
+    return when {
+        page in topLevel -> page
+        page.startsWith("chat/") || page.startsWith("new-chat") || page == "search" -> "fil"
         else -> "atelier"
     }
+}
 
 @Composable
 fun CairnApp(
@@ -451,7 +453,7 @@ private fun WorkspaceApp(
                     containerColor = MaterialTheme.colorScheme.background,
                     snackbarHost = { SnackbarHost(snackbar) },
                     topBar = {
-                        if (!focused && route !in topLevel)
+                        if (!focused && route.substringBefore('?') !in topLevel)
                             TopAppBar(
                                 title = {},
                                 navigationIcon = {

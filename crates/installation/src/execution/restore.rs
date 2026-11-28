@@ -85,10 +85,47 @@ pub(super) async fn restore(
         // Helpers and identity follow the current grants too.
         configure_git(&root.join("home"), config, credentials).await?;
     }
+    if run["sourceTaskId"].is_string()
+        && !matches_skill_revisions(&prepared["skills"], &run["snapshot"]["skills"])
+    {
+        // A migrated mission could have frozen an explicit subset. The next
+        // conversation turn uses its agent's current frozen skill selection.
+        prepared["skills"] = if is_isolated {
+            let staging =
+                run_directory(run, config).join(format!("skills-{}", crate::config::id()));
+            let skill_root = staging.join(".agents/skills");
+            crate::skills::private_dir(&skill_root).await?;
+            let installed =
+                super::home::install_skills(&staging, &run["snapshot"]["skills"], config).await?;
+            let mounts = saved_list(&mut prepared, "mounts")?;
+            let target = super::home::GUEST_SKILLS;
+            mounts.retain(|mount| mount["target"] != target);
+            mounts.push(serde_json::to_value(Mount::new(
+                &skill_root,
+                target,
+                false,
+            ))?);
+            installed.into()
+        } else {
+            super::home::frozen_skills(run, config).await?
+        };
+    }
     if let Some(authorization) = authorization {
         authorization.recheck().await?;
     }
     Ok(prepared)
+}
+
+fn matches_skill_revisions(saved: &Value, current: &Value) -> bool {
+    let signatures = |value: &Value| {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|skill| (skill["name"].clone(), skill["bundle"].clone()))
+            .collect::<Vec<_>>()
+    };
+    signatures(saved) == signatures(current)
 }
 
 /// Adds projects opened during the run (`run.workspaces`) to the descriptor.

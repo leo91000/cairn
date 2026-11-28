@@ -116,7 +116,8 @@ fn rebuild_rule_tables(tx: &Connection) -> Result<()> {
           last_scheduled_for INTEGER CHECK(last_scheduled_for BETWEEN 0 AND 9007199254740991),
           fired_at INTEGER CHECK(fired_at BETWEEN 0 AND 9007199254740991)
          ) WITHOUT ROWID;
-         CREATE INDEX IF NOT EXISTS hook_rule_schedules_due ON hook_rule_schedules(next_run) WHERE next_run IS NOT NULL;",
+         CREATE INDEX IF NOT EXISTS hook_rule_schedules_due ON hook_rule_schedules(next_run) WHERE next_run IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS hook_rule_conversations_rule ON hook_rule_conversations(rule_id);",
     )?;
     Ok(())
 }
@@ -563,9 +564,18 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             .as_str()
             .or_else(|| meta.map(|mission| mission.brief.as_str()))
             .unwrap_or(&title);
+        let text = boundary["waitContinuation"]["reason"].as_str().map_or_else(
+            || format!("Task brief:\n{brief}"),
+            |reason| {
+                let observation = boundary["waitContinuation"]
+                    .get("observation")
+                    .filter(|data| !data.is_null());
+                crate::chats::continuation::resume_prompt(reason, observation)
+            },
+        );
         let execution = json!({
             "messageId": turn,
-            "text": format!("Task brief:\n{brief}"),
+            "text": text,
             "attachments": [],
             "recovery": false,
         });
@@ -575,6 +585,8 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             "UPDATE runs SET task_id=?1,trigger='chat', \
              status=CASE WHEN status='waiting' AND ?2 THEN 'succeeded' ELSE status END, \
              finished_at=CASE WHEN status='waiting' AND ?2 THEN coalesce(finished_at,?3) ELSE finished_at END, \
+             snapshot=CASE WHEN json_type(snapshot,'$.task')='object' \
+                 THEN json_set(snapshot,'$.task.worktree',json('true')) ELSE snapshot END, \
              boundary=json_set(boundary,'$.chatExecution',json(?4),'$.sourceTaskId',?5, \
                  '$.sourceTaskPrompt',?6,'$.sourceSessionId',session_id) WHERE id=?7",
             params![chat_id, legacy_wait.is_some(), updated_at, execution.to_string(), run.task_id, brief, run.id],
@@ -584,6 +596,16 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
              WHERE run_id=?1 AND json_extract(state,'$.launched')=1 \
              AND json_extract(state,'$.launchedTurn') IS NULL",
             params![run.id, turn],
+        )?;
+        // The shared project is legacy input, never the migrated conversation's
+        // working directory. Leave the project and saved files in place.
+        tx.execute(
+            "UPDATE run_checkpoints SET state=json_remove(state,'$.prepared','$.workspaceInitialized') \
+             WHERE run_id=?1 AND EXISTS( \
+                 SELECT 1 FROM json_each(state,'$.prepared.workspaces') \
+                 WHERE json_extract(value,'$.kind')='direct' \
+             )",
+            [&run.id],
         )?;
         if legacy_wait.is_some() {
             tx.execute(

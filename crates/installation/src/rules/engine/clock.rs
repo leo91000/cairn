@@ -217,8 +217,28 @@ pub(super) async fn observe(s: &Service) -> Result<bool> {
     if due.is_empty() {
         return Ok(false);
     }
+    let confirmed = if due
+        .iter()
+        .any(|(_, _, needs_memberships)| *needs_memberships)
+    {
+        match s.memberships.confirm_installation_memberships(s).await {
+            Ok(confirmed) => confirmed,
+            Err(error) => {
+                tracing::warn!(
+                    status = error.status,
+                    "Clock rules await confirmation of migrated memberships"
+                );
+                false
+            }
+        }
+    } else {
+        true
+    };
     let mut delivered = false;
-    for (rule_id, scheduled_for) in due {
+    for (rule_id, scheduled_for, needs_memberships) in due {
+        if needs_memberships && !confirmed {
+            continue;
+        }
         let emitted = s
             .store
             .transaction({

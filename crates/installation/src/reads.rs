@@ -62,6 +62,7 @@ pub(crate) async fn begin(s: &Service, account: &str) -> Result<()> {
 /// nothing is unread and nothing is snoozed: personal state is never shared.
 pub(crate) struct Reads {
     since: i64,
+    account: bool,
     marks: HashMap<String, i64>,
     snoozes: HashMap<String, StoredSnooze>,
 }
@@ -71,6 +72,7 @@ impl Reads {
         // Until `begin` records a start, nothing is unread.
         Ok(Self {
             since: db.read_start(account)?.unwrap_or(i64::MAX),
+            account: true,
             marks: db.read_marks(account)?,
             snoozes: db.snoozes(account)?,
         })
@@ -81,6 +83,7 @@ impl Reads {
             Some(account) if !account.is_empty() => Self::load(db, account),
             _ => Ok(Self {
                 since: i64::MAX,
+                account: false,
                 marks: HashMap::new(),
                 snoozes: HashMap::new(),
             }),
@@ -91,9 +94,13 @@ impl Reads {
         self.marks.get(id).copied().unwrap_or(0).max(self.since)
     }
 
-    fn unread(&self, id: &str, finished_at: Option<i64>) -> bool {
-        let read_at = self.read_at_mark(id);
-        finished_at.is_some_and(|finished| finished > read_at)
+    fn unread(&self, id: &str, finished_at: Option<i64>, blocked: bool) -> bool {
+        let mark = if blocked {
+            self.marks.get(id).copied().unwrap_or(0)
+        } else {
+            self.read_at_mark(id)
+        };
+        self.account && finished_at.is_some_and(|finished| finished > mark)
     }
 
     /// Marks conversations the account has not acknowledged since their latest relevant
@@ -152,7 +159,7 @@ impl Reads {
 
             let unread = (wants_attention || expired_snooze_at.is_some())
                 && db.kv(&format!("plugin-conversation:{id}"))?.is_none()
-                && self.unread(&id, effective_at);
+                && self.unread(&id, effective_at, blocked);
             chat["unread"] = unread.into();
             if unread {
                 chat["preview"] = summary_preview(db, text(chat, "runId"))?;

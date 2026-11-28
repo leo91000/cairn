@@ -35,8 +35,7 @@ Les opérations correspondantes conservent la parité avec le MCP public et
   propriétaire préfère un contrat solide à une couche de transition, puisqu’il
   n’a pas de clients à préserver.
 - L’outil crée le questionnaire et retourne immédiatement son identifiant.
-  L’agent poursuit un travail indépendant ou termine son tour avec `needs_input`
-  lorsqu’il dépend de la réponse. Le questionnaire reste disponible entre les
+  L’agent poursuit un travail indépendant ou termine son tour en attendant la réponse. Le questionnaire reste disponible entre les
   tours ; l’envoi des réponses reprend la conversation ou rejoint son exécution
   en cours.
 - L’historique des anciens échanges reste lisible. Les anciens questionnaires
@@ -48,7 +47,7 @@ Les opérations correspondantes conservent la parité avec le MCP public et
   sont désactivés lorsque le moteur le permet. Un appel natif résiduel est refusé
   avec une indication d’utiliser l’outil Cairn, sans maintien d’un second contrat.
 - Une simple fin de tour conserve les questionnaires en attente, tout comme un
-  résultat `needs_input`. Lorsque l’agent déclare la tâche terminée (`completed`),
+  résultat `blocked`. Lorsque l’agent déclare la tâche terminée (`completed`),
   les questionnaires encore en attente sont retirés automatiquement. Un retrait
   manuel reste possible et ne constitue jamais une réponse ni une autorisation.
 

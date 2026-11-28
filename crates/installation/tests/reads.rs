@@ -532,6 +532,10 @@ async fn rule_started_conversations_stay_quiet_unless_blocked_or_a_person_writes
     let listed = app.get(&app.owner, "/api/chats").await;
     assert_eq!(find(&listed, "id", &chat_id)["unread"], true);
 
+    // First-read history suppression still lets a new reader see unresolved work.
+    let first_visit = app.get(&app.member, "/api/chats").await;
+    assert_eq!(find(&first_visit, "id", &chat_id)["unread"], true);
+
     // A blocked outcome also surfaces while an outside check runs.
     app.service
         .store

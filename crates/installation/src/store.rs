@@ -104,7 +104,10 @@ fn enable_wal(connection: &Connection, timeout: Duration) -> rusqlite::Result<()
 fn upgrade_compact_schema(writer: &mut Connection, directory: &Path) -> Result<()> {
     let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == DATABASE_VERSION {
+    if matches!(
+        version,
+        PRE_MISSION_SUNSET_DATABASE_VERSION | DATABASE_VERSION
+    ) {
         return Ok(());
     }
     if version != PRE_COMPACTION_DATABASE_VERSION {
@@ -1422,6 +1425,17 @@ mod schema_tests {
         );
         db.prepare("SELECT payload FROM events").unwrap();
         assert!(!db.table_exists(None, "shared_publications").unwrap());
+    }
+
+    #[test]
+    fn compaction_accepts_a_concurrent_upgrade_to_schema_38() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut writer = Connection::open(directory.path().join("manager.db")).unwrap();
+        writer
+            .pragma_update(None, "user_version", PRE_MISSION_SUNSET_DATABASE_VERSION)
+            .unwrap();
+
+        upgrade_compact_schema(&mut writer, directory.path()).unwrap();
     }
 
     #[tokio::test]

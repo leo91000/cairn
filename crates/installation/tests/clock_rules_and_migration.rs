@@ -677,7 +677,31 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             queued_id,
             active_mission_id,
             t0 + 7_000,
+            json!({ "agent": agent, "task": { "name": "Daily standup", "prompt": "Summarize updates", "worktree": false } }).to_string(),
+        ],
+    ).unwrap();
+
+    conn.execute(
+        "INSERT INTO run_checkpoints(run_id,state) VALUES(?1,?2)",
+        params![
+            queued_id,
+            json!({ "prepared": { "workspaces": [{ "kind": "direct", "path": "/legacy-project" }] } }).to_string(),
+        ],
+    ).unwrap();
+    let queued_continuation = id();
+    conn.execute(
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,snapshot,boundary, \
+          recovery_pending,resume_available,resume_count) \
+         VALUES(?1,?2,'queued','schedule',?3,?4,?5,0,1,0)",
+        params![
+            queued_continuation,
+            disabled_mission_id,
+            t0 + 8_000,
             json!({ "agent": agent, "task": { "name": "Daily standup", "prompt": "Summarize updates" } }).to_string(),
+            json!({
+                "missionTurnId": "resolved-wait",
+                "waitContinuation": { "reason": "Wait for the CI", "observation": { "state": "completed", "status": "succeeded" } }
+            }).to_string(),
         ],
     ).unwrap();
 
@@ -888,6 +912,31 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         )
         .unwrap();
     assert!(queued.1.contains("Summarize updates"));
+    let uses_worktree: bool = migrated
+        .query_row(
+            "SELECT json_extract(snapshot,'$.task.worktree') FROM runs WHERE id=?",
+            [&queued_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(uses_worktree);
+    let prepared: Option<String> = migrated
+        .query_row(
+            "SELECT json_extract(state,'$.prepared') FROM run_checkpoints WHERE run_id=?",
+            [&queued_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(prepared.is_none());
+    let continuation: String = migrated
+        .query_row(
+            "SELECT json_extract(boundary,'$.chatExecution.text') FROM runs WHERE id=?",
+            [&queued_continuation],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(continuation.contains("Wait for the CI") && continuation.contains("succeeded"));
+
     let queued_snooze_count: i64 = migrated
         .query_row(
             "SELECT count(*) FROM account_snoozes WHERE chat_id=?",
@@ -918,6 +967,22 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let service = cairn_installation::service::Service::new(config)
         .await
         .unwrap();
+    // Before Beacon confirms migrated membership, a due owner slot stays available.
+    cairn_installation::rules::engine::tick(&service)
+        .await
+        .unwrap();
+    let schedule: i64 = service
+        .store
+        .read(move |db| {
+            Ok(db.0.query_row(
+                "SELECT next_run FROM hook_rule_schedules WHERE rule_id=?",
+                [&active_mission_id],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(schedule, next_run.unwrap());
     let detail = service.chat_detail(&waiting_chat_id).await.unwrap();
     assert_eq!(detail["run"]["chatExecution"]["messageId"], "legacy-turn");
     assert_eq!(detail["wakeup"]["messageId"], "legacy-turn");

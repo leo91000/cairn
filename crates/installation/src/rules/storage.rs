@@ -332,13 +332,16 @@ impl Db<'_> {
         Ok(())
     }
 
-    pub(crate) fn due_clock_rules(&self, at: i64) -> Result<Vec<(String, i64)>> {
+    pub(crate) fn due_clock_rules(&self, at: i64) -> Result<Vec<(String, i64, bool)>> {
         Ok(self
             .0
             .prepare_cached(
-                "SELECT rule_id,next_run FROM hook_rule_schedules WHERE next_run IS NOT NULL AND next_run<=? ORDER BY next_run,rule_id",
+                "SELECT s.rule_id,s.next_run,r.creator_owner=0 AND v.source='migration' \
+                 FROM hook_rule_schedules s JOIN hook_rules r ON r.id=s.rule_id \
+                 JOIN hook_rule_versions v ON v.rule_id=r.id AND v.version=r.version \
+                 WHERE s.next_run IS NOT NULL AND s.next_run<=? ORDER BY s.next_run,s.rule_id",
             )?
-            .query_map([at], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([at], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?)
     }
 }
