@@ -66,6 +66,13 @@ struct Admission {
 }
 
 impl Worker {
+    pub(crate) async fn has_native_cleanup_handoff(&self, run_id: &str) -> bool {
+        self.deferred_cleanup_observers
+            .lock()
+            .await
+            .has_handoff(run_id)
+    }
+
     /// Keep durable conversation recovery alive until graceful shutdown completes.
     pub(crate) fn spawn_recovery(
         &self,

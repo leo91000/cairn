@@ -186,6 +186,9 @@ async fn stop_while_native_delete_is_in_flight_keeps_the_workspace_fence() {
     .unwrap();
     release(&service, &checkpoint, None, true).await.unwrap();
 
+    super::super::schedule::observe_native_cleanup(&service)
+        .await
+        .unwrap();
     let stopped = service.store.run_state(&id).await.unwrap();
     assert_eq!(stopped.status, RunStatus::Cancelled);
     assert_eq!(stopped.finished_at, Some(42));
@@ -209,36 +212,60 @@ async fn a_live_native_handoff_settles_while_credential_release_is_blocked() {
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Settlement {
+        CleanFlush,
         Deadline,
         Stop,
         Detach,
     }
 
-    for settlement in [Settlement::Deadline, Settlement::Stop, Settlement::Detach] {
+    for settlement in [
+        Settlement::CleanFlush,
+        Settlement::Deadline,
+        Settlement::Stop,
+        Settlement::Detach,
+    ] {
         let (root, service, server) = fence_service(axum::Router::new()).await;
         let id = crate::config::id();
         let account = crate::config::id();
+        tokio::fs::create_dir_all(&service.config.home)
+            .await
+            .unwrap();
+        let chat = service.chat_create(json!({})).await.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let conversation = chat.clone();
         let fixture = id.clone();
         let saved =
             service
                 .store
                 .transaction(move |db| {
                     let attempt = crate::config::id();
+                    let agent = db.agent_snapshot(crate::config::MAIN_AGENT_ID)?.unwrap();
                     db.add_run_fixture(&json!({
                 "id": fixture, "taskId": fixture, "status": "succeeded", "trigger": "chat",
                 "isolated": true, "recoveryPending": true, "finishedAt": 42,
+                "snapshot": { "agent": agent }, "sessionId": "saved-session",
             }), None)?;
+                    let mut chat = db.conversation(&conversation)?.unwrap();
+                    chat.run_id = Some(fixture.clone());
+                    db.save_conversation(&chat)?;
                     let until = if settlement == Settlement::Deadline {
                         0
                     } else {
                         now() + 60_000
+                    };
+                    let state = if settlement == Settlement::CleanFlush {
+                        "retired"
+                    } else {
+                        "observing"
                     };
                     let saved = RunCheckpoint::from_value(json!({
                         "runnerId": attempt,
                         "prepared": { "backend": "native", "isolated": true },
                         "settled": { "status": "succeeded", "finishedAt": 42 },
                         "pendingNativeCleanup": {
-                            "attempt": attempt, "state": "observing", "until": until,
+                            "attempt": attempt, "state": state, "until": until,
                             "message": "Native disk cleanup is still in progress."
                         },
                     }))?;
@@ -253,6 +280,7 @@ async fn a_live_native_handoff_settles_while_credential_release_is_blocked() {
             .lock()
             .await
             .insert(id.clone(), CancellationToken::new());
+        service.worker.held.lock().await.insert(id.clone());
         let credentials = service.accounts.lock(&account).await;
         let lease = Lease {
             account_id: account,
@@ -282,6 +310,15 @@ async fn a_live_native_handoff_settles_while_credential_release_is_blocked() {
         .unwrap();
 
         match settlement {
+            Settlement::CleanFlush => {
+                service
+                    .chat_send(
+                        &chat,
+                        json!({ "id": crate::config::id(), "text": "Later input" }),
+                    )
+                    .await
+                    .unwrap();
+            }
             Settlement::Deadline => {}
             Settlement::Stop => service.worker.cancel(&service, &id).await.unwrap(),
             Settlement::Detach => service
@@ -301,7 +338,23 @@ async fn a_live_native_handoff_settles_while_credential_release_is_blocked() {
         let result = service.store.run_state(&id).await.unwrap();
         assert_eq!(result.finished_at, Some(42));
         assert!(!result.recovery_pending);
-        if settlement == Settlement::Stop {
+        if settlement == Settlement::CleanFlush {
+            assert_eq!(result.status, RunStatus::Succeeded);
+            // Model a scheduler scan whose provider-active snapshot excluded
+            // this held worker just before it handed off its checkpoint.
+            service
+                .chat_tick(&std::collections::HashSet::new())
+                .await
+                .unwrap();
+            service
+                .store
+                .read(move |db| {
+                    assert_eq!(db.messages(&chat)?[0]["status"], "queued");
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        } else if settlement == Settlement::Stop {
             assert_eq!(result.status, RunStatus::Cancelled);
         } else {
             assert_eq!(result.status, RunStatus::Failed);

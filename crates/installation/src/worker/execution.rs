@@ -543,7 +543,16 @@ async fn release(
     let restart_cleanup = s.shutdown.is_cancelled()
         && saved.cleanup_observation_pending()
         && saved.settled().is_none();
-    if fenced
+    if fenced && let Some(pending) = saved.pending_native_cleanup() {
+        // The live checkpoint has had its last write. Keep its active
+        // reservation while allowing deferred recovery to publish the verdict.
+        s.worker.held.lock().await.remove(run_id);
+        s.worker
+            .deferred_cleanup_observers
+            .lock()
+            .await
+            .accept_handoff(run_id, &pending.attempt);
+    } else if fenced
         && !restart_cleanup
         && (saved.settled().is_some() || saved.finalization_failure_attempt.is_some())
     {
@@ -562,13 +571,6 @@ async fn release(
                 super::schedule::finish_recovery(db, &id, current.as_ref()).map(|_| ())
             })
             .await?;
-    }
-    if fenced && let Some(pending) = saved.pending_native_cleanup() {
-        s.worker
-            .deferred_cleanup_observers
-            .lock()
-            .await
-            .accept_handoff(run_id, &pending.attempt);
     }
     if fenced
         && let Some(account) = account
