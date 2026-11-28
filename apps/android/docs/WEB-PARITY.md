@@ -473,7 +473,7 @@ are listed without a switch, and run workspace cleanup is offered only with acce
 the run's agent. Both apps offer cleanup for stopped executions with managed
 Git worktrees or clones, including multi-project and older single-project
 executions. Cleanup requires that Git can check every managed workspace and
-that both recovery and scheduled continuation are settled. Both apps
+that recovery, scheduled continuation, queued input and questions are resolved. Both apps
 reload a member's usable agents every 30 seconds while
 shown, when they come back to the foreground and after a refused change. Question
 notifications reach only the owner and the members who may answer them. Unknown

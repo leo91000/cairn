@@ -217,6 +217,50 @@ async fn assert_large_metadata_is_chunked_consistently(
 }
 
 #[tokio::test]
+async fn run_and_chat_tools_report_the_same_current_wakeup() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let (s, origin, server) = served(&root).await;
+    let token = common::relay_fixture::grant(&s, &["read"]).await;
+    let run = manual_run(&s, "Waiting", "Wait for a check").await;
+    let run_id = run["id"].as_str().unwrap();
+    let chat_id = run["taskId"].as_str().unwrap().to_owned();
+    let wakeup = json!({
+        "id": "current-wait",
+        "messageId": run["chatExecution"]["messageId"],
+        "reason": "Wait for a check",
+        "seconds": 60,
+        "createdAt": 1,
+        "wakeAt": 60_001,
+    });
+    let chat = chat_id.clone();
+    let saved: cairn_contracts::ChatWakeup = serde_json::from_value(wakeup.clone()).unwrap();
+    s.store
+        .transaction(move |db| db.save_wakeup(true, &chat, Some(&saved)))
+        .await
+        .unwrap();
+    let mcp = Mcp {
+        http: reqwest::Client::new(),
+        endpoint: format!("{origin}/mcp"),
+        token,
+    };
+    let get_run = mcp.call("get_run", json!({ "runId": run_id })).await;
+    assert_eq!(result(&get_run)["run"]["run"]["wakeup"]["id"], wakeup["id"]);
+    let list_runs = mcp.call("list_runs", json!({ "taskId": chat_id })).await;
+    assert_eq!(result(&list_runs)[0]["wakeup"]["id"], wakeup["id"]);
+    let get_chat = mcp.call("get_chat", json!({ "chatId": chat_id })).await;
+    assert_eq!(result(&get_chat)["chat"]["wakeup"]["id"], wakeup["id"]);
+    let chat = chat_id.clone();
+    s.store
+        .transaction(move |db| db.save_wakeup(true, &chat, None))
+        .await
+        .unwrap();
+    let get_run = mcp.call("get_run", json!({ "runId": run_id })).await;
+    assert!(result(&get_run)["run"]["run"]["wakeup"].is_null());
+    server.abort();
+}
+
+#[tokio::test]
 async fn run_history_includes_the_engine_retries_limits_and_notices() {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();

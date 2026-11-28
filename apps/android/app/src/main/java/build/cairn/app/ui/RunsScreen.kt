@@ -469,6 +469,7 @@ fun RunScreen(
                                     !current.isolated &&
                                     !current.recoveryPending &&
                                     current.wakeup == null &&
+                                    live.state?.workspaceCleanupBlockedByInput != true &&
                                     current.snapshot?.task?.worktree == true &&
                                     managedWorkspaces.isNotEmpty() &&
                                     managedWorkspaces.all {

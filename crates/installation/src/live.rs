@@ -209,6 +209,8 @@ impl ConversationLists {
 #[serde(rename_all = "camelCase")]
 struct State {
     plan_turns_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_cleanup_blocked_by_input: Option<bool>,
     run: Value,
     chat: Value,
     artifacts: Vec<Value>,
@@ -465,11 +467,6 @@ fn read_page(
         Value::Null
     };
     let mut run = scoped_run(db, scope, &chat)?;
-    if !scope.chat
-        && let Some(chat) = db.conversation_for_run(text(&run, "id"))?
-    {
-        run["wakeup"] = serde_json::to_value(chat.wakeup)?;
-    }
     // Older single-project runs store their worktree in the workspace field.
     if !scope.chat
         && run["snapshot"]["task"]["worktree"] == true
@@ -549,8 +546,11 @@ fn read_page(
     {
         chat.remove("run");
     }
+    let pending_work =
+        !scope.chat && !run_id.is_empty() && db.conversation_has_pending_work(run_id)?;
     let state = State {
         plan_turns_enabled: crate::chat_plan_settings::view(db)?.enabled,
+        workspace_cleanup_blocked_by_input: pending_work.then_some(true),
         artifacts: artifacts(db, run_id)?,
         run,
         chat,

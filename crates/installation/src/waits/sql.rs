@@ -173,13 +173,15 @@ fn attach_conditions(
 
 impl Db<'_> {
     pub fn wakeup(&self, chat: bool, id: &str) -> Result<Option<ChatWakeup>> {
-        if !chat {
-            return Ok(None);
-        }
+        let chat_id = if chat {
+            "?"
+        } else {
+            "(SELECT id FROM conversations WHERE run_id=?)"
+        };
         // One statement gives point readers an atomic header/member snapshot.
         // Integer child keys avoid repeating external UUIDs in every condition.
         let query = format!(
-            "SELECT w.chat_id,{WAKEUP_COLUMNS},{CONDITION_COLUMNS} FROM durable_wakeups w LEFT JOIN wait_conditions c ON c.wakeup_key=w.key WHERE w.chat_id=? ORDER BY c.position"
+            "SELECT w.chat_id,{WAKEUP_COLUMNS},{CONDITION_COLUMNS} FROM durable_wakeups w LEFT JOIN wait_conditions c ON c.wakeup_key=w.key WHERE w.chat_id={chat_id} ORDER BY c.position"
         );
         let mut statement = self.0.prepare_cached(&query)?;
         let mut rows = statement.query([id])?;
@@ -219,10 +221,17 @@ impl Db<'_> {
             tx.commit()?;
             return Ok(result);
         }
-        if !chat {
-            return Ok(HashMap::new());
-        }
-        let query = format!("SELECT w.chat_id,{WAKEUP_COLUMNS} FROM durable_wakeups w");
+        let (owner, join, filter) = if chat {
+            ("w.chat_id", "", "")
+        } else {
+            (
+                "conversation.run_id",
+                "JOIN conversations conversation ON conversation.id=w.chat_id",
+                "WHERE conversation.run_id IS NOT NULL",
+            )
+        };
+        let query =
+            format!("SELECT {owner},{WAKEUP_COLUMNS} FROM durable_wakeups w {join} {filter}");
         let mut rows = self
             .0
             .prepare_cached(&query)?
@@ -233,7 +242,7 @@ impl Db<'_> {
         }
         let mut conditions = HashMap::<String, Vec<(WaitCondition, WaitMemberProgress)>>::new();
         let query = format!(
-            "SELECT w.chat_id,{CONDITION_COLUMNS} FROM durable_wakeups w JOIN wait_conditions c ON c.wakeup_key=w.key ORDER BY w.chat_id,c.position"
+            "SELECT {owner},{CONDITION_COLUMNS} FROM durable_wakeups w JOIN wait_conditions c ON c.wakeup_key=w.key {join} {filter} ORDER BY {owner},c.position"
         );
         let mut statement = self.0.prepare_cached(&query)?;
         for value in statement.query_map([], |row| {

@@ -652,6 +652,10 @@ abstract class NodePlacementCases {
         delegatedRunWorktreeCleanup(hasAgentAccess = true)
 
     @Test
+    fun pendingConversationInputKeepsManagedWorktrees() =
+        delegatedRunWorktreeCleanup(hasAgentAccess = true, pendingInput = true)
+
+    @Test
     fun scheduledContinuationKeepsManagedWorktrees() =
         delegatedRunWorktreeCleanup(
             hasAgentAccess = true,
@@ -666,7 +670,11 @@ abstract class NodePlacementCases {
                 ),
         )
 
-    private fun delegatedRunWorktreeCleanup(hasAgentAccess: Boolean, wakeup: ChatWakeup? = null) {
+    private fun delegatedRunWorktreeCleanup(
+        hasAgentAccess: Boolean,
+        wakeup: ChatWakeup? = null,
+        pendingInput: Boolean = false,
+    ) {
         val requesterAgentId = MAIN_AGENT_ID
         val privateAgentId = "00000000-0000-4000-8000-000000000096"
         val requestingChat =
@@ -742,7 +750,7 @@ abstract class NodePlacementCases {
                         val path = request.path!!.substringBefore('?')
                         val live =
                             if (path == "/api/installations/fixture/api/runs/${run.id}/stream")
-                                LiveState(run = run)
+                                LiveState(run = run, workspaceCleanupBlockedByInput = pendingInput)
                             else null
                         if (live != null) {
                             val frame =
@@ -814,7 +822,7 @@ abstract class NodePlacementCases {
                 compose.onNodeWithText("Détails de l’exécution").performClick()
                 compose.onNodeWithText("Espace de travail").assertExists()
                 val cleanup = compose.onNodeWithText("Nettoyer le worktree")
-                if (hasAgentAccess && wakeup == null) cleanup.assertExists()
+                if (hasAgentAccess && wakeup == null && !pendingInput) cleanup.assertExists()
                 else cleanup.assertDoesNotExist()
             } finally {
                 vm.api.closeStreams()

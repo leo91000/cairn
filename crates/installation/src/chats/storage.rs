@@ -394,14 +394,25 @@ impl Db<'_> {
     }
 
     pub fn conversation_for_run(&self, run: &str) -> Result<Option<Conversation>> {
-        let id: Option<String> = self
+        self.conversation_id_for_run(run)?
+            .map(|id| self.conversation(&id))
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    fn conversation_id_for_run(&self, run: &str) -> Result<Option<String>> {
+        Ok(self
             .0
             .prepare_cached("SELECT id FROM conversations WHERE run_id=?")?
             .query_row([run], |r| r.get(0))
-            .optional()?;
-        id.map(|id| self.conversation(&id))
-            .transpose()
-            .map(Option::flatten)
+            .optional()?)
+    }
+
+    pub(crate) fn conversation_has_pending_work(&self, run: &str) -> Result<bool> {
+        let Some(chat) = self.conversation_id_for_run(run)? else {
+            return Ok(false);
+        };
+        Ok(self.has_pending_messages(&chat)? || self.pending_question_summary(&chat)?.0 > 0)
     }
 
     pub fn chat_id_for_slug(&self, slug: &str) -> Result<Option<String>> {

@@ -1576,6 +1576,13 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         retirement_chat["messages"][0]["text"],
         "Follow up without waiting"
     );
+    let cleanup = service
+        .worker
+        .cleanup(&service, &retirement_run_id)
+        .await
+        .unwrap_err();
+    assert_eq!(cleanup.status, 409);
+    assert!(cleanup.message.contains("pending questions and messages"));
     // An overdue migrated schedule must neither act without Beacon's
     // membership confirmation nor keep the engine waiting on an unavailable Beacon.
     let contacted = Arc::new(tokio::sync::Notify::new());

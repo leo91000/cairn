@@ -244,6 +244,31 @@ class SignalPresentationTest {
     }
 
     @Test
+    fun `acknowledging a blocked result keeps its scheduled wait visible`() {
+        val chat =
+            Chat(
+                id = "scheduled",
+                status = "succeeded",
+                finishedAt = 20,
+                unread = true,
+                outcome = TaskOutcome(status = "blocked", reason = "Vérifier la CI"),
+                wakeup =
+                    ChatWakeup(
+                        id = "wake",
+                        messageId = null,
+                        reason = "Vérifier la CI",
+                        createdAt = 20,
+                        seconds = 60,
+                        wakeAt = 60_020,
+                    ),
+            )
+        assertEquals(FeedKind.REVIEW, buildFeed(listOf(chat)).forYou.single().kind)
+        val acknowledged = buildFeed(listOf(chat), read = mapOf("chat:scheduled" to 20))
+        assertEquals(FeedKind.WAITING_CHAT, acknowledged.waiting.single().kind)
+        assertTrue(acknowledged.recent.isEmpty())
+    }
+
+    @Test
     fun `a due snooze reminds the account about paused or delegated conversations`() {
         val chats =
             listOf(

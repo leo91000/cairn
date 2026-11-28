@@ -209,28 +209,18 @@ impl Worker {
         authorize.recheck().await?;
         let proof = authorize.clone();
         let run_id = id.to_owned();
-        let (run, waiting) = s
+        let run = s
             .store
             .read(move |db| {
-                let snapshot = db.0.unchecked_transaction()?;
-                let db = Db(&snapshot);
-                proof.authorize(&db)?;
+                proof.authorize(db)?;
                 let run = required(db.run_record(&run_id)?, "Run not found")?;
-                let waiting = db
-                    .conversation_for_run(&run_id)?
-                    .is_some_and(|chat| chat.wakeup.is_some());
-                snapshot.commit()?;
-                Ok((run, waiting))
+                require_cleanup_ready(db, &run)?;
+                Ok(run)
             })
             .await?;
-        if run.state.status.is_active() || run.state.recovery_pending || active.contains_key(id) {
+        if active.contains_key(id) {
             return Err(Error::conflict(
                 "Wait for this run to finish before cleaning up.",
-            ));
-        }
-        if waiting {
-            return Err(Error::conflict(
-                "Finish or cancel the scheduled continuation before cleaning up.",
             ));
         }
         let run = run.wire()?;
@@ -271,15 +261,33 @@ impl Worker {
         }
         authorize.recheck().await?;
         let proof = authorize.clone();
-        s.store.read(move |db| proof.authorize(db)).await?;
+        let run_id = id.to_owned();
+        s.store
+            .transaction(move |db| {
+                proof.authorize(db)?;
+                let current = required(db.run_record(&run_id)?, "Run not found")?;
+                require_cleanup_ready(db, &current)?;
+                // Reserve the workspace against new input before removing files.
+                // Keep the path until every removal succeeds so cleanup can retry.
+                db.change_run(
+                    &run_id,
+                    crate::runs::RunChanges {
+                        workspace_cleaned_at: Some(Some(
+                            current.state.workspace_cleaned_at.unwrap_or_else(now),
+                        )),
+                        resume_available: Some(false),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(())
+            })
+            .await?;
         for workspace in &managed {
             authorize.recheck().await?;
             remove_workspace(&run, workspace, &env).await?;
         }
         let patch = crate::runs::RunChanges {
             workspace: Some(None),
-            resume_available: Some(false),
-            workspace_cleaned_at: Some(Some(now())),
             ..Default::default()
         };
         let id = id.to_owned();
@@ -293,6 +301,25 @@ impl Worker {
             .await?;
         Ok(json!({ "cleaned": true }))
     }
+}
+
+fn require_cleanup_ready(db: &Db<'_>, run: &crate::runs::RunRecord) -> Result<()> {
+    if run.state.status.is_active() || run.state.recovery_pending {
+        return Err(Error::conflict(
+            "Wait for this run to finish before cleaning up.",
+        ));
+    }
+    if run.wakeup.is_some() {
+        return Err(Error::conflict(
+            "Finish or cancel the scheduled continuation before cleaning up.",
+        ));
+    }
+    if db.conversation_has_pending_work(&run.state.id)? {
+        return Err(Error::conflict(
+            "Resolve pending questions and messages before cleaning up.",
+        ));
+    }
+    Ok(())
 }
 
 /// Pauses queued follow-ups and requests the chat's current turn to stop, in the
@@ -1349,6 +1376,44 @@ mod tests {
         assert_eq!(explicit_after["snapshot"]["agent"]["model"], "gpt-6-luna");
         assert_eq!(explicit_after["snapshot"]["agent"]["reasoning"], "xhigh");
         assert_eq!(explicit_after["snapshot"]["agent"]["speed"], "standard");
+    }
+
+    #[tokio::test]
+    async fn cleanup_preserves_the_workspace_needed_to_answer_a_question() {
+        let f = crate::plugin_grant_fixture::Fixture::new().await;
+        let run = f.run.clone();
+        f.s.store
+            .transaction(move |db| {
+                let chat = db.conversation_for_run(&run)?.unwrap();
+                db.change_run(
+                    &run,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Succeeded),
+                        workspace: Some(Some("/saved/workspace".into())),
+                        ..Default::default()
+                    },
+                )?;
+                db.save_question(&cairn_contracts::ChatQuestion {
+                    id: crate::config::id(),
+                    chat_id: chat.id,
+                    run_id: run,
+                    blocking: true,
+                    source: String::new(),
+                    status: crate::chats::QuestionStatus::Pending,
+                    fields: Vec::new(),
+                    created_at: Some(now()),
+                    message_id: None,
+                })
+            })
+            .await
+            .unwrap();
+        let refused = f.s.worker.cleanup(&f.s, &f.run).await.unwrap_err();
+        assert_eq!(refused.status, 409);
+        assert!(refused.message.contains("pending questions and messages"));
+        let run = f.s.store.run(&f.run).await.unwrap();
+        assert_eq!(run["workspace"], "/saved/workspace");
+        assert!(run["workspaceCleanedAt"].is_null());
+        f.s.shutdown.cancel();
     }
 
     #[tokio::test]

@@ -78,7 +78,8 @@ const active = computed(
 // A delegated conversation can be readable through its requester, but cleanup needs
 // access to the run's own agent.
 const canCleanUpWorktree = computed(() =>
-  !!run.value && canUseAgent(state.usableAgents, run.value.snapshot?.agent?.id),
+  !!run.value && !live.snapshot.value?.workspaceCleanupBlockedByInput
+  && canUseAgent(state.usableAgents, run.value.snapshot?.agent?.id),
 )
 const tabs = computed(() => [
   { value: 'events', label: 'Conversation', icon: Terminal },

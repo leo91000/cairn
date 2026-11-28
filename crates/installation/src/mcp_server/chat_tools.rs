@@ -102,8 +102,10 @@ fn list(db: &Db<'_>, args: &Value, reader: Option<&str>) -> Result<Value> {
 
 fn readable(db: &Db<'_>, id: &str) -> Result<Value> {
     let detail = chats::public_detail(db, id)?;
+    let mut chat = summary(&detail)?;
+    chat["wakeup"] = detail["wakeup"].clone();
     Ok(json!({
-        "chat": summary(&detail)?,
+        "chat": chat,
         "messages": detail["messages"],
         "questions": detail["questions"],
     }))

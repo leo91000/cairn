@@ -153,7 +153,7 @@ export function filOf(
     else if (chat.status === 'failed' || chat.status === 'interrupted' || (chat.paused && chat.error)) {
       forYou.push({ ...base, kind: 'failed', subtitle: chat.error || (chat.status === 'interrupted' ? 'Interrupted' : 'Failed') })
     }
-    else if (blocked) {
+    else if (blocked && (unread || !chat.wakeup || chat.paused)) {
       const item = {
         ...base,
         at: chat.finishedAt ?? chat.updatedAt,

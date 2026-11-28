@@ -443,6 +443,22 @@ it('shows blocked conversations until read or snoozed for the account', () => {
   expect(filOf(chats).forYou.map(item => item.kind)).toEqual(['review', 'question'])
   expect(filOf(chats.map(chat => ({ ...chat, snoozedUntil: 100 })), {}, 50).waiting.map(item => item.kind)).toEqual(['snoozed', 'snoozed'])
   expect(filOf(chats, { 'chat:schedule': 20 }).recent[0]).toMatchObject({ outcome: 'blocked' })
+
+  const waiting = {
+    ...chats[0]!,
+    wakeup: {
+      id: 'wake',
+      messageId: null,
+      reason: 'Check CI',
+      seconds: 60,
+      createdAt: 20,
+      wakeAt: 60_020,
+    },
+  }
+  expect(filOf([waiting]).forYou[0]).toMatchObject({ kind: 'review' })
+  const acknowledged = filOf([waiting], { 'chat:schedule': 20 })
+  expect(acknowledged.waiting[0]).toMatchObject({ kind: 'waiting', wakeAt: 60_020 })
+  expect(acknowledged.recent).toEqual([])
 })
 
 it('defaults to nine tomorrow using local time', () => {

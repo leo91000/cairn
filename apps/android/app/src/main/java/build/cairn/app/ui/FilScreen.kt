@@ -260,7 +260,9 @@ internal fun buildFeed(
                             chat.error?.lineSequence()?.firstOrNull()?.ifBlank { null }
                                 ?: statusLabel(chat.status),
                         )
-                chat.status == "succeeded" && chat.outcome?.status == "blocked" -> {
+                chat.status == "succeeded" &&
+                    chat.outcome?.status == "blocked" &&
+                    (unread || chat.wakeup == null || chat.paused) -> {
                     val outcome = chat.outcome
                     val label = "Bloquée · ${outcome.reason}"
                     if (unread) forYou += item(FeedKind.REVIEW, label)
