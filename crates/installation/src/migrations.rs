@@ -678,8 +678,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 && (checkpoint["launched"] == true
                     || checkpoint["launchedTurn"].is_string()
                     || (run.started_at.is_some() && run.session_id.is_some()));
-            let initial_antigravity_turn = snapshot["agent"]["provider"] == "antigravity"
-                && !boundary["missionTurnId"].is_string()
+            let initial_mission_turn = !boundary["missionTurnId"].is_string()
                 && !boundary["waitContinuation"]["reason"].is_string()
                 && wakeup_id.is_none();
             let recovery = launched && run.status != "succeeded";
@@ -716,7 +715,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
              boundary=json_set(boundary,'$.chatExecution',json(?4),'$.sourceTaskId',?5, \
                  '$.sourceTaskPrompt',?6,'$.sourceSessionId',session_id,'$.sourceTaskInitialTurn',json(?8))
              WHERE id=?7",
-            params![chat_id, wakeup_id.is_some(), updated_at, execution.to_string(), run.task_id, brief, run.id, initial_antigravity_turn.to_string()],
+            params![chat_id, wakeup_id.is_some(), updated_at, execution.to_string(), run.task_id, brief, run.id, initial_mission_turn.to_string()],
         )?;
             if launched {
                 tx.execute(

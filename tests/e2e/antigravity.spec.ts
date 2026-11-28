@@ -73,6 +73,12 @@ test('Antigravity connects a Gemini API key, selects a model and runs a conversa
   })
   expect(JSON.stringify(accounts)).not.toContain('synthetic-browser-gemini-key')
   await expect(page.getByRole('region', { name: 'Antigravity accounts' })).toContainText('Gemini key')
+  const waitForAccount = async () => {
+    await expect.poll(async () => {
+      const { accounts }: CodingAgentAccounts = await workspace.api('/api/accounts')
+      return accounts.find(item => item.id === account.id)
+    }, { timeout: 30000 }).toMatchObject({ state: 'ready', activeRunIds: [] })
+  }
 
   await page.goto(workspacePath('/agents'))
   await page.getByRole('link', { name: 'New agent', exact: true }).click()
@@ -119,16 +125,18 @@ test('Antigravity connects a Gemini API key, selects a model and runs a conversa
 
   // The next message resumes the same native conversation.
   const previous = await workspace.api(`/api/chats/${slug}`)
+  await waitForAccount()
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Now add the project status.')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run?.summary, { timeout: 30000 }).toContain('Now add the project status.')
   await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run.status, { timeout: 30000 }).toBe('succeeded')
   expect((await workspace.api(`/api/chats/${slug}`)).run.sessionId).toBe(previous.run.sessionId)
 
+  await waitForAccount()
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('fixture:agy-capacity-once Verify delayed recovery.')
   const sentAt = Date.now()
   await page.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run?.retry?.cause.kind).toBe('server')
+  await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run?.retry?.cause.kind, { timeout: 30000 }).toBe('server')
   expect((await workspace.api(`/api/chats/${slug}`)).run.retry.nextAttemptAt).toBeGreaterThanOrEqual(sentAt + 8_000)
   await expect(page.getByText(/Temporary error.*automatic retry/i).first()).toBeVisible()
   await expect.poll(async () => {
@@ -137,6 +145,7 @@ test('Antigravity connects a Gemini API key, selects a model and runs a conversa
   }, { timeout: 30000 }).toEqual(['succeeded', true])
   expect((await workspace.api(`/api/chats/${slug}`)).run.sessionId).toBe(previous.run.sessionId)
 
+  await waitForAccount()
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('fixture:agy-unknown-429 Verify an ambiguous refusal.')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run?.status, { timeout: 30000 }).toBe('failed')
@@ -146,6 +155,7 @@ test('Antigravity connects a Gemini API key, selects a model and runs a conversa
   await expect(page.getByText('Waiting for quota', { exact: true })).toHaveCount(0)
   expect((await workspace.api(`/api/chats/${slug}`)).run.retry?.nextAttemptAt ?? null).toBeNull()
 
+  await waitForAccount()
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('fixture:agy-slow=4000 fixture:agy-429 fixture:agy-quota-inline')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect.poll(async () => {

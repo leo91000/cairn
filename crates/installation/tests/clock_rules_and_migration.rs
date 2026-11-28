@@ -1153,11 +1153,11 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             }).to_string(),
         ],
     ).unwrap();
-    let mut antigravity_retries = Vec::new();
+    let mut initial_retries = Vec::new();
     for (startup, stored_retry) in [(false, true), (true, true), (false, false), (true, false)] {
         let retry_run = id();
         let mut profile = agent.clone();
-        profile["provider"] = "antigravity".into();
+        profile["provider"] = if startup { "codex" } else { "antigravity" }.into();
         let session = (!startup).then_some("saved-antigravity-session");
         conn.execute(
             "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,snapshot,boundary,
@@ -1173,7 +1173,11 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
                 .to_string(),
                 session,
                 stored_retry.then_some(t0 + 60_000),
-                stored_retry.then(|| json!({ "kind": "rate-limit", "message": "Provider capacity", "startup": startup }).to_string()),
+                stored_retry.then(|| json!({
+                    "kind": if startup { "timeout" } else { "rate-limit" },
+                    "message": if startup { "Codex initialize request timed out." } else { "Provider capacity" },
+                    "startup": startup,
+                }).to_string()),
                 if stored_retry { "queued" } else { "running" },
                 stored_retry.then_some(1),
                 stored_retry.then_some(5),
@@ -1193,7 +1197,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             ],
         )
         .unwrap();
-        antigravity_retries.push((retry_run, startup, stored_retry));
+        initial_retries.push((retry_run, startup, stored_retry));
     }
 
     let converted_run = id();
@@ -1678,7 +1682,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         )
         .unwrap();
     assert!(continuation.contains("Wait for the CI") && continuation.contains("succeeded"));
-    for (retry_run, startup, stored_retry) in &antigravity_retries {
+    for (retry_run, startup, stored_retry) in &initial_retries {
         let mut run = cairn_installation::store::Db(&migrated)
             .run(retry_run)
             .unwrap()
@@ -1690,8 +1694,17 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             // Model the retry the worker schedules after recovering the refusal.
             run["retry"] = json!({
                 "attempt": 1, "limit": 5, "nextAttemptAt": t0 + 60_000,
-                "cause": { "kind": "rate-limit", "message": "Provider capacity", "startup": startup },
+                "cause": {
+                    "kind": if *startup { "timeout" } else { "rate-limit" },
+                    "message": if *startup { "Codex initialize request timed out." } else { "Provider capacity" },
+                    "startup": startup,
+                },
             });
+        }
+        if *startup {
+            // Model the run reloaded after mark_running consumes the startup slot.
+            run["status"] = "running".into();
+            run["retry"]["nextAttemptAt"] = Value::Null;
         }
         let plan = cairn_installation::run_output::chat_plan(
             &run,
@@ -1703,12 +1716,17 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .unwrap();
         assert_eq!(plan["execution"]["messageId"], *retry_run);
         assert_eq!(
-            plan["execution"]["text"],
-            "Task brief:\nPrepare the original report."
+            plan["execution"]["text"], "Task brief:\nPrepare the original report.",
+            "startup={startup}, pre_migration_retry={stored_retry}, provider={}, status={}, retry={}, authorized={}",
+            plan["provider"], run["status"], run["retry"], plan["antigravityRetryAuthorized"],
         );
         assert_eq!(plan["execution"]["recovery"], false);
-        assert_eq!(run["retry"]["nextAttemptAt"], t0 + 60_000);
-        if !startup {
+        if *startup {
+            assert_eq!(plan["provider"], "codex");
+            assert!(plan["antigravityRetryAuthorized"].is_null());
+        } else {
+            assert_eq!(plan["provider"], "antigravity");
+            assert_eq!(run["retry"]["nextAttemptAt"], t0 + 60_000);
             assert_eq!(plan["antigravityRetryAuthorized"], true);
         }
     }
