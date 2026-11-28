@@ -255,6 +255,15 @@ pub(crate) fn replenish(account: &mut Account, driver: &dyn Driver) {
     }
 }
 
+/// Evaluates a refusal that is still tied to a lease, using the normal usage
+/// reset and cooldown rules even if fencing has yet to release that lease.
+fn effective_pending_exhaustion(account: &Account, exhaustion: Exhaustion) -> Option<Exhaustion> {
+    let mut pending = account.clone();
+    pending.exhausted = Some(exhaustion);
+    replenish(&mut pending, account.provider.driver());
+    pending.exhausted
+}
+
 fn fresh(account: &Account, driver: &dyn Driver) -> bool {
     account
         .usage
@@ -365,16 +374,21 @@ impl Accounts {
         Ok(())
     }
 
-    pub async fn lock(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        let account_lock = self
-            .locks
+    async fn account_mutex(&self, id: &str) -> Arc<Mutex<()>> {
+        self.locks
             .lock()
             .await
             .entry(id.into())
             .or_default()
-            .clone();
+            .clone()
+    }
 
-        account_lock.lock_owned().await
+    pub async fn lock(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.account_mutex(id).await.lock_owned().await
+    }
+
+    pub(crate) async fn try_lock(&self, id: &str) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        self.account_mutex(id).await.try_lock_owned().ok()
     }
 
     pub async fn account(&self, s: &Service, id: &str) -> Result<Account> {

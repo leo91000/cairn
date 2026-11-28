@@ -1701,7 +1701,8 @@ async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() 
                 &lease.run_id,
                 crate::runs::RunChanges {
                     status: Some(crate::run_status::RunStatus::Running),
-                    session_id: Some(Some("fixture-session".into())),
+                    // The quota frame was still in transit when Stop was accepted.
+                    cancel_requested_at: Some(Some(crate::config::now())),
                     ..Default::default()
                 },
             )

@@ -1181,10 +1181,6 @@ impl Checkpoint {
                     // refresh may hold its lock across provider I/O, so the
                     // worker applies exhaustion when it releases the lease.
                     if managed_quota
-                        && let Some(run) = db.run_state(&id)?
-                        && run.status == RunStatus::Running
-                        && run.session_id.is_some()
-                        && run.cancel_requested_at.is_none()
                         && let Some(lease) = db.account_lease(&id)?
                         && let Some(account) = db.coding_account(&lease.account_id)?
                     {

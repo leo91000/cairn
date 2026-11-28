@@ -1,6 +1,6 @@
 //! Account persistence through the existing SQLite writer. No document store fallback.
 use super::{
-    Account, AccountState, Accounts, Exhaustion, Lease,
+    Account, AccountState, Accounts, Exhaustion, Lease, effective_pending_exhaustion,
     usage::{Resets, Usage, Window},
 };
 use crate::{
@@ -346,13 +346,37 @@ impl Db<'_> {
     }
 
     pub fn pending_quota_accounts(&self) -> Result<HashSet<String>> {
-        Ok(self
+        let mut query = self.0.prepare_cached(&format!(
+            "SELECT lease.account_id,json_extract(checkpoint.state,'$.managedQuotaFailure.exhaustion')
+             {PENDING_QUOTA_JOIN}"
+        ))?;
+        let mut rows = query.query([])?;
+        let mut accounts = HashSet::new();
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            if accounts.contains(&id) {
+                continue;
+            }
+            let evidence: String = row.get(1)?;
+            let account = crate::error::required(self.coding_account(&id)?, "Account not found.")?;
+            if effective_pending_exhaustion(&account, serde_json::from_str(&evidence)?).is_some() {
+                accounts.insert(id);
+            }
+        }
+        Ok(accounts)
+    }
+
+    pub(crate) fn pending_quota_for_run(&self, run: &str) -> Result<Option<(String, Exhaustion)>> {
+        let row: Option<(String, String)> = self
             .0
             .prepare_cached(&format!(
-                "SELECT DISTINCT lease.account_id {PENDING_QUOTA_JOIN}"
+                "SELECT lease.account_id,json_extract(checkpoint.state,'$.managedQuotaFailure.exhaustion')
+                 {PENDING_QUOTA_JOIN} AND lease.run_id=?"
             ))?
-            .query_map([], |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?)
+            .query_row([run], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        row.map(|(id, evidence)| Ok((id, serde_json::from_str(&evidence)?)))
+            .transpose()
     }
 
     pub fn reserve_account_lease(&self, lease: &Lease) -> Result<()> {
@@ -407,17 +431,11 @@ impl Db<'_> {
     }
 
     pub fn remove_account_lease(&self, run: &str) -> Result<()> {
-        let pending: Option<(String, String)> = self
-            .0
-            .prepare_cached(&format!(
-                "SELECT lease.account_id,json_extract(checkpoint.state,'$.managedQuotaFailure.exhaustion')
-                 {PENDING_QUOTA_JOIN} AND lease.run_id=?"
-            ))?
-            .query_row([run], |row| Ok((row.get(0)?, row.get(1)?)))
-            .optional()?;
-        if let Some((id, exhaustion)) = pending {
+        if let Some((id, exhaustion)) = self.pending_quota_for_run(run)? {
             let account = crate::error::required(self.coding_account(&id)?, "Account not found.")?;
-            Accounts::save_exhaustion_in(self, account, serde_json::from_str(&exhaustion)?)?;
+            if let Some(exhaustion) = effective_pending_exhaustion(&account, exhaustion) {
+                Accounts::save_exhaustion_in(self, account, exhaustion)?;
+            }
             self.0.execute(
                 "UPDATE run_checkpoints SET state=json_remove(state,'$.managedQuotaFailure') WHERE run_id=?",
                 [run],

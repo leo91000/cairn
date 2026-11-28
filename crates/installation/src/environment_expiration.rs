@@ -981,8 +981,19 @@ impl Service {
         if !retirement.local {
             let run = retirement.run_id.clone();
             crate::conversation_deletion::retired::detach(self, &run, &retirement.id).await?;
-            let account_guard = match self.accounts.lease(self, &run).await? {
-                Some(lease) => Some(self.accounts.lock(&lease.account_id).await),
+            let account_run = run.clone();
+            let quota = self
+                .store
+                .read(move |db| db.pending_quota_for_run(&account_run))
+                .await?;
+            let account_guard = match quota {
+                Some((account, _)) => {
+                    Some(self.accounts.try_lock(&account).await.ok_or_else(|| {
+                        Error::unavailable(
+                            "The coding-agent account is busy. Retrying lease release.",
+                        )
+                    })?)
+                }
                 None => None,
             };
             let mut detached = retirement.clone();
@@ -1208,12 +1219,6 @@ mod tests {
         store
             .transaction(move |db| {
                 assert!(db.pending_quota_accounts()?.contains(&lease.account_id));
-                let mut account = db.coding_account(&lease.account_id)?.unwrap();
-                account.usage = Some(Usage::from_value(&json!({
-                    "allowed": true, "checkedAt": now() + 1,
-                    "windows": [{ "id": "primary", "usedPercent": 0 }]
-                })));
-                db.save_coding_account(&account)?;
                 request_in(db, &run, &Expiration::new(Cause::NodeChange), false)?;
                 assert!(db.run_state(&run)?.unwrap().session_id.is_none());
                 assert!(
@@ -1226,11 +1231,18 @@ mod tests {
                 let mut next = lease;
                 next.run_id = id();
                 assert!(db.reserve_account_lease(&next).unwrap_err().is_conflict());
-                db.remove_account_lease(&run)?;
+
                 let mut account = db.coding_account(&next.account_id)?.unwrap();
-                assert_eq!(account.exhausted.as_ref().unwrap().model, next.model);
-                assert!(db.reserve_account_lease(&next).unwrap_err().is_conflict());
-                crate::accounts::replenish(&mut account, Provider::Codex.driver());
+                account.usage = Some(Usage::from_value(&json!({
+                    "allowed": true, "checkedAt": now() + 1,
+                    "windows": [{ "id": "primary", "usedPercent": 0 }]
+                })));
+                db.save_coding_account(&account)?;
+                // The other slot becomes usable even if the old controller
+                // remains unreachable and still owns the retiring lease.
+                db.reserve_account_lease(&next)?;
+                db.remove_account_lease(&run)?;
+                let account = db.coding_account(&next.account_id)?.unwrap();
                 assert!(account.exhausted.is_none());
                 Ok(())
             })
