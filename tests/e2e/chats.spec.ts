@@ -541,6 +541,9 @@ test('stopping a chat during native cleanup keeps the later message queued', asy
   }).toEqual({ status: 'succeeded', recoveryPending: false })
   const completed = workspace.service.chats.detail(chat.id).run!
   workspace.service.store.deferNativeCleanup(completed.id)
+  const closing = workspace.service.chats.detail(chat.id).run
+  expect(closing?.executionBackend).toBe('firecracker')
+  expect(closing?.nativeCleanupPending).toBe(true)
   const following = randomUUID()
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: following, text: 'Keep this for the next turn' })
   await page.goto(workspacePath(`/chats/${chat.id}`))

@@ -3,6 +3,8 @@
 During a completed turn's deferred cleanup, web and Android keep Stop available
 in the chat composer and run view through the existing authorized actions.
 Android also presents its native confirmation from the conversation menu.
+Both apps use the retiring attempt's state while a different destination
+backend is selected.
 Stop pauses the conversation and retains messages written after the turn ended.
 Public MCP and `cairn_installation` use the same stop and cancellation actions.
 

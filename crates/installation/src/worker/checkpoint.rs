@@ -501,16 +501,27 @@ impl RunCheckpoint {
         (self.runner_id() == Some(pending.attempt.as_str())).then_some(pending)
     }
 
-    /// A settled native turn can be closing before its fence receipt is recorded.
-    pub(crate) fn finishing_native_turn(&self) -> bool {
-        self.pending_native_cleanup().is_some()
-            || self.held_environment.is_none()
-                && self
-                    .prepared()
-                    .is_some_and(|plan| plan["backend"] == "native")
-                && self
-                    .settled()
-                    .is_some_and(|turn| turn.status == RunStatus::Succeeded)
+    /// Project the closing attempt without loading its workspace plan or provider progress.
+    pub(crate) fn finishing_native_turn_in(
+        db: &Db<'_>,
+        run_id: &str,
+        completing_chat: bool,
+    ) -> Result<bool> {
+        let finishing =
+            db.0.prepare_cached(
+                "SELECT COALESCE(json_extract(state,'$.pendingNativeCleanup.attempt') =
+                             json_extract(state,'$.runnerId'), 0)
+                 OR (?2 AND json_extract(state,'$.heldEnvironment') IS NULL
+                        AND json_extract(state,'$.prepared.backend')='native'
+                        AND json_extract(state,'$.settled.status')='succeeded')
+             FROM run_checkpoints WHERE run_id=?1",
+            )?
+            .query_row(params![run_id, completing_chat], |row| {
+                row.get::<_, Option<bool>>(0)
+            })
+            .optional()?
+            .flatten();
+        Ok(finishing.unwrap_or_default())
     }
 
     pub fn finalization_error(&self) -> Option<&str> {
@@ -995,7 +1006,7 @@ impl Checkpoint {
             ));
         }
         *state = saved;
-        result
+        result.map(|_| ())
     }
 
     pub fn try_snapshot(&self) -> Option<RunCheckpoint> {

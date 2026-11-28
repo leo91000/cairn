@@ -296,18 +296,24 @@ pub(crate) fn stop_chat_in(
 }
 
 fn can_cancel(db: &Db<'_>, run: &cairn_contracts::RunState, executing: bool) -> Result<bool> {
-    if run.status.is_active() {
+    if run.status.is_active() || native_cleanup_pending_in(db, run)? {
         return Ok(true);
     }
-    let completing_chat =
-        run.trigger == "chat" && run.status == RunStatus::Succeeded && run.recovery_pending;
-    if !executing && !completing_chat {
+    if !executing {
         return Ok(false);
     }
-    Ok(RunCheckpoint::load_in(db, &run.id)?.is_some_and(|saved| {
-        executing && saved.held_environment.is_some()
-            || completing_chat && saved.finishing_native_turn()
-    }))
+    Ok(RunCheckpoint::load_in(db, &run.id)?.is_some_and(|saved| saved.held_environment.is_some()))
+}
+
+/// The retiring attempt can still accept Stop while placement shows a new destination.
+pub(crate) fn native_cleanup_pending_in(
+    db: &Db<'_>,
+    run: &cairn_contracts::RunState,
+) -> Result<bool> {
+    if run.trigger != "chat" || run.status != RunStatus::Succeeded || !run.recovery_pending {
+        return Ok(false);
+    }
+    RunCheckpoint::finishing_native_turn_in(db, &run.id, true)
 }
 
 /// Cancelling a conversation's run or its wakeup pauses it as Stop does, in the same

@@ -1024,6 +1024,14 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         return Ok(false);
     }
     let fenced = recovery::fence_attempt(s, run, expected_checkpoint.as_ref()).await;
+    if matches!(
+        fenced,
+        Ok(recovery::FenceDisposition::DeferredNativeCleanup)
+    ) {
+        // The durable observer owns settlement. Ordinary recovery must not
+        // clear credentials or publish a wait reason after that handoff.
+        return Ok(false);
+    }
     let mut expected_fenced = expected_checkpoint.clone();
     if fenced.is_ok()
         && let Some(saved) = &mut expected_fenced

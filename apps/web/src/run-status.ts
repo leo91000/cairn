@@ -4,10 +4,9 @@ type RunState = Partial<Pick<Run, 'suspendedByExclusive'>> & { status: Run['stat
 
 export const exclusiveSuspensionLabel = 'Suspended for exclusive work'
 
-export function canStopRun(run?: Pick<Run, 'status' | 'trigger' | 'executionBackend' | 'recoveryPending'> | null) {
+export function canStopRun(run?: Pick<Run, 'status' | 'nativeCleanupPending' | 'recoveryPending'> | null) {
   return !!run && (['queued', 'running', 'waiting'].includes(run.status)
-    || (run.status === 'succeeded' && run.trigger === 'chat'
-      && run.executionBackend === 'native' && run.recoveryPending))
+    || (run.status === 'succeeded' && run.recoveryPending && run.nativeCleanupPending === true))
 }
 
 /** A late reservation snapshot must never hide a settled or queued execution. */

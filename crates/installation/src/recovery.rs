@@ -233,7 +233,9 @@ pub(crate) async fn fence_authorized(
 ) -> Result<()> {
     let run_id = text(run, "id");
     let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
-    fence_attempt_authorized(s, run, checkpoint.as_ref(), authorize).await
+    fence_attempt_authorized(s, run, checkpoint.as_ref(), authorize)
+        .await
+        .map(|_| ())
 }
 
 /// Compare the physical owner, not the checkpoint's mutable evidence.
@@ -254,7 +256,7 @@ pub(crate) async fn fence_attempt(
     s: &Service,
     run: &Value,
     expected: Option<&RunCheckpoint>,
-) -> Result<()> {
+) -> Result<FenceDisposition> {
     fence_attempt_authorized(
         s,
         run,
@@ -264,12 +266,17 @@ pub(crate) async fn fence_attempt(
     .await
 }
 
+pub(crate) enum FenceDisposition {
+    Complete,
+    DeferredNativeCleanup,
+}
+
 async fn fence_attempt_authorized(
     s: &Service,
     run: &Value,
     expected: Option<&RunCheckpoint>,
     authorize: crate::authorization::Authorization,
-) -> Result<()> {
+) -> Result<FenceDisposition> {
     let run_id = text(run, "id");
     let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
     if !same_execution(checkpoint.as_ref(), expected) {
@@ -419,7 +426,7 @@ async fn fence_attempt_authorized(
                 })
                 .await?;
             if released {
-                return Ok(());
+                return Ok(FenceDisposition::DeferredNativeCleanup);
             }
         }
     }
@@ -454,7 +461,7 @@ async fn fence_attempt_authorized(
             if let Some(attempt) = release {
                 crate::nodes::placement::release_in(db, &attempt)?;
             }
-            Ok(())
+            Ok(FenceDisposition::Complete)
         })
         .await
 }

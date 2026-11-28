@@ -1262,8 +1262,8 @@ abstract class BackgroundWaitCases {
                         Run(
                             id = SAVED_RUN_ID,
                             status = status,
-                            trigger = "chat",
-                            executionBackend = if (recoveryPending) "native" else null,
+                            executionBackend = if (recoveryPending) "firecracker" else null,
+                            nativeCleanupPending = recoveryPending.takeIf { it },
                             recoveryPending = recoveryPending,
                             startedAt = now - 60_000,
                             resumeAvailable = hasSavedTurn && !resumePrelaunch,

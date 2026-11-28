@@ -343,9 +343,7 @@ pub(crate) fn request_in(
     let completing_chat = run["trigger"] == "chat"
         && RunStatus::of(&run) == Some(RunStatus::Succeeded)
         && run["recoveryPending"] == true;
-    let finishing_native = RunCheckpoint::load_in(db, run_id)?.is_some_and(|saved| {
-        saved.pending_native_cleanup().is_some() || completing_chat && saved.finishing_native_turn()
-    });
+    let finishing_native = RunCheckpoint::finishing_native_turn_in(db, run_id, completing_chat)?;
     if !stopped && !finishing_native {
         db.change_run(
             run_id,

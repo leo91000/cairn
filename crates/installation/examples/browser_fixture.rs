@@ -247,7 +247,7 @@ async fn main() -> Result<()> {
                             recovery_pending: Some(true),
                             placement: Some(Box::new(
                                 cairn_installation::nodes::run_placement::PlacementChanges {
-                                    execution_backend: Some(Some("native".to_owned())),
+                                    execution_backend: Some(Some("firecracker".to_owned())),
                                     ..Default::default()
                                 },
                             )),

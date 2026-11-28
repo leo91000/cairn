@@ -190,6 +190,37 @@ async fn request_during_native_delete(stop: bool) {
     let revision_before_fence = tokio::time::timeout(Duration::from_secs(5), async {
         let (fence, revision) = tokio::join!(checkpoint.fence(&service, &run), async {
             arrived.notified().await;
+            service
+                .store
+                .change_run(
+                    &id,
+                    crate::runs::RunChanges {
+                        placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                            execution_backend: Some(Some("firecracker".to_owned())),
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                service.store.run(&id).await.unwrap()["executionBackend"],
+                "firecracker"
+            );
+            let migrating = id.clone();
+            service
+                .store
+                .read(move |db| {
+                    assert_eq!(db.run(&migrating)?.unwrap()["nativeCleanupPending"], true);
+                    assert_eq!(
+                        db.conversation_run(&migrating)?.unwrap()["nativeCleanupPending"],
+                        true
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
             if stop {
                 service.worker.cancel(&service, &id).await.unwrap();
             } else {
@@ -245,6 +276,71 @@ async fn request_during_native_delete(stop: bool) {
             .unwrap()
             .awaiting_retirement()
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn restarted_recovery_hands_off_before_waiting_on_the_account() {
+    use axum::{Json, Router, routing::delete};
+
+    let attempt = crate::config::id();
+    let receipt = json!({
+        "StatusCode": crate::runner::CONTROLLER_FAILED,
+        "FinalizationFailed": true,
+        "NativeCleanup": {
+            "attemptId": attempt, "workloadFenced": true,
+            "cleanupStatusProtocol": crate::runner::NATIVE_CLEANUP_STATUS_PROTOCOL,
+            "message": "Native disk cleanup is still in progress."
+        }
+    });
+    let app = Router::new().route(
+        "/runs/{attempt}",
+        delete(move || async move { Json(receipt) }),
+    );
+    let (_root, service, server) = fence_service(app).await;
+    let id = crate::config::id();
+    let fixture_id = id.clone();
+    let account = crate::config::id();
+    let credentials = service.accounts.lock(&account).await;
+    service
+        .store
+        .transaction(move |db| {
+            db.add_run_fixture(&json!({
+            "id": fixture_id, "taskId": fixture_id, "status": "succeeded", "trigger": "chat",
+            "isolated": true, "recoveryPending": true, "finishedAt": 42, "accountId": account,
+        }), None)?;
+            RunCheckpoint::from_value(json!({
+                "runnerId": attempt,
+                "prepared": { "backend": "native", "isolated": true },
+                "settled": { "status": "succeeded", "finishedAt": 42 },
+            }))?
+            .store_in(db, &fixture_id)
+        })
+        .await
+        .unwrap();
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        super::super::schedule::recover_completed_environments(&service),
+    )
+    .await
+    .expect("the deferred fence should release ordinary recovery")
+    .unwrap();
+    let saved = RunCheckpoint::load(&service.store, &id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.pending_native_cleanup().unwrap().needs_observation());
+    assert!(
+        service
+            .store
+            .run_state(&id)
+            .await
+            .unwrap()
+            .account_wait_reason
+            .is_none()
+    );
+    drop(credentials);
     server.abort();
 }
 

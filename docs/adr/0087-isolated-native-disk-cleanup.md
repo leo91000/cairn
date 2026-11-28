@@ -93,6 +93,8 @@ before heartbeat or output persistence can overwrite it. After its final
 checkpoint write, the live worker hands that attempt to deferred recovery.
 The run can settle while the worker clears its local credentials. Admission
 and physical detachment still wait for the worker to release the run.
+When ordinary recovery records the fence after restart, it leaves settlement
+to the observer immediately. Normal admission clears provider homes before reuse.
 
 The native marker advances to `ublk-rootless-v3` before a mounted disk is
 handed to execution. This reader accepts v1/v2 and upgrades only its marker;
