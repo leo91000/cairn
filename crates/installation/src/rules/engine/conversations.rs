@@ -283,7 +283,8 @@ fn origin_depth(db: &Db<'_>, origin: &Origin) -> Result<u32> {
 }
 
 /// True while any active conversation started by `rule_id` has a turn queued,
-/// running or waiting for a wakeup. Unanswered questions alone do not count (ADR-0094).
+/// running or waiting for a wakeup or a new environment. Unanswered questions alone
+/// do not count (ADR-0094).
 pub(crate) fn rule_has_working_conversation(db: &Db<'_>, rule_id: &str) -> Result<bool> {
     Ok(db.0.query_row(
         "SELECT EXISTS( \
@@ -294,6 +295,9 @@ pub(crate) fn rule_has_working_conversation(db: &Db<'_>, rule_id: &str) -> Resul
                 OR EXISTS(SELECT 1 FROM chat_messages m WHERE m.chat_id = c.id \
                    AND m.status IN ('queued','sending')) \
                 OR EXISTS(SELECT 1 FROM durable_wakeups w WHERE w.chat_id = c.id) \
+                OR EXISTS(SELECT 1 FROM records p WHERE p.id=c.run_id AND p.kind='environment-expirations' \
+                   AND json_extract(p.data,'$.continueTurn')=1 \
+                   AND coalesce(json_extract(p.data,'$.cancelled'),0)=0) \
             ) \
         )",
         [rule_id],
@@ -1013,4 +1017,46 @@ pub(super) async fn prepare(
         crate::native::policy::refresh_chat(s, &chat).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run_fixture::DbRunFixture;
+
+    #[tokio::test]
+    async fn overlap_counts_a_turn_that_will_resume_after_environment_retirement() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::common::config(root.path()))
+            .await
+            .unwrap();
+        service.store.transaction(|db| {
+            let (run, chat, rule) = (id(), id(), id());
+            db.add_run_fixture(&json!({
+                "id": run, "taskId": chat, "trigger": "chat", "status": "cancelled",
+                "createdAt": 1, "finishedAt": 2,
+            }), None)?;
+            db.save_conversation_boundary(&json!({ "id": chat, "runId": run }))?;
+            db.0.execute(
+                "INSERT INTO hook_rule_conversations(chat_id,creator_account_id,agent_id,rule_id,origin,run_id,created_at)
+                 VALUES(?1,'fixture-owner',?2,?3,'{}',?4,1)",
+                params![chat, crate::config::MAIN_AGENT_ID, rule, run],
+            )?;
+            assert!(!rule_has_working_conversation(db, &rule)?);
+            let mut retirement = json!({
+                "id": run,
+                "runId": run,
+                "expiredAt": 2,
+                "cause": "node-change",
+                "continueTurn": true,
+            });
+            db.put(crate::environment_expiration::PENDING, &retirement)?;
+            assert!(rule_has_working_conversation(db, &rule)?);
+            retirement["cancelled"] = true.into();
+            db.put(crate::environment_expiration::PENDING, &retirement)?;
+            assert!(!rule_has_working_conversation(db, &rule)?);
+            Ok(())
+        }).await.unwrap();
+        service.shutdown.cancel();
+    }
 }

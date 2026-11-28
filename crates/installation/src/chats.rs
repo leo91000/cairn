@@ -981,10 +981,15 @@ pub(crate) fn send(
         }
         _ => false,
     };
-    if !expiry_owns_wait {
-        chat.wakeup = None;
-    }
+    let superseded_wait = if expiry_owns_wait {
+        None
+    } else {
+        chat.wakeup.take()
+    };
     db.save_conversation(&chat)?;
+    if let (Some(wakeup), Some(run_id)) = (superseded_wait, chat.run_id.as_deref()) {
+        continuation::settle_superseded_wait(db, run_id, &wakeup.id)?;
+    }
     if let Some((mut question, answers)) = answer {
         question.status = QuestionStatus::Answering;
         question.message_id = Some(values.id.clone());

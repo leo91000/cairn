@@ -152,14 +152,27 @@ pub(super) fn cancel(db: &Db<'_>, id: &str) -> Result<()> {
 /// the live conversation's completed reply.
 pub(crate) fn stop_for_run(db: &Db<'_>, run: &str) -> Result<bool> {
     let waiting = cancel_for_run(db, run)?;
-    if waiting && let Some(mut stopped) = db.run_state(run)? {
+    if waiting {
+        record_stopped_occurrence(db, run)?;
+    }
+    Ok(waiting)
+}
+
+/// The new message and the removal of its superseded wait share one transaction.
+pub(super) fn settle_superseded_wait(db: &Db<'_>, run: &str, wakeup: &str) -> Result<()> {
+    clear_migrated_wait(db, run, wakeup)?;
+    record_stopped_occurrence(db, run)
+}
+
+fn record_stopped_occurrence(db: &Db<'_>, run: &str) -> Result<()> {
+    if let Some(mut stopped) = db.run_state(run)? {
         stopped.status = RunStatus::Cancelled;
         stopped.finished_at = Some(crate::config::now());
         stopped.recovery_pending = false;
         stopped.retry = None;
         db.record_migrated_settlement(&stopped)?;
     }
-    Ok(waiting)
+    Ok(())
 }
 
 /// A failed legacy attempt's explicit wait removal follows the migrated chat.

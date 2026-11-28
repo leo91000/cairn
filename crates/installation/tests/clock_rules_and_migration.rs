@@ -960,6 +960,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let resuming_retirement_run_id = id();
     let stopped_wait_run_id = id();
     let failed_wait_run_id = id();
+    let superseded_wait_run_id = id();
     let regular_chat_id = id();
     let t0 = 1_700_000_000_000i64;
     let future_snooze = now() + 3_600_000;
@@ -1260,6 +1261,11 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             "stopped-wake",
         ),
         (&failed_wait_run_id, "failed-migrated-turn", "failed-wake"),
+        (
+            &superseded_wait_run_id,
+            "superseded-migrated-turn",
+            "superseded-wake",
+        ),
     ] {
         conn.execute(
             "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,boundary,
@@ -2177,6 +2183,31 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     assert_eq!(
         failed_occurrence["error"],
         "Recovery could not retain the native session"
+    );
+    let superseded_run = service.store.run(&superseded_wait_run_id).await.unwrap();
+    let superseded_chat = text(&superseded_run, "taskId");
+    let superseded_history = format!("/api/hook-rule-triggerings/{superseded_chat}");
+    assert_eq!(get(&owner, &superseded_history).await["status"], "waiting");
+    let request = owner
+        .authorize(common::request(
+            "POST",
+            &format!("/api/chats/{superseded_chat}/messages"),
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "id": id(), "text": "Continue with a different request", "mode": "queue" })
+                .to_string(),
+        ))
+        .unwrap();
+    let response = common::send(&app, request).await;
+    let status = response.status();
+    let reply = common::read_json(response).await;
+    assert!(status.is_success(), "{reply}");
+    let superseded = get(&owner, &superseded_history).await;
+    assert_eq!(superseded["status"], "stopped");
+    assert_eq!(
+        superseded["event"]["payload"]["migratedConversation"]["summary"],
+        "Partial mission result"
     );
     let retirement_chat = service.chat_detail(&retirement_chat_id).await.unwrap();
     assert!(retirement_chat["wakeup"].is_null());
