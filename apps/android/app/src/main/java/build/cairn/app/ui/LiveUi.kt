@@ -451,15 +451,6 @@ fun MessageRow(
                                                 )
                                             }
                                         }
-                                    if (side?.canAsk == true && itemId.isNotEmpty())
-                                        Box(Modifier.withoutLineHeight()) {
-                                            ActionIcon(
-                                                "Poser une question à côté",
-                                                CairnIcons.SideQuestion,
-                                            ) {
-                                                side.ask(itemId, "", firstEvent)
-                                            }
-                                        }
                                     Text(
                                         time,
                                         style = MaterialTheme.typography.labelSmall,

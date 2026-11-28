@@ -1,3 +1,4 @@
+import type { Locator, Page } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
 import { connectClaude } from './accounts'
 import {
@@ -11,6 +12,22 @@ import {
 
 // The fixture's first reply of a turn, which side questions refer to.
 const reply = 'I’ll trace the component boundaries and keyboard handling'
+
+/**
+ * Selects characters `start` to `end` of a reply's first paragraph and asks about them:
+ * replies offer no other action, so a question about one starts from a passage.
+ */
+async function askAboutSelection(page: Page, message: Locator, start = 5, end = 35) {
+  await message.locator('.markdown p').first().evaluate((paragraph, [from, to]) => {
+    const text = paragraph.firstChild!
+    const range = document.createRange()
+    range.setStart(text, from)
+    range.setEnd(text, to)
+    document.getSelection()!.removeAllRanges()
+    document.getSelection()!.addRange(range)
+  }, [start, end])
+  await page.getByRole('button', { name: 'Ask about selection' }).click()
+}
 
 // Claude Code answers most of these side questions. The account belongs to this worker's workspace.
 test.beforeAll(async ({ workspace }) => {
@@ -50,11 +67,11 @@ test('an earlier response preserves a newer reply draft', async ({ page, workspa
     await panel.getByRole('button', { name: 'Ask', exact: true }).click()
     await started
     await panel.getByRole('button', { name: 'Close dialog' }).click()
-    await message.getByRole('button', { name: 'Ask about this reply' }).click()
-    await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Later draft')
+    await askAboutSelection(page, message)
+    await panel.getByRole('textbox', { name: 'Your question about this passage' }).fill('Later draft')
     release()
     await expect(panel.getByRole('button', { name: 'Ask', exact: true })).toBeEnabled()
-    await expect(panel.getByRole('textbox', { name: 'Your question about this reply' })).toHaveValue('Later draft')
+    await expect(panel.getByRole('textbox', { name: 'Your question about this passage' })).toHaveValue('Later draft')
   }
   finally {
     release()
@@ -98,16 +115,19 @@ test('asks side questions about a running reply without steering, queuing or rec
   const message = page.locator('.activity-message').filter({ hasText: reply })
   await expect(message).toBeVisible()
 
-  // The whole reply: its header action opens the side panel.
-  await message.getByRole('button', { name: 'Ask about this reply' }).click()
+  // A reply carries no ask action of its own: the general button above the composer and
+  // a selected passage are the ways in.
+  await expect(message.getByRole('button', { name: /^Ask/ })).toHaveCount(0)
+  await askAboutSelection(page, message)
   const panel = page.getByRole('dialog', { name: 'Side questions' })
   await expect(panel.getByText('Claude Code answers from the conversation so far and denies requested tools')).toBeVisible()
-  await expect(panel.getByRole('textbox', { name: 'Your question about this reply' })).toBeFocused()
-  await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Why trace the boundaries first?')
+  await expect(panel.getByText('trace the component boundaries', { exact: true })).toBeVisible()
+  await expect(panel.getByRole('textbox', { name: 'Your question about this passage' })).toBeFocused()
+  await panel.getByRole('textbox', { name: 'Your question about this passage' }).fill('Which boundaries?')
   await page.screenshot({ path: test.info().outputPath('side-question-desktop-light.png'), animations: 'disabled' })
   await panel.getByRole('button', { name: 'Ask', exact: true }).click()
-  // The agent received the start of the reply with the question (the fixture echoes it).
-  await expect(panel.getByText(/Side answer: About this reply of yours:/)).toBeVisible()
+  // The agent received the passage with the question (the fixture echoes it).
+  await expect(panel.getByText(/Side answer: About this passage of your reply:/)).toBeVisible()
   await expectSingleScroll(page)
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.screenshot({ path: test.info().outputPath('side-question-answer-desktop-dark.png'), animations: 'disabled' })
@@ -119,20 +139,12 @@ test('asks side questions about a running reply without steering, queuing or rec
   await expect(message).toBeFocused()
   await expect(message.getByRole('button', { name: 'Show 1 side question about this reply' })).toBeVisible()
 
-  // A passage selected in the reply can be asked about too.
-  await message.locator('.markdown p').first().evaluate((paragraph) => {
-    const text = paragraph.firstChild!
-    const range = document.createRange()
-    range.setStart(text, 5)
-    range.setEnd(text, 35)
-    document.getSelection()!.removeAllRanges()
-    document.getSelection()!.addRange(range)
-  })
-  await page.getByRole('button', { name: 'Ask about selection' }).click()
-  await expect(panel.getByText('trace the component boundaries', { exact: true })).toBeVisible()
-  await panel.getByRole('textbox', { name: 'Your question about this passage' }).fill('Which boundaries?')
+  // The reply's question count reopens its questions, and asking there is about the
+  // whole reply, which the agent receives with its start.
+  await message.getByRole('button', { name: 'Show 1 side question about this reply' }).click()
+  await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Why trace the boundaries first?')
   await panel.getByRole('button', { name: 'Ask', exact: true }).click()
-  await expect(panel.getByText(/Side answer: About this passage of your reply:/)).toBeVisible()
+  await expect(panel.getByText(/Side answer: About this reply of yours:/)).toBeVisible()
   await panel.getByRole('button', { name: 'Close dialog' }).click()
 
   // Nothing joined the queue or the conversation, and the reply keeps running.
@@ -141,7 +153,8 @@ test('asks side questions about a running reply without steering, queuing or rec
   // Only the turn's own message, which this fixture never acknowledges as delivered.
   expect(detail.messages.map((queued: { text: string }) => queued.text)).toEqual(['Review the layout. fixture:chat-hang'])
   expect(detail.sideQuestions.map((question: { status: string }) => question.status)).toEqual(['answered', 'answered'])
-  expect(detail.sideQuestions[1].quote).toBe('trace the component boundaries')
+  expect(detail.sideQuestions[0].quote).toBe('trace the component boundaries')
+  expect(detail.sideQuestions[1].quote).toBe('')
   expect(detail.sideQuestions[0].itemId).toBe(detail.sideQuestions[1].itemId)
   const events = JSON.stringify(workspace.service.store.events(detail.run.id, 0, 200))
   for (const side of ['Why trace the boundaries first?', 'Which boundaries?', 'Side answer'])
@@ -153,8 +166,7 @@ test('asks side questions about a running reply without steering, queuing or rec
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('finish now')
   await page.getByRole('button', { name: 'Send now' }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
-  await expect(message.getByRole('button', { name: 'Ask about this reply' })).toHaveCount(0)
-  // The action leaving does not move the conversation, which keeps following its end.
+  // The end of the turn does not move the conversation, which keeps following its end.
   expect((await header.boundingBox())!.height).toBe(running)
   await message.getByRole('button', { name: 'Show 2 side questions about this reply' }).click()
   await expect(panel.getByText('Side questions are answered while the agent works on a reply. Send a message instead.')).toBeVisible()
@@ -218,11 +230,11 @@ test('keeps a reply filter when asking more than once', async ({ page, workspace
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
   const message = page.locator('.activity-message').filter({ hasText: reply })
-  await message.getByRole('button', { name: 'Ask about this reply' }).click()
+  await askAboutSelection(page, message)
   const panel = page.getByRole('dialog', { name: 'Side questions' })
   // Answers echo the prompt; select the question's own paragraph, even after completion.
   const questionTexts = panel.getByRole('list', { name: 'Asked side questions' }).getByRole('listitem').locator(':scope > p')
-  await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('First question')
+  await panel.getByRole('textbox', { name: 'Your question about this passage' }).fill('First question')
   await panel.getByRole('button', { name: 'Ask', exact: true }).click()
   await expect(panel.getByRole('status').filter({ hasText: 'Answered' })).toHaveCount(1)
   await expect(questionTexts.filter({ hasText: /^First question$/ })).toBeVisible()
@@ -295,9 +307,9 @@ test('links reused native item IDs to the selected reply', async ({ page, worksp
   const second = page.locator('.activity-message').filter({ hasText: 'Second distinct reply' })
   await expect(first).toBeVisible()
   await expect(second).toBeVisible()
-  await first.getByRole('button', { name: 'Ask about this reply' }).click()
+  await askAboutSelection(page, first, 0, 'First distinct reply'.length)
   const panel = page.getByRole('dialog', { name: 'Side questions' })
-  await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Why the first reply?')
+  await panel.getByRole('textbox', { name: 'Your question about this passage' }).fill('Why the first reply?')
   await panel.getByRole('button', { name: 'Ask', exact: true }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).sideQuestions[0]?.answer).toContain('First distinct reply')
   await panel.getByRole('button', { name: 'Show reply' }).click()
@@ -499,10 +511,10 @@ test('a Codex reply answers side questions from its running turn', async ({ page
   await authenticateWorkspace(page)
   const message = page.locator('.activity-message').filter({ hasText: reply })
   await expect(message).toBeVisible()
-  await message.getByRole('button', { name: 'Ask about this reply' }).click()
+  await askAboutSelection(page, message)
   const panel = page.getByRole('dialog', { name: 'Side questions' })
   await expect(panel.getByText('Codex answers in a single reply. If it tries to run a tool')).toBeVisible()
-  await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Why trace the boundaries first?')
+  await panel.getByRole('textbox', { name: 'Your question about this passage' }).fill('Why trace the boundaries first?')
   await panel.getByRole('button', { name: 'Ask', exact: true }).click()
   await expect(panel.getByText('Side answer: Why trace the boundaries first?')).toBeVisible()
   // The question neither steered nor joined the running turn.
