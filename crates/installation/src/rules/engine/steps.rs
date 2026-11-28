@@ -1191,9 +1191,8 @@ fn migrated_view(
                c.title,c.slug,h.agent_id,w.wake_at
              FROM hook_rule_conversations h JOIN conversations c ON c.id=h.chat_id
              LEFT JOIN runs r ON r.id=h.run_id
-             LEFT JOIN run_checkpoints k ON k.run_id=r.id
              LEFT JOIN durable_wakeups w ON w.chat_id=h.chat_id
-                AND w.id=json_extract(k.state,'$.migratedMissionWakeupId')
+                AND c.run_id=r.id
                 AND json_extract(h.origin,'$.legacyRun.status') IS NULL
              LEFT JOIN records p ON p.id=r.id AND p.kind='environment-expirations'
                 AND json_extract(p.data,'$.continueTurn')=1

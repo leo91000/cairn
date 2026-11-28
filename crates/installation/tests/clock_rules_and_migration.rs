@@ -2173,6 +2173,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .unwrap();
     let failed_occurrence = get(&owner, &failed_history_path).await;
     assert_eq!(failed_occurrence["status"], "failed");
+    assert!(service.store.run(&failed_wait_run_id).await.unwrap()["wakeup"].is_null());
     assert_eq!(
         failed_occurrence["error"],
         "Recovery could not retain the native session"
@@ -2418,6 +2419,59 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let first_finish = now() - 2_000;
     let later_finish = first_finish + 1_000;
     for (run_id, chat_id) in [(&queued_id, &queued.0), (&waiting_run_id, &waiting_chat_id)] {
+        let current = service.store.run(run_id).await.unwrap();
+        let wake_at = now() + 60_000;
+        let continued_wait: cairn_contracts::ChatWakeup = serde_json::from_value(json!({
+            "id": id(),
+            "messageId": current["chatExecution"]["messageId"],
+            "reason": "Check again before finishing",
+            "seconds": 60,
+            "createdAt": wake_at - 60_000,
+            "wakeAt": wake_at,
+        }))
+        .unwrap();
+        let current_chat = chat_id.clone();
+        let current_run = run_id.clone();
+        service
+            .store
+            .transaction(move |db| {
+                db.save_wakeup(true, &current_chat, Some(&continued_wait))?;
+                db.change_run(
+                    &current_run,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(cairn_contracts::RunStatus::Succeeded),
+                        finished_at: Some(Some(wake_at - 60_000)),
+                        recovery_pending: Some(false),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let history_path = format!("/api/hook-rule-triggerings/{chat_id}");
+        let still_waiting = get(&owner, &history_path).await;
+        assert_eq!(still_waiting["status"], "waiting", "{still_waiting}");
+        assert_eq!(still_waiting["resumesAt"], wake_at);
+        assert!(still_waiting["finishedAt"].is_null());
+        let current_chat = chat_id.clone();
+        let current_run = run_id.clone();
+        service
+            .store
+            .transaction(move |db| {
+                db.save_wakeup(true, &current_chat, None)?;
+                db.change_run(
+                    &current_run,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(cairn_contracts::RunStatus::Queued),
+                        finished_at: Some(None),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         for (status, finished_at) in [
             (cairn_contracts::RunStatus::Succeeded, Some(first_finish)),
             (cairn_contracts::RunStatus::Queued, None),
@@ -2434,7 +2488,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
                 ..Default::default()
             }).await.unwrap();
         }
-        let history = get(&owner, &format!("/api/hook-rule-triggerings/{chat_id}")).await;
+        let history = get(&owner, &history_path).await;
         assert_eq!(history["status"], "completed", "{history}");
         assert_eq!(history["finishedAt"], first_finish, "{history}");
         assert_eq!(

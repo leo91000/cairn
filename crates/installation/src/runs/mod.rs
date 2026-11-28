@@ -560,6 +560,15 @@ impl Db<'_> {
                 self.write_run_state(&state)?;
             }
             if let Some(wakeup) = wakeup {
+                // Old failure transitions could request removal of a mission
+                // wait. Its migrated continuation now belongs to the chat.
+                if wakeup.is_none()
+                    && matches!(state.status, RunStatus::Failed | RunStatus::Interrupted)
+                    && !state.recovery_pending
+                    && !crate::environment_expiration::pending(self, id)?
+                {
+                    crate::chats::continuation::cancel_failed_migrated_wait(self, &state)?;
+                }
                 self.save_wakeup(false, id, wakeup.as_ref())?;
             }
             if let Some(boundary) = boundary {
@@ -610,8 +619,8 @@ impl Db<'_> {
                      WHERE id=?2 AND json_type(boundary,'$.outcome')='object')))
              WHERE chat_id=?1 AND run_id=?2 AND json_type(origin,'$.legacyRun')='object'
              AND json_extract(origin,'$.legacyRun.status') IS NULL
-             AND NOT EXISTS (SELECT 1 FROM run_checkpoints k JOIN durable_wakeups w ON w.chat_id=?1
-                 WHERE k.run_id=?2 AND w.id=json_extract(k.state,'$.migratedMissionWakeupId'))
+             AND NOT EXISTS (SELECT 1 FROM durable_wakeups w JOIN conversations c ON c.id=w.chat_id
+                 WHERE w.chat_id=?1 AND c.run_id=?2)
              AND NOT EXISTS (SELECT 1 FROM records WHERE id=?2 AND kind='environment-expirations'
                  AND json_extract(data,'$.continueTurn')=1
                  AND coalesce(json_extract(data,'$.cancelled'),0)=0)",

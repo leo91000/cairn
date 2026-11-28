@@ -151,33 +151,43 @@ pub(super) fn cancel(db: &Db<'_>, id: &str) -> Result<()> {
 /// Explicit Stop settles the original migrated occurrence without overwriting
 /// the live conversation's completed reply.
 pub(crate) fn stop_for_run(db: &Db<'_>, run: &str) -> Result<bool> {
-    if let Some(wakeup) = db.wakeup(false, run)?
-        && clear_migrated_wait(db, run, &wakeup.id)?
+    let waiting = cancel_for_run(db, run)?;
+    if waiting && let Some(mut stopped) = db.run_state(run)? {
+        stopped.status = RunStatus::Cancelled;
+        stopped.finished_at = Some(crate::config::now());
+        stopped.recovery_pending = false;
+        stopped.retry = None;
+        db.record_migrated_settlement(&stopped)?;
+    }
+    Ok(waiting)
+}
+
+/// A failed legacy attempt's explicit wait removal follows the migrated chat.
+pub(crate) fn cancel_failed_migrated_wait(
+    db: &Db<'_>,
+    run: &cairn_contracts::RunState,
+) -> Result<()> {
+    let original_unsettled: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hook_rule_conversations WHERE chat_id=?1 AND run_id=?2
+             AND json_type(origin,'$.legacyRun')='object'
+             AND json_extract(origin,'$.legacyRun.status') IS NULL)",
+        rusqlite::params![run.task_id, run.id],
+        |row| row.get(0),
+    )?;
+    if original_unsettled {
+        cancel_for_run(db, &run.id)?;
+    }
+    Ok(())
+}
+
+fn clear_migrated_wait(db: &Db<'_>, run: &str, wakeup_id: &str) -> Result<()> {
+    if let Some(mut checkpoint) = super::RunCheckpoint::load_in(db, run)?
+        && checkpoint.migrated_mission_wakeup_id.as_deref() == Some(wakeup_id)
     {
-        record_stopped_migrated_wait(db, run)?;
+        checkpoint.migrated_mission_wakeup_id = None;
+        checkpoint.store_in(db, run)?;
     }
-    cancel_for_run(db, run)
-}
-
-fn clear_migrated_wait(db: &Db<'_>, run: &str, wakeup_id: &str) -> Result<bool> {
-    let Some(mut checkpoint) = super::RunCheckpoint::load_in(db, run)? else {
-        return Ok(false);
-    };
-    if checkpoint.migrated_mission_wakeup_id.as_deref() != Some(wakeup_id) {
-        return Ok(false);
-    }
-    checkpoint.migrated_mission_wakeup_id = None;
-    checkpoint.store_in(db, run)?;
-    Ok(true)
-}
-
-pub(super) fn record_stopped_migrated_wait(db: &Db<'_>, run: &str) -> Result<()> {
-    let mut stopped = required(db.run_state(run)?, "Run not found")?;
-    stopped.status = RunStatus::Cancelled;
-    stopped.finished_at = Some(crate::config::now());
-    stopped.recovery_pending = false;
-    stopped.retry = None;
-    db.record_migrated_settlement(&stopped)
+    Ok(())
 }
 
 pub(crate) fn cancel_for_run(db: &Db<'_>, run: &str) -> Result<bool> {

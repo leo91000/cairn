@@ -563,14 +563,9 @@ pub(super) fn continue_run(
     checkpoint.retired_environment_deadline = None;
     checkpoint.retained_completion = None;
     checkpoint.store_in(db, run_id)?;
-    if !resumes_migrated_wait
-        && chat
-            .wakeup
-            .as_ref()
-            .is_some_and(|wake| migrated_wakeup_id.as_deref() == Some(wake.id.as_str()))
-    {
+    if wakeup_id.is_none() && chat.wakeup.is_some() {
         // New input ends the parked occurrence before reusing its run.
-        super::continuation::record_stopped_migrated_wait(db, run_id)?;
+        super::continuation::stop_for_run(db, run_id)?;
     }
     let compaction = execution.operation.as_deref() == Some(COMPACT);
     let mut patch = crate::runs::RunChanges {
