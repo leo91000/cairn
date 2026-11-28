@@ -30,7 +30,8 @@ const hasManagedWorktrees = computed(() => {
     </p>
     <UiButton
       v-if="canCleanUpWorktree && !active && run.workspace && !run.isolated
-        && run.snapshot.task.worktree && hasManagedWorktrees"
+        && !run.recoveryPending && !run.wakeup && run.snapshot.task.worktree
+        && hasManagedWorktrees"
       size="small"
       @click="emit('cleanup')"
     >

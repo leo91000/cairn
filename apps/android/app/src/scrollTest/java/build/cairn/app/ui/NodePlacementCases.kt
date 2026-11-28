@@ -651,7 +651,22 @@ abstract class NodePlacementCases {
     fun aMemberWithAgentAccessCanCleanManagedWorktreesInAMultiProjectRun() =
         delegatedRunWorktreeCleanup(hasAgentAccess = true)
 
-    private fun delegatedRunWorktreeCleanup(hasAgentAccess: Boolean) {
+    @Test
+    fun scheduledContinuationKeepsManagedWorktrees() =
+        delegatedRunWorktreeCleanup(
+            hasAgentAccess = true,
+            wakeup =
+                ChatWakeup(
+                    id = "wait",
+                    messageId = "turn",
+                    reason = "Reprendre après la vérification",
+                    createdAt = 2,
+                    seconds = 3600,
+                    wakeAt = 3_600_002,
+                ),
+        )
+
+    private fun delegatedRunWorktreeCleanup(hasAgentAccess: Boolean, wakeup: ChatWakeup? = null) {
         val requesterAgentId = MAIN_AGENT_ID
         val privateAgentId = "00000000-0000-4000-8000-000000000096"
         val requestingChat =
@@ -695,12 +710,13 @@ abstract class NodePlacementCases {
             Run(
                 id = "00000000-0000-4000-8000-000000000099",
                 taskId = delegatedChatId,
-                status = "failed",
+                status = if (wakeup == null) "failed" else "succeeded",
                 trigger = "chat",
                 createdAt = 1,
                 startedAt = 1,
                 finishedAt = 2,
                 workspace = "/workspace/private",
+                wakeup = wakeup,
                 workspaces =
                     listOf(
                         RunWorkspace("worktree", "/workspace/private/first", "first-project"),
@@ -798,7 +814,8 @@ abstract class NodePlacementCases {
                 compose.onNodeWithText("Détails de l’exécution").performClick()
                 compose.onNodeWithText("Espace de travail").assertExists()
                 val cleanup = compose.onNodeWithText("Nettoyer le worktree")
-                if (hasAgentAccess) cleanup.assertExists() else cleanup.assertDoesNotExist()
+                if (hasAgentAccess && wakeup == null) cleanup.assertExists()
+                else cleanup.assertDoesNotExist()
             } finally {
                 vm.api.closeStreams()
             }

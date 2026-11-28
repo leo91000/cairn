@@ -467,6 +467,8 @@ fun RunScreen(
                                     canCleanUpWorktree &&
                                     current.workspace != null &&
                                     !current.isolated &&
+                                    !current.recoveryPending &&
+                                    current.wakeup == null &&
                                     current.snapshot?.task?.worktree == true &&
                                     managedWorkspaces.isNotEmpty() &&
                                     managedWorkspaces.all {

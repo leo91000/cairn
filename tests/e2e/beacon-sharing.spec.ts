@@ -323,6 +323,33 @@ test('owner shares an installation and member works without management controls'
     await page.reload()
     await page.getByRole('button', { name: 'Run details', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toBeVisible()
+
+    const turnId = randomUUID()
+    const wakeup = {
+      id: randomUUID(),
+      messageId: turnId,
+      reason: 'Check on the workspace later',
+      seconds: 3600,
+      createdAt: Date.now(),
+      wakeAt: Date.now() + 3_600_000,
+    }
+    seed!.store.updateRun(cleanupRunId, {
+      status: 'succeeded',
+      chatExecution: { messageId: turnId, text: 'Review the private workspace.', attachments: [] },
+    })
+    seed!.store.put('chats', { id: delegated.id, wakeup })
+    await page.reload()
+    await page.getByRole('button', { name: 'Run details', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Original instructions', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toHaveCount(0)
+    const waitingCleanup = await page.request.post(`${apiRoot}/runs/${cleanupRunId}/cleanup`, {
+      headers: { 'origin': url, 'x-csrf-token': ownerSession.csrf },
+      data: { runId: cleanupRunId },
+    })
+    expect(waitingCleanup.status()).toBe(409)
+    expect(await waitingCleanup.json()).toMatchObject({ error: expect.stringContaining('scheduled continuation') })
+    expect(seed!.store.get('chats', delegated.id).wakeup.id).toBe(wakeup.id)
+
     await member.goto(`${installationUrl}rules?rule=${task.id}`)
     await expect(member.getByRole('heading', { name: 'Member commitment' })).toBeVisible()
     await expect(member.getByRole('button', { name: 'Run now' })).toBeVisible()

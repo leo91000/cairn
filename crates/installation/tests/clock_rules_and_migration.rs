@@ -756,6 +756,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let oneshot_mission_id = id();
     let blocked_run_id = id();
     let waiting_run_id = id();
+    let retirement_run_id = id();
     let regular_chat_id = id();
     let t0 = 1_700_000_000_000i64;
     let future_snooze = now() + 3_600_000;
@@ -957,6 +958,49 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         "INSERT INTO durable_wakeups(key,chat_id,mission_run_id,id,reason,seconds,created_at,wake_at,time_kind,time_seconds) \
          VALUES(1,NULL,?1,'w1','Wait for deploy',60,?2,?3,'delay',60)",
         params![waiting_run_id, t0, t0 + 60_000],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,boundary,
+           snapshot,session_id,recovery_pending,resume_available,resume_count)
+         SELECT ?1,task_id,'cancelled','schedule',created_at,started_at,?2,boundary,
+           snapshot,session_id,0,0,0
+         FROM runs WHERE id=?3",
+        params![retirement_run_id, t0 + 30_000, waiting_run_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO run_checkpoints(run_id,state) VALUES(?1,?2)",
+        params![
+            retirement_run_id,
+            json!({ "remainingMs": 12_000, "completed": true }).to_string(),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO records(kind,id,data,updated_at) VALUES('environment-expirations',?1,?2,?3)",
+        params![
+            retirement_run_id,
+            json!({
+                "id": retirement_run_id,
+                "runId": retirement_run_id,
+                "expiredAt": t0 + 30_000,
+                "cause": "node-change",
+                "environment": {
+                    "trigger": "schedule",
+                    "wakeup": {
+                        "id": "retired-wake",
+                        "messageId": "legacy-turn",
+                        "reason": "Wait through environment retirement",
+                        "seconds": 60,
+                        "createdAt": t0,
+                        "wakeAt": t0 + 60_000,
+                    },
+                },
+            })
+            .to_string(),
+            t0 + 30_000
+        ],
     )
     .unwrap();
 
@@ -1510,6 +1554,28 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let service = cairn_installation::service::Service::new(config)
         .await
         .unwrap();
+    let retired_run = retirement_run_id.clone();
+    let retirement_chat_id = service
+        .store
+        .read(move |db| Ok(db.conversation_for_run(&retired_run)?.unwrap().id))
+        .await
+        .unwrap();
+    let retirement_chat = service.chat_detail(&retirement_chat_id).await.unwrap();
+    assert_eq!(retirement_chat["wakeup"]["id"], "retired-wake");
+    service
+        .chat_send(
+            &retirement_chat_id,
+            json!({ "id": id(), "text": "Follow up without waiting", "mode": "queue" }),
+        )
+        .await
+        .unwrap();
+    service.detach_stopped_environments().await.unwrap();
+    let retirement_chat = service.chat_detail(&retirement_chat_id).await.unwrap();
+    assert!(retirement_chat["wakeup"].is_null());
+    assert_eq!(
+        retirement_chat["messages"][0]["text"],
+        "Follow up without waiting"
+    );
     // An overdue migrated schedule must neither act without Beacon's
     // membership confirmation nor keep the engine waiting on an unavailable Beacon.
     let contacted = Arc::new(tokio::sync::Notify::new());
@@ -1591,6 +1657,13 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         })
         .await
         .unwrap();
+    let cleanup = service
+        .worker
+        .cleanup(&service, &waiting_run_id)
+        .await
+        .unwrap_err();
+    assert_eq!(cleanup.status, 409);
+    assert!(cleanup.message.contains("scheduled continuation"));
     service
         .chat_tick(&std::collections::HashSet::new())
         .await

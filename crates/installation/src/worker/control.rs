@@ -209,16 +209,28 @@ impl Worker {
         authorize.recheck().await?;
         let proof = authorize.clone();
         let run_id = id.to_owned();
-        let run = s
+        let (run, waiting) = s
             .store
             .read(move |db| {
-                proof.authorize(db)?;
-                required(db.run_record(&run_id)?, "Run not found")
+                let snapshot = db.0.unchecked_transaction()?;
+                let db = Db(&snapshot);
+                proof.authorize(&db)?;
+                let run = required(db.run_record(&run_id)?, "Run not found")?;
+                let waiting = db
+                    .conversation_for_run(&run_id)?
+                    .is_some_and(|chat| chat.wakeup.is_some());
+                snapshot.commit()?;
+                Ok((run, waiting))
             })
             .await?;
-        if run.state.status.is_active() || active.contains_key(id) {
+        if run.state.status.is_active() || run.state.recovery_pending || active.contains_key(id) {
             return Err(Error::conflict(
                 "Wait for this run to finish before cleaning up.",
+            ));
+        }
+        if waiting {
+            return Err(Error::conflict(
+                "Finish or cancel the scheduled continuation before cleaning up.",
             ));
         }
         let run = run.wire()?;

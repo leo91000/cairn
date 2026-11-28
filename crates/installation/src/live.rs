@@ -465,6 +465,11 @@ fn read_page(
         Value::Null
     };
     let mut run = scoped_run(db, scope, &chat)?;
+    if !scope.chat
+        && let Some(chat) = db.conversation_for_run(text(&run, "id"))?
+    {
+        run["wakeup"] = serde_json::to_value(chat.wakeup)?;
+    }
     // Older single-project runs store their worktree in the workspace field.
     if !scope.chat
         && run["snapshot"]["task"]["worktree"] == true

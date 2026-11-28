@@ -630,6 +630,24 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
+            // A v38 controller could clear the wait while fencing a pending
+            // retirement. Recover the snapshot here so later user input can
+            // supersede the migrated wait through the ordinary conversation path.
+            let saved_wait: Option<cairn_contracts::ChatWakeup> = if legacy_wait.is_none() {
+                Db(&tx)
+                    .get(crate::environment_expiration::PENDING, &run.id)?
+                    .filter(|pending| pending["cancelled"] != true)
+                    .map(|pending| pending["environment"]["wakeup"].clone())
+                    .filter(Value::is_object)
+                    .map(serde_json::from_value)
+                    .transpose()?
+            } else {
+                None
+            };
+            let wakeup_id = legacy_wait
+                .as_ref()
+                .map(|(id, _)| id.clone())
+                .or_else(|| saved_wait.as_ref().map(|wakeup| wakeup.id.clone()));
             let turn = legacy_wait
                 .as_ref()
                 .and_then(|(_, message)| message.as_deref())
@@ -682,7 +700,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
              finished_at=CASE WHEN status='waiting' AND ?2 THEN coalesce(finished_at,?3) ELSE finished_at END, \
              boundary=json_set(boundary,'$.chatExecution',json(?4),'$.sourceTaskId',?5, \
                  '$.sourceTaskPrompt',?6,'$.sourceSessionId',session_id) WHERE id=?7",
-            params![chat_id, legacy_wait.is_some(), updated_at, execution.to_string(), run.task_id, brief, run.id],
+            params![chat_id, wakeup_id.is_some(), updated_at, execution.to_string(), run.task_id, brief, run.id],
         )?;
             if launched {
                 tx.execute(
@@ -691,12 +709,17 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                     params![run.id, turn],
                 )?;
             }
-            if let Some((wakeup_id, _)) = &legacy_wait {
+            if legacy_wait.is_some() {
                 tx.execute(
                     "UPDATE durable_wakeups SET chat_id=?1,mission_run_id=NULL,message_id=?2 \
                  WHERE mission_run_id=?3",
                     params![chat_id, turn, run.id],
                 )?;
+            } else if let Some(mut wakeup) = saved_wait {
+                wakeup.message_id = Some(turn.to_owned());
+                Db(&tx).save_wakeup(true, &chat_id, Some(&wakeup))?;
+            }
+            if let Some(wakeup_id) = wakeup_id {
                 tx.execute(
                     "UPDATE run_checkpoints SET state=json_set(state,'$.migratedMissionWakeupId',?2)
                      WHERE run_id=?1",
