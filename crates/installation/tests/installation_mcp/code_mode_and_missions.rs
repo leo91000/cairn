@@ -648,39 +648,63 @@ async fn scheduled_conversation_wakeups_are_visible_and_cancellable_through_both
         let (run, _) = active_run(&s, &main).await;
         let run_id = text(&run, "id");
         let chat_id = text(&run, "taskId");
-        let time = cairn_installation::config::now();
         let message = cairn_installation::config::id();
-        let wakeup = json!({
-            "id": cairn_installation::config::id(),
-            "messageId": message,
-            "reason": "Check for the CI result",
-            "seconds": 60,
-            "createdAt": time,
-            "wakeAt": time + 60_000,
-        });
+        s.store
+            .update_run_boundary(
+                run_id,
+                json!({ "chatExecution": {
+                    "messageId": message, "text": "Check CI", "attachments": [],
+                }}),
+            )
+            .await
+            .unwrap();
+        let run = s.store.run(run_id).await.unwrap();
+        let target_configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+        let target_token = text(&target_configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+        let reason = "Check for the CI result";
+        let wait = cairn_installation::chats::wait_for::schedule(
+            &s,
+            target_token,
+            &json!({
+                "conditions": [{ "type": "delay", "seconds": 60 }],
+                "reason": reason,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(wait["deferred"], true);
+        let wakeup = &wait["wakeup"];
+        assert_eq!(wakeup["messageId"], message);
         s.store
             .change_run(
                 run_id,
                 cairn_installation::runs::RunChanges {
                     status: Some(RunStatus::Succeeded),
-                    boundary: Some(json!({ "chatExecution": {
-                        "messageId": message, "text": "Check CI", "attachments": [],
-                    }})),
                     ..Default::default()
                 },
             )
             .await
             .unwrap();
-        let mut chat = s.conversation_boundary(chat_id).await.unwrap();
-        chat["wakeup"] = wakeup.clone();
-        s.store.save_conversation_boundary(chat).await.unwrap();
+        assert_eq!(&s.chat_detail(chat_id).await.unwrap()["wakeup"], wakeup);
 
         let args = json!({ "chatId": chat_id });
         let (status, fetched) =
             node_management_call(&app, endpoint, token, "get_chat", args.clone()).await;
         assert_eq!(status, StatusCode::OK, "{fetched}");
-        assert_eq!(result(&fetched)["chat"]["wakeup"], wakeup);
+        assert_eq!(result(&fetched)["chat"]["runId"], run_id);
         assert_eq!(result(&fetched)["chat"]["status"], "succeeded");
+        assert!(result(&fetched)["chat"]["wakeup"].is_null());
+        let (_, history) =
+            node_management_call(&app, endpoint, token, "get_run", json!({ "runId": run_id }))
+                .await;
+        assert!(
+            result(&history)["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| { event["type"] == "chat.wait" && event["text"] == reason }),
+            "{history}"
+        );
         let (_, listed) =
             node_management_call(&app, endpoint, token, "list_chats", json!({})).await;
         assert!(
@@ -688,7 +712,7 @@ async fn scheduled_conversation_wakeups_are_visible_and_cancellable_through_both
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|item| { item["id"] == chat_id && item["wakeup"] == wakeup })
+                .any(|item| item["id"] == chat_id && item["runId"] == run_id)
         );
         let (_, stopped) = node_management_call(&app, endpoint, token, "stop_chat", args).await;
         assert_eq!(result(&stopped)["paused"], true);
