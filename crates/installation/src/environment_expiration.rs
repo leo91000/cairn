@@ -578,8 +578,14 @@ fn detach_environment_in(
     let chat_ready = chat.as_ref().is_none_or(|chat| {
         chat.lifecycle == cairn_contracts::ConversationLifecycle::Active && !chat.paused
     });
-    let resume =
-        expiration.continue_turn && chat_ready && (mission || run["chatExecution"].is_object());
+    let replay_refused = checkpoint.antigravity_replay_refused_for(&run)
+        || (run["snapshot"]["agent"]["provider"] == "antigravity"
+            && run["retry"]["cause"]["startup"] == false
+            && run["retry"]["nextAttemptAt"].is_number());
+    let resume = expiration.continue_turn
+        && chat_ready
+        && !replay_refused
+        && (mission || run["chatExecution"].is_object());
     let node_change = expiration.cause == Cause::NodeChange;
     let keep_pins = expiration.cause == Cause::NodeRevocation;
 
@@ -626,6 +632,12 @@ fn detach_environment_in(
     };
     let mut fresh = RunCheckpoint {
         completed: Some(true),
+        antigravity_fresh_input_for: replay_refused.then(|| {
+            crate::waits::execution_id(&run)
+                .as_str()
+                .unwrap_or(run_id)
+                .to_owned()
+        }),
         ..Default::default()
     };
     if mission {
@@ -1186,6 +1198,9 @@ mod tests {
                     run: None,
                     failure: Some(("Usage limit reached".into(), None, true)),
                     antigravity_quota_refusal: true,
+                    antigravity_retry: None,
+                    antigravity_requires_fresh_input: false,
+                    antigravity_paid_outcome: false,
                     antigravity_probe_failed: false,
                     completed: false,
                     progress_complete: true,
@@ -1268,6 +1283,9 @@ mod tests {
                     completed: false,
                     failure: None,
                     antigravity_quota_refusal: false,
+                    antigravity_retry: None,
+                    antigravity_requires_fresh_input: false,
+                    antigravity_paid_outcome: false,
                     antigravity_probe_failed: false,
                     progress_complete: true,
                     last_message: None,

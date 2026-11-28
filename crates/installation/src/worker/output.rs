@@ -31,7 +31,7 @@ pub(super) struct Output {
 #[derive(Clone, Copy, Default)]
 pub(super) struct Attempt {
     pub previously_launched: bool,
-    pub managed_antigravity: bool,
+    pub antigravity_adapter: bool,
 }
 
 impl Output {
@@ -339,22 +339,32 @@ pub(super) async fn record(
     }
     if event["type"] == "runner.start_rejected" {
         let run = s.store.run(id).await?;
-        let (first_rejected, probe_retry_rejected) = checkpoint
+        let capacity_rejected = event["capacityRejection"] == true;
+        let (first_rejected, probe_retry_rejected, paid_retry_rejected) = checkpoint
             .read(|saved| {
                 let without_session = run["sessionId"].is_null() && saved.managed();
                 // A relay can synthesize an HTTP failure after losing the
                 // controller's response. Only canonical capacity refusals
                 // positively prove this startup did not reach the provider.
-                let probe_retry = event["capacityRejection"] == true
+                let probe_retry = capacity_rejected
                     && saved.antigravity_probe_retry.as_ref().is_some_and(|retry| {
                         retry.started
                             && saved.launched_turn.as_deref() == Some(retry.message_id.as_str())
                             && run["chatExecution"]["messageId"].as_str()
                                 == Some(retry.message_id.as_str())
                     });
+                let paid_retry = capacity_rejected
+                    && attempt.antigravity_adapter
+                    && saved.antigravity_paid_turn.is_some()
+                    && saved.antigravity_paid_turn == saved.launched_turn
+                    && saved.pending_paid_admission.as_ref().is_some_and(|paid| {
+                        paid.provider_cause.is_some()
+                            && saved.runner_id() == Some(paid.attempt.as_str())
+                    });
                 (
                     !attempt.previously_launched && without_session,
                     probe_retry && without_session,
+                    paid_retry,
                 )
             })
             .await;
@@ -379,6 +389,9 @@ pub(super) async fn record(
                     if probe_retry_rejected && let Some(retry) = &mut c.antigravity_probe_retry {
                         retry.started = false;
                     }
+                    if paid_retry_rejected {
+                        c.antigravity_paid_turn = None;
+                    }
                     c.last_error = Some(Some(message));
                     if first_rejected {
                         // Persist retry intent before fencing can fail. Settlement
@@ -391,6 +404,15 @@ pub(super) async fn record(
                 move |db| {
                     if let Some(execution) = execution {
                         db.update_run_boundary(&id, &json!({ "chatExecution": execution }))?;
+                    }
+                    if paid_retry_rejected && run["sessionId"].is_string() {
+                        db.change_run(
+                            &id,
+                            crate::runs::RunChanges {
+                                resume_available: Some(true),
+                                ..Default::default()
+                            },
+                        )?;
                     }
                     Ok(())
                 },
@@ -438,7 +460,7 @@ pub(super) async fn record(
             &stored,
             checkpoint,
             secrets,
-            attempt.managed_antigravity && exhausted,
+            attempt.antigravity_adapter,
         )
         .await?;
     }
@@ -446,7 +468,9 @@ pub(super) async fn record(
         // Title failures cannot change the outcome of the user's turn.
         let _ = crate::chat_titles::enqueue(s, id).await;
     }
-    Ok(exhausted)
+    // Antigravity records quota against the lease. Resubmission for quota
+    // requires user action, including when another account has capacity.
+    Ok(exhausted && !attempt.antigravity_adapter)
 }
 
 /// The trusted relay explicitly reports lost output. Other unsupported frames
@@ -550,7 +574,7 @@ async fn store_event(
     stored: &Value,
     checkpoint: &Checkpoint,
     secrets: &[String],
-    antigravity_quota_refusal: bool,
+    antigravity_adapter: bool,
 ) -> Result<()> {
     let value = stored["item"]
         .get("text")
@@ -586,10 +610,18 @@ async fn store_event(
         let message = truncate(&run_output::redact(failure, secrets), ERROR_LIMIT);
         let mut error = run_output::payload(&event["error"], secrets);
         error["message"] = message.clone().into();
-        let cause = provider_failure
-            .then(|| crate::run_retry::Cause::classify(&error))
+        let antigravity = (antigravity_adapter && provider_failure)
+            .then(|| crate::antigravity::retry_cause(&error))
             .flatten();
-        (message, cause)
+        let antigravity_retry = antigravity
+            .is_some()
+            .then(|| error["retryAfterMs"].as_i64());
+        let cause = antigravity.or_else(|| {
+            provider_failure
+                .then(|| crate::run_retry::Cause::classify(&error))
+                .flatten()
+        });
+        (message, cause, antigravity_retry)
     });
     let mut changes = crate::runs::RunChanges::default();
     let mut changed = false;
@@ -620,6 +652,22 @@ async fn store_event(
         boundary["sideQuestionsClosed"] = json!(true);
         changed = true;
     }
+    let antigravity_unavailable_session = antigravity_adapter
+        && provider_failure
+        && event["error"]["code"] == crate::antigravity::SESSION_UNAVAILABLE_CODE;
+    if antigravity_unavailable_session {
+        changes.session_id = Some(None);
+    }
+    let antigravity_requires_fresh_input = antigravity_adapter
+        && provider_failure
+        && (event["error"]["requiresFreshInput"] == true || antigravity_unavailable_session);
+    if antigravity_requires_fresh_input {
+        changes.resume_available = Some(false);
+    }
+    let antigravity_retry = failure.as_ref().and_then(|(_, _, retry)| *retry);
+    let antigravity_quota_refusal = antigravity_adapter
+        && provider_failure
+        && (event["error"]["accountQuotaExhausted"] == true || run_output::exhausted(event));
     checkpoint
         .record_event(
             kind,
@@ -627,8 +675,16 @@ async fn store_event(
             stored.clone(),
             EventChanges {
                 run: changed.then_some(changes),
-                failure: failure.map(|(message, cause)| (message, cause, provider_failure)),
-                antigravity_quota_refusal: antigravity_quota_refusal && provider_failure,
+                failure: failure.map(|(message, cause, _)| (message, cause, provider_failure)),
+                antigravity_quota_refusal,
+                antigravity_retry,
+                antigravity_requires_fresh_input,
+                antigravity_paid_outcome: antigravity_adapter
+                    && provider_failure
+                    && (event["error"]["providerOutcomeConfirmed"] == true
+                        || antigravity_probe_failed
+                        || antigravity_unavailable_session
+                        || event["error"]["code"] == crate::antigravity::PREFLIGHT_FAILED_CODE),
                 antigravity_probe_failed,
                 completed,
                 progress_complete: super::progress::same_semantics(event, stored),

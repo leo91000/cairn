@@ -353,8 +353,8 @@ impl Db<'_> {
     }
 
     /// Record the quota refusal against its Antigravity lease in the
-    /// transaction publishing the managed turn's authenticated output.
-    pub(crate) fn exhaust_managed_antigravity_account(&self, run_id: &str) -> Result<()> {
+    /// transaction publishing the adapter's authenticated output.
+    pub(crate) fn record_antigravity_exhaustion(&self, run_id: &str) -> Result<()> {
         let lease = self
             .0
             .prepare_cached(
