@@ -25,10 +25,18 @@ pub struct Supervised {
 impl Supervised {
     #[cfg(test)]
     pub(crate) fn exited_fixture() -> Self {
+        Self::process_fixture("/bin/true", &[])
+    }
+
+    #[cfg(test)]
+    pub(crate) fn process_fixture(program: &str, args: &[&str]) -> Self {
         let (parent, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         parent.set_nonblocking(true).unwrap();
         Self {
-            child: tokio::process::Command::new("/bin/true").spawn().unwrap(),
+            child: tokio::process::Command::new(program)
+                .args(args)
+                .spawn()
+                .unwrap(),
             control: UnixStream::from_std(parent).unwrap(),
         }
     }

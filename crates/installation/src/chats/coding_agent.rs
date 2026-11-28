@@ -1,4 +1,4 @@
-//! Explicit recovery of a quota-blocked turn on another coding agent.
+//! Explicit recovery of a provider-blocked turn on another coding agent.
 use super::{ChatExecution, chat, continue_run, handoff_context, is_compaction, view};
 use crate::{
     config::now,
@@ -31,7 +31,7 @@ pub(crate) fn progress(
         .transpose()
 }
 
-pub(crate) fn quota_blocked(db: &Db<'_>, run: &Value) -> Result<bool> {
+pub(crate) fn provider_blocked(db: &Db<'_>, run: &Value) -> Result<bool> {
     // A turn whose message went back to its author is over: the next message picks the agent.
     if run["environmentState"].is_string() || super::turn_returned(db, text(run, "id"))? {
         return Ok(false);
@@ -39,6 +39,7 @@ pub(crate) fn quota_blocked(db: &Db<'_>, run: &Value) -> Result<bool> {
     if is_compaction(run)
         || run["backendMigration"].is_object()
         || !run["cancelRequestedAt"].is_null()
+        || RunCheckpoint::antigravity_replay_refused_in(db, run)?
     {
         return Ok(false);
     }
@@ -50,6 +51,16 @@ pub(crate) fn quota_blocked(db: &Db<'_>, run: &Value) -> Result<bool> {
     }
     if run["status"] != "failed" {
         return Ok(false);
+    }
+    let message = text(run, "error");
+    let retry = &run["retry"];
+    let expired_retry = message == crate::run_retry::CHAT_RECOVERY_EXPIRED
+        && retry["nextAttemptAt"].is_null()
+        && crate::antigravity::recoverable_refusal(text(&retry["cause"], "message"));
+    if Provider::of_run(run).ok() == Some(Provider::Antigravity)
+        && (crate::antigravity::recoverable_refusal(message) || expired_retry)
+    {
+        return Ok(true);
     }
     if crate::run_output::exhausted(&json!({
         "type": "error",
@@ -238,7 +249,7 @@ pub(crate) async fn options_live(
             let chat = chat(db, &id)?;
             super::require_active(&chat)?;
             let run = db.run(text(&chat, "runId"))?.unwrap_or(Value::Null);
-            let eligible = quota_blocked(db, &run)?;
+            let eligible = provider_blocked(db, &run)?;
             Ok((run, progress(db, &id)?, eligible))
         })
         .await?;
@@ -336,10 +347,10 @@ impl Service {
                 if run["id"] != saved["runId"]
                     || run["chatExecution"]["messageId"] != saved["turnId"]
                     || !saved["turnId"].is_string()
-                    || !quota_blocked(db, &run)?
+                    || !provider_blocked(db, &run)?
                 {
                     return Err(Error::conflict(
-                        "This turn is no longer waiting for quota. Refresh the conversation.",
+                        "This turn is no longer blocked by the coding agent. Refresh the conversation.",
                     ));
                 }
                 if Provider::of_run(&run)? == target {
@@ -493,6 +504,9 @@ async fn advance(
             let run = required(db.run(&pending.run_id)?, "Run not found")?;
             if run["chatExecution"]["messageId"].as_str() != Some(pending.turn_id.as_str()) {
                 return Err(Error::conflict("The pending turn changed."));
+            }
+            if RunCheckpoint::antigravity_replay_refused_in(db, &run)? {
+                return cancel_in(db, &pending.run_id);
             }
             let target = Provider::parse(&pending.provider)?;
             let mut snapshot = run.clone();

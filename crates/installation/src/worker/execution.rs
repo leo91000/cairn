@@ -71,6 +71,11 @@ pub(super) async fn execute(
         )
         .await?;
     }
+    if s.shutdown.is_cancelled() {
+        // An otherwise finished relay may have lost the race to shutdown
+        // after emitting the provider failure but before reconciliation.
+        let _ = confirm_antigravity_refusal(s, &checkpoint, &cancel).await;
+    }
     let fenced = fence(s, &checkpoint).await?;
     stop_heartbeat.cancel();
     let _ = heartbeat.await;
@@ -178,6 +183,17 @@ pub(super) async fn reconcile(
     {
         return Ok(());
     }
+    if saved.confirmed_provider_failure().is_some() {
+        return Ok(());
+    }
+    if tokio::select! {
+        () = s.shutdown.cancelled() => return Ok(()),
+        confirmed = confirm_antigravity_refusal(s, checkpoint, cancel) => confirmed?,
+    } {
+        // A provider receipt confirms the end of the turn, independently of
+        // physical retirement. Admission still fences that environment.
+        return Ok(());
+    }
     let Some(attempt) = saved.runner_id() else {
         return Ok(());
     };
@@ -241,6 +257,41 @@ pub(super) async fn reconcile(
         },
     )
     .await
+}
+
+pub(super) async fn confirm_antigravity_refusal(
+    s: &Service,
+    checkpoint: &Checkpoint,
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    let saved = checkpoint.snapshot().await;
+    let remaining_ms = checkpoint.deadline().map_or(5000, |deadline| {
+        deadline.saturating_sub(now()).clamp(0, 5000)
+    });
+    let receipt = tokio::select! {
+        () = cancel.cancelled() => return Ok(false),
+        receipt = read_antigravity_refusal(s, &checkpoint.id, &saved, Duration::from_millis(remaining_ms as u64)) => receipt,
+    };
+    let Some(receipt) = receipt else {
+        return Ok(false);
+    };
+    checkpoint
+        .decide(move |current, _| Ok(current.record_antigravity_retry_receipt(&receipt)))
+        .await
+}
+
+pub(super) async fn read_antigravity_refusal(
+    s: &Service,
+    run_id: &str,
+    saved: &RunCheckpoint,
+    budget: Duration,
+) -> Option<crate::background_jobs::controller::TurnReceipt> {
+    let turn = saved.antigravity_receipt_to_observe()?;
+    let receipt = tokio::time::timeout(budget, super::held::turn_receipt(s, run_id, turn))
+        .await
+        .ok()?
+        .ok()?;
+    (receipt.code == 1).then_some(receipt)
 }
 
 #[cfg(test)]
@@ -387,7 +438,11 @@ async fn record_failure_for_revision(
             } else {
                 RunStatus::Failed
             };
-            let message = if cancelled {
+            let turn = super::checkpoint::antigravity_execution_id(&run.boundary).or(Some(&id));
+            let replay_refused = saved.antigravity_replay_refused(turn);
+            let message = if cancelled && replay_refused {
+                "Run stopped. Send a new message to continue."
+            } else if cancelled {
                 "Run stopped. You can resume this conversation."
             } else if expired {
                 "Run exceeded its time limit."
@@ -399,6 +454,9 @@ async fn record_failure_for_revision(
                 saved.settled = Some(Some(Settled::failure(status, message)));
             }
             let mut patch = failure_changes(status, needs_fence, message);
+            if replay_refused {
+                patch.resume_available = Some(false);
+            }
             if status != RunStatus::Queued {
                 patch.wakeup = Some(None);
             }

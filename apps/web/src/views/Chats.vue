@@ -545,7 +545,7 @@ const liveWait = computed<LiveWait | undefined>(() => detail.value
   : undefined)
 const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(timeline.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {
-  if (quota.value && !detail.value?.paused)
+  if (quota.value && !quota.value.refusalTitle && !quota.value.requiresFollowUp && !detail.value?.paused)
     return 'Waiting for quota'
   const status = detail.value?.run?.status
   if (status === 'failed')

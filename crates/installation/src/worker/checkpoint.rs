@@ -20,6 +20,12 @@ use tokio::sync::Mutex;
 /// Absent (`None`), explicitly `null` (`Some(None)`) or set (`Some(Some(_))`).
 type Nullable<T> = Option<Option<T>>;
 
+pub(super) fn antigravity_execution_id(run: &Value) -> Option<&str> {
+    crate::waits::execution_id(run)
+        .as_str()
+        .or_else(|| run["id"].as_str())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AntigravityProbeRetry {
@@ -112,6 +118,14 @@ pub struct RunCheckpoint {
     /// The adapter stopped in Antigravity's CLI probe, before sending input.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub antigravity_probe_failed: Option<bool>,
+    /// A terminated Antigravity turn with steering can only continue with a new input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) antigravity_fresh_input_for: Option<String>,
+    /// This automatic retry was admitted and may have submitted its turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) antigravity_paid_turn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) antigravity_account_refusal: Option<String>,
     /// Controller result for runner_id, distinct from the provider turn and logs.
     /// Absent: an attempt may need observation. Null: observation was exhausted
     /// or a new turn invalidated the old result; recovery must only fence it.
@@ -129,6 +143,18 @@ pub struct RunCheckpoint {
     pub last_error: Nullable<String>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub retry_cause: Nullable<crate::run_retry::Cause>,
+    /// Earliest retry the provider announced for this failed attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_retry_not_before: Option<i64>,
+    /// The execution observed when the adapter authorized replay of its input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) antigravity_retry_execution: Option<String>,
+    /// The controller's unique turn id, distinct from the Cairn message id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) antigravity_controller_turn: Option<String>,
+    /// Per-turn failure proof from the controller. The environment may still live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) antigravity_receipt_confirmed: Option<bool>,
     /// A classified turn.failed durably recorded for this exact managed attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_failure_attempt: Option<String>,
@@ -457,6 +483,28 @@ impl RunCheckpoint {
         self.provider_failed == Some(true)
     }
 
+    pub(crate) fn antigravity_replay_refused(&self, turn: Option<&str>) -> bool {
+        turn.is_some_and(|id| {
+            self.antigravity_fresh_input_for.as_deref() == Some(id)
+                || self.antigravity_paid_turn.as_deref() == Some(id)
+        })
+    }
+
+    pub(crate) fn antigravity_replay_refused_for(&self, run: &Value) -> bool {
+        self.antigravity_replay_refused(antigravity_execution_id(run))
+    }
+
+    pub(crate) fn antigravity_replay_refused_in(db: &Db<'_>, run: &Value) -> Result<bool> {
+        let Some(turn) = run["chatExecution"]["messageId"].as_str() else {
+            return Ok(false);
+        };
+        let id = crate::validation::text(run, "id");
+        Ok(
+            Self::load_in(db, id)?
+                .is_some_and(|saved| saved.antigravity_replay_refused(Some(turn))),
+        )
+    }
+
     pub fn terminal_code(&self) -> Option<i32> {
         self.terminal_code.flatten()
     }
@@ -480,15 +528,49 @@ impl RunCheckpoint {
     /// A classified provider ending is authoritative only for its own attempt
     /// and a confirmed ordinary failure, never a controller/finalization fault.
     pub fn confirmed_provider_failure(&self) -> Option<&crate::run_retry::Cause> {
-        if !self.managed()
-            || self.completed()
-            || self.terminal_code() != Some(1)
-            || self.runner_id().is_none()
-            || self.runner_id() != self.provider_failure_attempt.as_deref()
+        let managed_failure = self.managed()
+            && self.runner_id().is_some()
+            && self.runner_id() == self.provider_failure_attempt.as_deref()
+            && (self.terminal_code() == Some(1)
+                || (self.antigravity_receipt_confirmed == Some(true)
+                    && self.matches_antigravity_retry_execution()));
+        let local_failure = !self.isolated()
+            && self.runner_id().is_none()
+            && self.matches_antigravity_retry_execution();
+        (!self.completed() && (managed_failure || local_failure))
+            .then(|| self.retry_cause.as_ref().and_then(Option::as_ref))
+            .flatten()
+    }
+
+    fn matches_antigravity_retry_execution(&self) -> bool {
+        self.provider_failed()
+            && self.output_interrupted != Some(true)
+            && self.progress.as_ref().is_some_and(|progress| {
+                self.antigravity_retry_execution.as_deref() == Some(progress.execution_id.as_str())
+            })
+    }
+
+    pub(super) fn antigravity_receipt_to_observe(&self) -> Option<&str> {
+        (self.managed()
+            && !self.completed()
+            && self.confirmed_provider_failure().is_none()
+            && self.matches_antigravity_retry_execution())
+        .then_some(self.antigravity_controller_turn.as_deref())
+        .flatten()
+    }
+
+    pub(super) fn record_antigravity_retry_receipt(
+        &mut self,
+        receipt: &crate::background_jobs::controller::TurnReceipt,
+    ) -> bool {
+        if receipt.code != 1
+            || self.runner_id() != Some(receipt.attempt_id.as_str())
+            || self.antigravity_receipt_to_observe() != Some(receipt.turn_id.as_str())
         {
-            return None;
+            return false;
         }
-        self.retry_cause.as_ref().and_then(Option::as_ref)
+        self.antigravity_receipt_confirmed = Some(true);
+        true
     }
 
     pub(super) fn native_cleanup_failure(&self) -> bool {
@@ -868,6 +950,7 @@ impl RunCheckpoint {
         self.retired_environment_deadline = None;
         self.closing_held_generation = None;
         self.provider_failure_attempt = None;
+        self.provider_retry_not_before = None;
         self.reset_finalization_observation();
         self.controller_recovery_reservation = None;
         self.move_recovery_reservation = None;
@@ -907,6 +990,10 @@ pub struct EventChanges {
     pub run: Option<crate::runs::RunChanges>,
     pub failure: Option<(String, Option<crate::run_retry::Cause>, bool)>,
     pub antigravity_quota_refusal: bool,
+    /// An eligible Antigravity failure, with its optional provider delay.
+    pub antigravity_retry: Option<Option<i64>>,
+    pub antigravity_requires_fresh_input: bool,
+    pub antigravity_paid_outcome: bool,
     pub antigravity_probe_failed: bool,
     pub completed: bool,
     pub progress_complete: bool,
@@ -1138,8 +1225,13 @@ impl Checkpoint {
         let failure = changes.failure.filter(|(_, _, provider)| {
             state.last_error().is_empty() || (*provider && !state.provider_failed())
         });
+        let refusal_id = payload["error"]["refusalId"]
+            .as_str()
+            .filter(|id| crate::validation::uuid(id).is_ok())
+            .map(str::to_owned);
         let antigravity_quota_refusal = changes.antigravity_quota_refusal
-            && failure.as_ref().is_some_and(|(_, _, provider)| *provider);
+            && failure.as_ref().is_some_and(|(_, _, provider)| *provider)
+            && (refusal_id.is_none() || refusal_id != state.antigravity_account_refusal);
         let mut progress = state.progress.clone();
         let progress_changed = progress.as_mut().is_some_and(|progress| {
             if !changes.progress_complete {
@@ -1163,16 +1255,45 @@ impl Checkpoint {
             progress.persisted_at = now();
         }
         let persist = changes.completed || failure.is_some();
+        let paid_turn = state.antigravity_paid_turn.is_some()
+            && state.antigravity_paid_turn == state.launched_turn;
+        let paid_failure = paid_turn
+            && changes.antigravity_paid_outcome
+            && failure.as_ref().is_some_and(|(_, _, provider)| *provider);
+        let paid_outcome = paid_turn && (changes.completed || paid_failure);
+        let paid_failure_can_resume = paid_failure
+            && !changes.antigravity_requires_fresh_input
+            && state.antigravity_fresh_input_for != state.launched_turn;
         let mut last_message = changes.last_message;
         let mut saved = persist.then(|| state.clone());
         if let Some(saved) = &mut saved {
             saved.progress = progress.clone();
+            if paid_outcome {
+                saved.antigravity_paid_turn = None;
+            }
             if let Some((message, cause, provider_failure)) = failure {
+                if antigravity_quota_refusal {
+                    saved.antigravity_account_refusal = refusal_id;
+                }
                 if provider_failure && cause.is_some() {
                     saved.provider_failure_attempt = saved.runner_id().map(str::to_owned);
                 }
                 saved.last_error = Some(Some(message));
+                saved.provider_retry_not_before = changes
+                    .antigravity_retry
+                    .flatten()
+                    .filter(|delay| *delay > 0)
+                    .and_then(|delay| now().checked_add(delay));
+                saved.antigravity_retry_execution = changes.antigravity_retry.and_then(|_| {
+                    saved
+                        .progress
+                        .as_ref()
+                        .map(|progress| progress.execution_id.clone())
+                });
                 saved.retry_cause = Some(cause);
+                if changes.antigravity_requires_fresh_input {
+                    saved.antigravity_fresh_input_for = saved.launched_turn.clone();
+                }
                 saved.antigravity_probe_failed = changes.antigravity_probe_failed.then_some(true);
                 if provider_failure {
                     saved.provider_failed = Some(true);
@@ -1217,9 +1338,18 @@ impl Checkpoint {
                     saved.remaining_ms =
                         Some(deadline.map(|deadline| deadline.saturating_sub(now()).max(0)));
                 }
-                if let Some(changes) = changes.run
+                if let Some(mut changes) = changes.run
                     && !crate::environment_expiration::pending(db, &id)?
                 {
+                    if paid_turn && !paid_outcome && changes.resume_available == Some(true) {
+                        changes.resume_available = Some(false);
+                    } else if paid_failure_can_resume
+                        && db
+                            .run_state(&id)?
+                            .is_some_and(|run| run.session_id.is_some())
+                    {
+                        changes.resume_available = Some(true);
+                    }
                     // Late engine events still belong to the history, but cannot
                     // reattach a session to the environment already detached.
                     db.change_run(&id, changes)?;
@@ -1228,7 +1358,7 @@ impl Checkpoint {
                     saved.store_in(db, &id)?;
                 }
                 if antigravity_quota_refusal {
-                    db.exhaust_managed_antigravity_account(&id)?;
+                    db.record_antigravity_exhaustion(&id)?;
                 }
                 db.event(&id, &kind, &text, Some(&payload))?;
                 Ok(saved)

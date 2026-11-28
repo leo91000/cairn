@@ -84,7 +84,8 @@ internal fun conversationState(
         when {
             chat.paused -> "En pause"
             chat.exclusiveSuspended -> "Suspendue (exclusivité)"
-            quota != null -> "En attente de quota"
+            quota != null && quota.refusalTitle == null && !quota.requiresFollowUp ->
+                "En attente de quota"
             run == "queued" -> "En attente"
             scheduledWakeup(chat) != null -> waitStatus(chat.wakeup!!, now)
             run in listOf("failed", "interrupted") ->

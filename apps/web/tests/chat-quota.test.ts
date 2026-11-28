@@ -57,6 +57,67 @@ describe('conversation quota presentation', () => {
     expect(chatQuota({ ...run, status: 'failed', error: 'Authentication failed' }, cards)).toBeNull()
   })
 
+  it('shows Antigravity refusals separately from quota exhaustion', () => {
+    const refusal = 'Antigravity refused the request (429). Try again or choose another coding agent.'
+    const failed = { ...run, status: 'failed' as const, error: refusal }
+    expect(chatQuota(failed, [])).toBeNull()
+    expect(chatQuota({
+      ...failed,
+      snapshot: { ...run.snapshot, agent: { ...run.snapshot.agent, provider: 'antigravity' } },
+    }, [])).toMatchObject({
+      refusalTitle: 'Antigravity refused the request (429)',
+      canResumeRefusal: false,
+      automatic: false,
+      reset: null,
+    })
+  })
+
+  it('keeps manual Antigravity recovery after the automatic retry window expires', () => {
+    const failed: Run = {
+      ...run,
+      status: 'failed',
+      error: 'Automatic recovery reached its 10-minute limit. Your conversation and files are preserved.',
+      snapshot: { ...run.snapshot, agent: { ...run.snapshot.agent, provider: 'antigravity' } },
+      resumeAvailable: true,
+      retry: {
+        attempt: 2,
+        limit: 5,
+        nextAttemptAt: null,
+        startedAt: 1000,
+        deadlineAt: 601000,
+        cause: {
+          kind: 'server',
+          startup: false,
+          message: 'The Antigravity model is temporarily unavailable.',
+        },
+      },
+    }
+    expect(chatQuota(failed, [])).toMatchObject({
+      refusalTitle: 'Antigravity automatic recovery ended',
+      canResumeRefusal: true,
+    })
+    expect(chatQuota({ ...failed, error: 'Authentication failed' }, [])).toBeNull()
+  })
+
+  it('keeps confirmed quota visible after a steer and requires a new message', () => {
+    const followUp = 'Usage limit reached for Antigravity. Send a new message to continue.'
+    const failed: Run = {
+      ...run,
+      status: 'failed',
+      error: followUp,
+      snapshot: { ...run.snapshot, agent: { ...run.snapshot.agent, provider: 'antigravity' } },
+    }
+    expect(chatQuota(failed, [failure(4, followUp)])).toMatchObject({
+      provider: 'Antigravity',
+      requiresFollowUp: true,
+      automatic: false,
+    })
+    expect(chatQuota({
+      ...failed,
+      error: 'The Antigravity model is temporarily unavailable. Send a new message to continue.',
+    }, [])).toMatchObject({ refusalTitle: 'Antigravity model temporarily unavailable', requiresFollowUp: true })
+  })
+
   it('shows an admission wait even when the failure is outside the loaded page, without inventing a reset', () => {
     const quota = chatQuota({ ...run, accountWaitReason: 'Waiting for a Claude Code account with available usage.' }, [])!
     expect(quota).toMatchObject({ automatic: true, message: '', reset: null })

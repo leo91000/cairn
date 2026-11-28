@@ -13,6 +13,7 @@ impl Execution<'_> {
             .held_environment
             .clone()
             .ok_or_else(|| Error::conflict("Missing live environment."))?;
+        let paid_retry = chat["antigravityRetryAuthorized"] == true;
         let plan_path = self
             .s
             .config
@@ -35,13 +36,16 @@ impl Execution<'_> {
         // The environment starts the turn as soon as it accepts it: unless it refuses, its
         // message may be read even if this launch fails before the runner client is recorded
         // (ADR-0091).
-        let turn = launched_turn(self.run);
+        let turn = launched_turn(self.run, self.provider);
         self.checkpoint
             .update(|c| {
                 c.launched_turn_before = c.launched_turn.take();
                 c.launched_turn = turn;
             })
             .await?;
+        if paid_retry {
+            self.mark_paid_retry_started().await?;
+        }
         match super::super::held::request(
             self.s,
             self.run,
@@ -55,8 +59,29 @@ impl Execution<'_> {
         {
             Event::Accepted { .. } => {}
             Event::Refused { message, .. } => {
+                let id = self.id.clone();
+                let has_session = self.run["sessionId"].is_string();
                 self.checkpoint
-                    .update(|c| c.launched_turn = c.launched_turn_before.take())
+                    .update_and_publish(
+                        |c| {
+                            c.launched_turn = c.launched_turn_before.take();
+                            if paid_retry {
+                                c.antigravity_paid_turn = None;
+                            }
+                        },
+                        move |db| {
+                            if paid_retry && has_session {
+                                db.change_run(
+                                    &id,
+                                    crate::runs::RunChanges {
+                                        resume_available: Some(true),
+                                        ..Default::default()
+                                    },
+                                )?;
+                            }
+                            Ok(())
+                        },
+                    )
                     .await?;
                 return Err(Error::conflict(message));
             }
@@ -161,11 +186,45 @@ impl Execution<'_> {
         )?;
         chat["runId"] = self.id.clone().into();
         chat["attemptId"] = self.attempt_id.clone().into();
+        if self.provider == Provider::Antigravity && self.run["retry"]["cause"]["startup"] == false
+        {
+            let retry = &self.run["retry"];
+            let attempt = retry["attempt"].as_u64();
+            let authorized = attempt.is_some()
+                && retry["nextAttemptAt"]
+                    .as_i64()
+                    .is_some_and(|at| at <= now());
+            chat["antigravityRetryAttempt"] = attempt.into();
+            chat["antigravityRetryAuthorized"] = authorized.into();
+            if !authorized && attempt.is_some() {
+                chat["antigravityPreviousAttempt"] = self
+                    .checkpoint
+                    .read(|saved| {
+                        saved
+                            .progress
+                            .as_ref()
+                            .map(|progress| progress.execution_id.clone())
+                    })
+                    .await
+                    .into();
+            }
+        }
         if !chat_execution {
-            // Scheduled work uses the same authenticated protocol as
-            // chats, while retaining its own task brief and session.
+            // Scheduled work keeps its own task brief and session.
             let resume_prompt = resume.map(|_| launch.prompt.as_str());
-            chat["execution"] = run_output::scheduled_turn(self.run, resume_prompt);
+            let retry_authorized = chat["antigravityRetryAuthorized"] == true;
+            chat["execution"] = self
+                .checkpoint
+                .read(|saved| {
+                    scheduled_execution(
+                        self.run,
+                        resume_prompt,
+                        self.provider,
+                        saved,
+                        retry_authorized,
+                    )
+                })
+                .await;
         }
         adapter
             .configure_plan(s, &mut chat, self.account.as_ref())
@@ -452,12 +511,18 @@ impl Execution<'_> {
         workspace: &Workspace,
         launch: Launch,
         log_total: &mut usize,
+        paid_retry: bool,
     ) -> Result<Exit> {
         let attempt = output::Attempt {
             previously_launched: self.checkpoint.read(RunCheckpoint::launched).await,
-            managed_antigravity: self.provider == Provider::Antigravity
-                && workspace.env.contains_key("CAIRN_PROVIDER_TURN"),
+            // The local chat wrapper and both runner protocols emit this
+            // adapter's normalized events for Antigravity executions.
+            antigravity_adapter: self.provider == Provider::Antigravity,
         };
+        let antigravity_controller_turn = attempt
+            .antigravity_adapter
+            .then(|| workspace.env.get("CAIRN_PROVIDER_TURN").cloned())
+            .flatten();
         workspace.authorization.recheck().await?;
         let mut child = Supervised::spawn(
             &launch.binary,
@@ -467,7 +532,10 @@ impl Execution<'_> {
         )
         .await?;
         let identity = recovery::process_identity(child.child.id().unwrap()).await?;
-        let launched_turn = launched_turn(self.run);
+        let launched_turn = launched_turn(self.run, self.provider);
+        let observed_turn = crate::waits::execution_id(self.run)
+            .as_str()
+            .map(str::to_owned);
         let execution_patch = self.run["chatExecution"].is_object().then(|| {
             self.run["chatExecution"]["recovery"] = true.into();
             json!({ "chatExecution": self.run["chatExecution"] })
@@ -480,9 +548,7 @@ impl Execution<'_> {
                         self.attempt_id.clone(),
                         c.runner_id().map(str::to_owned),
                         identity.clone(),
-                        crate::waits::execution_id(self.run)
-                            .as_str()
-                            .map(str::to_owned),
+                        observed_turn,
                         now(),
                     ));
                     c.process = Some(identity);
@@ -493,6 +559,9 @@ impl Execution<'_> {
                     c.start_rejected = Some(false);
                     c.output_interrupted = None;
                     c.provider_failure_attempt = None;
+                    c.antigravity_retry_execution = None;
+                    c.antigravity_controller_turn = antigravity_controller_turn;
+                    c.antigravity_receipt_confirmed = None;
                     c.reset_finalization_observation();
                     c.retry_cause = Some(None);
                     c.completed = Some(false);
@@ -533,7 +602,13 @@ impl Execution<'_> {
                 output::read_output(stderr, true, tx, Vec::new()).await;
             }
         }));
-        if let Err(error) = child.start(launch.prompt).await {
+        let start = async {
+            if paid_retry && !self.retained {
+                self.mark_paid_retry_started().await?;
+            }
+            child.start(launch.prompt).await
+        };
+        if let Err(error) = start.await {
             self.revoke_output_scope();
             child.stop().await;
             close_output_readers(out, err, true).await;
@@ -555,6 +630,55 @@ impl Execution<'_> {
         }
         close_output_readers(out, err, result.is_err()).await;
         result
+    }
+
+    pub(super) async fn mark_paid_retry_started(&self) -> Result<()> {
+        let id = self.id.clone();
+        let turn = antigravity_execution_id(self.run)
+            .ok_or_else(|| Error::conflict("Missing Antigravity retry turn."))?
+            .to_owned();
+        let attempt = self.run["retry"]["attempt"].as_u64();
+        let launched = self
+            .checkpoint
+            .decide(move |saved, db| {
+                let state = db
+                    .run_state(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                let at = now();
+                let Some(mut retry) = state.retry.filter(|retry| {
+                    Some(retry.attempt) == attempt
+                        && !retry.cause.startup
+                        && retry.next_attempt_at.is_some_and(|due| due <= at)
+                }) else {
+                    return Err(Error::conflict(
+                        "The Antigravity retry is no longer authorized.",
+                    ));
+                };
+                if state.status != RunStatus::Running || state.cancel_requested_at.is_some() {
+                    return Err(Error::conflict(
+                        "Execution stopped before the Antigravity retry.",
+                    ));
+                }
+                let expired = crate::run_retry::Retry::expired(Some(&retry), at);
+                retry.next_attempt_at = None;
+                if !expired {
+                    saved.antigravity_paid_turn = Some(turn);
+                }
+                db.change_run(
+                    &id,
+                    crate::runs::RunChanges {
+                        resume_available: (!expired).then_some(false),
+                        retry: Some(Some(retry)),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(!expired)
+            })
+            .await?;
+        if !launched {
+            return Err(Error::conflict(crate::run_retry::CHAT_RECOVERY_EXPIRED));
+        }
+        Ok(())
     }
 
     pub(super) async fn close_account_output(&mut self, broker: Option<broker::Broker>) {
@@ -596,6 +720,40 @@ impl Execution<'_> {
                     exit.code = Some(STOPPED);
                 }
                 () = s.shutdown.cancelled(), if running => {
+                    // The controller retains the exact-turn receipt until its
+                    // relay stops. Give buffered provider output a bounded drain
+                    // before confirming that receipt and retiring the environment.
+                    if self.checkpoint.read(|saved| saved.antigravity_controller_turn.is_some()).await {
+                        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+                        while open && !self.checkpoint.read(RunCheckpoint::provider_failed).await {
+                            let next = tokio::select! {
+                                () = cancel.cancelled() => break,
+                                result = tokio::time::timeout_at(deadline, events.recv()) => result,
+                            };
+                            match next {
+                                Ok(Some(output)) => {
+                                    exit.exhausted |= self.record_relay_output(
+                                        &output, attempt, log_total, &mut activity,
+                                    ).await?;
+                                }
+                                Ok(None) => open = false,
+                                Err(_) => break,
+                            }
+                            if tokio::time::Instant::now() >= deadline {
+                                break;
+                            }
+                        }
+                        // A frame can reach the queue just as the timeout fires.
+                        for _ in 0..events.len() {
+                            let Ok(output) = events.try_recv() else { break };
+                            exit.exhausted |= self.record_relay_output(
+                                &output, attempt, log_total, &mut activity,
+                            ).await?;
+                        }
+                        let _ = super::super::execution::confirm_antigravity_refusal(
+                            s, self.checkpoint, cancel,
+                        ).await;
+                    }
                     self.revoke_output_scope();
                     child.stop().await;
                     exit.code = Some(STOPPED);
@@ -627,35 +785,9 @@ impl Execution<'_> {
                 }
                 event = events.recv(), if open => match event {
                     Some(output) => {
-                        let queue_ms = output.received.elapsed().as_millis() as u64;
-                        if queue_ms >= 100 {
-                            tracing::info!(target: "cairn_performance", operation = "agent_output", run_id = self.id, attempt_id = self.attempt_id, phase = "queue", elapsed_ms = queue_ms);
-                        }
-                        if output.kind == output::OutputKind::Stdout {
-                            activity.output();
-                            #[cfg(test)]
-                            if let Some(probe) = &self.output_probe {
-                                probe.canonical();
-                            }
-                        }
-                        crate::performance::wait("refresh_redactions", self.refresh_redactions()).await?;
-                        #[cfg(test)]
-                        if let Some(probe) = &self.output_probe {
-                            probe.before_record(&output)?;
-                        }
-                        exit.exhausted |= crate::performance::wait("persist_output", output::record(
-                            s,
-                            &output,
-                            self.checkpoint,
-                            attempt,
-                            &self.sensitive.snapshot(),
-                            log_total,
-                            &mut activity,
-                        )).await?;
-                        #[cfg(test)]
-                        if let Some(probe) = &self.output_probe {
-                            probe.recorded(&output);
-                        }
+                        exit.exhausted |= self.record_relay_output(
+                            &output, attempt, log_total, &mut activity,
+                        ).await?;
                     }
                     None => open = false,
                 },
@@ -663,6 +795,51 @@ impl Execution<'_> {
         }
         activity.finish();
         Ok(exit)
+    }
+
+    async fn record_relay_output(
+        &mut self,
+        output: &output::Output,
+        attempt: output::Attempt,
+        log_total: &mut usize,
+        activity: &mut Activity,
+    ) -> Result<bool> {
+        use output::OutputKind;
+
+        let queue_ms = output.received.elapsed().as_millis() as u64;
+        if queue_ms >= 100 {
+            tracing::info!(target: "cairn_performance", operation = "agent_output", run_id = self.id, attempt_id = self.attempt_id, phase = "queue", elapsed_ms = queue_ms);
+        }
+        if output.kind == OutputKind::Stdout {
+            activity.output();
+            #[cfg(test)]
+            if let Some(probe) = &self.output_probe {
+                probe.canonical();
+            }
+        }
+        crate::performance::wait("refresh_redactions", self.refresh_redactions()).await?;
+        #[cfg(test)]
+        if let Some(probe) = &self.output_probe {
+            probe.before_record(output)?;
+        }
+        let exhausted = crate::performance::wait(
+            "persist_output",
+            output::record(
+                self.s,
+                output,
+                self.checkpoint,
+                attempt,
+                &self.sensitive.snapshot(),
+                log_total,
+                activity,
+            ),
+        )
+        .await?;
+        #[cfg(test)]
+        if let Some(probe) = &self.output_probe {
+            probe.recorded(output);
+        }
+        Ok(exhausted)
     }
 
     /// Account credentials may rotate while the process runs.
@@ -879,7 +1056,8 @@ impl Execution<'_> {
         };
         let resume_available = (status != RunStatus::Succeeded
             || self.run["chatExecution"].is_object())
-            && has_session;
+            && has_session
+            && !saved.antigravity_replay_refused_for(self.run);
         let error =
             (!error.is_empty()).then(|| run_output::redact(&error, &self.sensitive.snapshot()));
         // A failed run's final status says why it ended when no earlier event did.
@@ -956,6 +1134,9 @@ impl Execution<'_> {
             return String::new();
         }
         if self.cancel.is_cancelled() {
+            if saved.antigravity_replay_refused_for(self.run) {
+                return format!("Run stopped. {}", crate::antigravity::FRESH_INPUT_MESSAGE);
+            }
             return "Run stopped. You can resume this conversation.".into();
         }
         if exit.timed_out || (self.checkpoint.expired() && !saved.native_cleanup_failure()) {
@@ -1005,16 +1186,53 @@ pub(super) async fn close_output_readers(
     let _ = err.await;
 }
 
-/// The turn a launch serves, recorded so a failure can tell whether the agent may have its
-/// message (ADR-0091). A launch without a chat message, such as a mission's, records an
-/// empty turn: a later chat message was not delivered by it.
-pub(super) fn launched_turn(run: &Value) -> Option<String> {
+/// Records which input the agent may already have received.
+pub(super) fn launched_turn(run: &Value, provider: Provider) -> Option<String> {
+    let mission = if provider == Provider::Antigravity {
+        antigravity_execution_id(run)
+    } else {
+        None
+    };
     Some(
         run["chatExecution"]["messageId"]
             .as_str()
+            .or(mission)
             .unwrap_or_default()
             .to_owned(),
     )
+}
+
+pub(super) fn scheduled_execution(
+    run: &Value,
+    resume_prompt: Option<&str>,
+    provider: Provider,
+    saved: &RunCheckpoint,
+    retry_authorized: bool,
+) -> Value {
+    let resume_prompt = if retry_authorized && !run["missionTurnId"].is_string() {
+        // The native session may exist before it has recorded the initial brief.
+        None
+    } else {
+        resume_prompt
+    };
+    let mut execution = run_output::scheduled_turn(run, resume_prompt);
+    if awaiting_antigravity_mission_turn(run, provider, saved) {
+        execution["recovery"] = false.into();
+    }
+    execution
+}
+
+pub(super) fn awaiting_antigravity_mission_turn(
+    run: &Value,
+    provider: Provider,
+    saved: &RunCheckpoint,
+) -> bool {
+    provider == Provider::Antigravity
+        && !run["chatExecution"].is_object()
+        && saved.turn_pending == Some(true)
+        && run["missionTurnId"]
+            .as_str()
+            .is_some_and(|turn| saved.launched_turn.as_deref() != Some(turn))
 }
 
 pub(super) fn has_live_environment(

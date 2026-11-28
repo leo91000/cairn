@@ -415,6 +415,12 @@ pub(crate) fn requeue(
     }
     let checkpoint = RunCheckpoint::load_in(db, id)?;
     let status = state.status;
+    if checkpoint
+        .as_ref()
+        .is_some_and(|saved| saved.antigravity_replay_refused_for(&run))
+    {
+        return Err(Error::conflict(crate::antigravity::FRESH_INPUT_MESSAGE));
+    }
     // The wrapper can start and record a launch before Antigravity's first CLI
     // probe fails. Require evidence from that same attempt before retrying it.
     let antigravity_retry = if status == RunStatus::Failed
@@ -843,6 +849,38 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn manual_resume_cannot_resubmit_an_unconfirmed_antigravity_mission() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                for turn in [None, Some("wakeup")] {
+                    let id = turn.unwrap_or("initial-mission");
+                    db.add_run_fixture(
+                        &json!({
+                            "id": id, "taskId": id, "trigger": "manual", "status": "failed",
+                            "sessionId": "saved-session", "resumeAvailable": true,
+                            "missionTurnId": turn,
+                            "snapshot": { "agent": { "provider": "antigravity" } },
+                        }),
+                        None,
+                    )?;
+                    let saved = RunCheckpoint {
+                        antigravity_paid_turn: Some(id.into()),
+                        ..Default::default()
+                    };
+                    saved.store_in(db, id)?;
+                    let error = requeue(db, id, None, None, None, None).unwrap_err();
+                    assert_eq!(error.message, crate::antigravity::FRESH_INPUT_MESSAGE);
+                    assert_eq!(db.run(id)?.unwrap()["status"], "failed");
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn manual_resume_retries_only_a_confirmed_antigravity_cli_start_failure() {
