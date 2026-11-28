@@ -251,6 +251,14 @@ pub(crate) fn same_execution(left: Option<&RunCheckpoint>, right: Option<&RunChe
     }
 }
 
+fn explicit_native_cleanup_retry(saved: &RunCheckpoint, attempt: &str) -> bool {
+    saved.turn_pending == Some(true)
+        && saved.acknowledged_finalization_failure_attempt.as_deref() == Some(attempt)
+        && saved
+            .prepared()
+            .is_some_and(|plan| plan["backend"] == "native")
+}
+
 /// Fence only the attempt selected by the caller, including its process and node.
 pub(crate) async fn fence_attempt(
     s: &Service,
@@ -324,6 +332,12 @@ async fn fence_attempt_authorized(
                 .as_ref()
                 .and_then(RunCheckpoint::prepared)
                 .is_some_and(|plan| plan["backend"] == "native");
+        let may_wait_for_reuse = run["trigger"] == "chat"
+            && run["status"] == RunStatus::Queued
+            && run["cancelRequestedAt"].is_null()
+            && checkpoint
+                .as_ref()
+                .is_some_and(|saved| explicit_native_cleanup_retry(saved, attempt));
         let pending = checkpoint
             .as_ref()
             .and_then(RunCheckpoint::pending_native_cleanup);
@@ -348,6 +362,7 @@ async fn fence_attempt_authorized(
                     &authorize,
                     settled_status,
                     may_defer,
+                    may_wait_for_reuse,
                 )
                 .await?
             }
@@ -384,12 +399,21 @@ async fn fence_attempt_authorized(
                         FencedCleanup::Clear | FencedCleanup::FlushedNative => return Ok(None),
                         FencedCleanup::Failed(result) => result,
                         FencedCleanup::Deferred(pending) => {
-                            let settles_completed_turn = db.run_state(&id)?.is_some_and(|state| {
+                            let state = db.run_state(&id)?;
+                            let settles_completed_turn = state.as_ref().is_some_and(|state| {
                                 state.trigger == "chat"
                                     && state.status == RunStatus::Succeeded
                                     && state.recovery_pending
                             });
+                            let waits_for_reuse = pending.awaiting_retirement()
+                                && explicit_native_cleanup_retry(saved, &attempt)
+                                && state.is_some_and(|state| {
+                                    state.trigger == "chat"
+                                        && state.status == RunStatus::Queued
+                                        && state.cancel_requested_at.is_none()
+                                });
                             let eligible = observed_pending.is_some()
+                                || waits_for_reuse
                                 || (saved
                                     .settled()
                                     .is_some_and(|turn| turn.status == RunStatus::Succeeded)
@@ -506,6 +530,7 @@ pub(crate) async fn fence_retired(
             attempt,
             &crate::authorization::Authorization::default(),
             None,
+            false,
             false,
         )
         .await?;
@@ -688,6 +713,7 @@ async fn fence_runner(
     authorize: &crate::authorization::Authorization,
     settled_status: Option<RunStatus>,
     may_defer: bool,
+    may_wait_for_reuse: bool,
 ) -> Result<FencedCleanup> {
     authorize.recheck().await?;
     if runner_url.is_empty() {
@@ -726,19 +752,27 @@ async fn fence_runner(
             if let Some(message) = cleanup
                 .as_ref()
                 .and_then(|result| result.native_cleanup.as_ref())
-                && settled_status == Some(RunStatus::Succeeded)
             {
-                if may_defer
-                    && status_protocol == Some(crate::runner::NATIVE_CLEANUP_STATUS_PROTOCOL)
+                if status_protocol == Some(crate::runner::NATIVE_CLEANUP_STATUS_PROTOCOL)
+                    && (may_defer || may_wait_for_reuse)
                 {
+                    let state = if may_wait_for_reuse {
+                        // Older checkpoints lack the durable observation. The
+                        // controller can now prove reuse for this exact fence.
+                        DeferredCleanupState::AwaitingRetirement
+                    } else {
+                        DeferredCleanupState::Observing
+                    };
                     return Ok(FencedCleanup::Deferred(PendingNativeCleanup {
                         attempt: attempt.to_owned(),
-                        state: DeferredCleanupState::Observing,
+                        state,
                         until: now() + NATIVE_CLEANUP_FOLLOW_UP_MS,
                         message: message.clone(),
                     }));
                 }
-                if confirm_late_native_cleanup(s, &url, attempt, &credential, authorize).await {
+                if settled_status == Some(RunStatus::Succeeded)
+                    && confirm_late_native_cleanup(s, &url, attempt, &credential, authorize).await
+                {
                     return Ok(FencedCleanup::FlushedNative);
                 }
             } else if cleanup.is_none() && settled_status.is_some() {

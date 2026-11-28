@@ -307,6 +307,133 @@ async fn the_next_chat_turn_waits_for_old_native_cleanup_after_the_deadline() {
 }
 
 #[tokio::test]
+async fn a_chat_can_continue_after_a_legacy_native_cleanup_failure() {
+    use axum::{Json, Router, routing::get};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let attempt = crate::config::id();
+    let reusable = Arc::new(AtomicBool::new(false));
+    let stops = Arc::new(AtomicUsize::new(0));
+    let receipt = json!({
+        "StatusCode": crate::runner::CONTROLLER_FAILED,
+        "FinalizationFailed": true,
+        "NativeCleanup": {
+            "attemptId": attempt,
+            "workloadFenced": true,
+            "message": "Native cleanup pending.",
+            "cleanupStatusProtocol": crate::runner::NATIVE_CLEANUP_STATUS_PROTOCOL,
+        },
+    });
+    let app = Router::new()
+        .route(
+            "/runs/{attempt}",
+            axum::routing::delete({
+                let stops = stops.clone();
+                move || async move {
+                    stops.fetch_add(1, Ordering::Relaxed);
+                    Json(receipt)
+                }
+            }),
+        )
+        .route(
+            "/runs/{attempt}/cleanup-status",
+            get({
+                let reusable = reusable.clone();
+                let attempt = attempt.clone();
+                move || async move {
+                    Json(json!({
+                        "attemptId": attempt, "flushed": false,
+                        "reusable": reusable.load(Ordering::Acquire),
+                    }))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (_root, service, chat, run, workspace) =
+        fixture_with_runner(format!("http://{address}")).await;
+    tokio::fs::create_dir_all(&service.config.home)
+        .await
+        .unwrap();
+    service
+        .store
+        .transaction({
+            let id = run.clone();
+            let workspace = workspace.to_string_lossy().into_owned();
+            move |db| {
+                let agent = db.agent_snapshot(crate::config::MAIN_AGENT_ID)?.unwrap();
+                crate::run_fixture::change_run_fixture(
+                    db,
+                    &id,
+                    &json!({
+                        "status": RunStatus::Failed, "trigger": "chat",
+                        "sessionId": "saved-session", "workspace": workspace,
+                        "resumeAvailable": true, "finishedAt": 42,
+                        "snapshot": { "agent": agent },
+                        "chatExecution": { "messageId": "completed-message" },
+                    }),
+                )?;
+                RunCheckpoint::from_value(json!({
+                    "runnerId": attempt, "launched": true, "launchedTurn": "completed-message",
+                    "prepared": { "backend": "native", "isolated": true },
+                    "finalizationFailureAttempt": attempt, "terminalCode": 70,
+                    "lastError": "Native cleanup: Native cleanup pending.",
+                }))?
+                .store_in(db, &id)
+            }
+        })
+        .await
+        .unwrap();
+    service
+        .chat_send(
+            &chat,
+            json!({ "id": crate::config::id(), "text": "Next turn" }),
+        )
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        service.chat_tick(&HashSet::new()).await.unwrap();
+    }
+    let queued = service.store.run(&run).await.unwrap();
+    assert_eq!(RunStatus::of(&queued), Some(RunStatus::Queued));
+    assert!(!recover(&service, &queued).await.unwrap());
+
+    let waiting = service.store.run(&run).await.unwrap();
+    assert_eq!(RunStatus::of(&waiting), Some(RunStatus::Queued));
+    assert_eq!(waiting["recoveryPending"], true);
+    assert_eq!(waiting["sessionId"], "saved-session");
+    assert_eq!(waiting["workspace"], workspace.to_string_lossy().as_ref());
+    let saved = RunCheckpoint::load(&service.store, &run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        saved
+            .pending_native_cleanup()
+            .unwrap()
+            .awaiting_retirement()
+    );
+    crate::recovery::observe_pending_native_cleanup(&service, &run, saved.clone())
+        .await
+        .unwrap();
+    assert!(recover(&service, &waiting).await.is_err());
+
+    reusable.store(true, Ordering::Release);
+    crate::recovery::observe_pending_native_cleanup(&service, &run, saved)
+        .await
+        .unwrap();
+    assert!(recover(&service, &waiting).await.unwrap());
+    let ready = service.store.run(&run).await.unwrap();
+    assert_eq!(ready["recoveryPending"], false);
+    assert_eq!(ready["sessionId"], "saved-session");
+    assert_eq!(ready["workspace"], workspace.to_string_lossy().as_ref());
+    assert_eq!(stops.load(Ordering::Relaxed), 1);
+    server.abort();
+}
+
+#[tokio::test]
 async fn stopping_a_queued_native_resume_keeps_observing_the_old_disk() {
     let (_root, service, chat_id, run, _) = fixture().await;
     let id = run.clone();
