@@ -296,8 +296,9 @@ test('owner shares an installation and member works without management controls'
     await page.getByRole('button', { name: 'Run details', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toBeVisible()
     const copy = { projectId: randomUUID(), path: '/fixture/copy', kind: 'copy' }
+    const clone = { projectId: randomUUID(), path: '/fixture/clone', kind: 'clone' }
     const direct = { projectId: randomUUID(), path: '/fixture/direct', kind: 'direct' }
-    for (const workspaces of [[direct], [copy], [...worktrees, copy]]) {
+    for (const workspaces of [[direct], [copy], [clone], [...worktrees, clone], [...worktrees, copy]]) {
       seed!.store.updateRun(cleanupRunId, { workspaces })
       await page.reload()
       await page.getByRole('button', { name: 'Run details', exact: true }).click()
@@ -312,6 +313,15 @@ test('owner shares an installation and member works without management controls'
     expect(mixedCleanup.status()).toBe(409)
     expect(await mixedCleanup.json()).toMatchObject({ error: expect.stringContaining('workspace copies') })
     expect(seed!.store.run(cleanupRunId)?.workspace).toBe('/fixture/private-worktree')
+
+    seed!.store.updateRun(cleanupRunId, { workspaces: [clone] })
+    const cloneCleanup = await page.request.post(`${apiRoot}/runs/${cleanupRunId}/cleanup`, {
+      headers: { 'origin': url, 'x-csrf-token': ownerSession.csrf },
+      data: { runId: cleanupRunId },
+    })
+    expect(cloneCleanup.status()).toBe(409)
+    expect(await cloneCleanup.json()).toMatchObject({ error: expect.stringContaining('Git clone') })
+    expect(seed!.store.run(cleanupRunId)?.workspaceCleanedAt).toBeNull()
 
     seed!.store.updateRun(cleanupRunId, {
       workspaces: null,

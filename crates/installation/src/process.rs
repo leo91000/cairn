@@ -48,6 +48,7 @@ pub fn command(binary: &str, args: &[String], env: &Environment, cwd: Option<&Pa
 
 pub struct Output {
     pub success: bool,
+    pub(crate) exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
 }
@@ -70,6 +71,7 @@ pub async fn bounded_output(
         )?;
         Ok(Output {
             success: status.success(),
+            exit_code: status.code(),
             stdout: String::from_utf8_lossy(&stdout).into_owned(),
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
         })

@@ -9,7 +9,7 @@ const props = defineProps<{ run: Run, active: boolean, canCleanUpWorktree: boole
 const emit = defineEmits<{ cleanup: [] }>()
 const hasManagedWorktrees = computed(() => {
   const managed = props.run.workspaces?.filter(entry => entry.kind !== 'direct') ?? []
-  return managed.length > 0 && managed.every(entry => entry.kind === 'worktree' || entry.kind === 'clone')
+  return managed.length > 0 && managed.every(entry => entry.kind === 'worktree')
 })
 </script>
 

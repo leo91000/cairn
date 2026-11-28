@@ -478,9 +478,7 @@ fun RunScreen(
                                     live.state?.workspaceCleanupBlockedByInput != true &&
                                     current.snapshot?.task?.worktree == true &&
                                     managedWorkspaces.isNotEmpty() &&
-                                    managedWorkspaces.all {
-                                        it.kind == "worktree" || it.kind == "clone"
-                                    }
+                                    managedWorkspaces.all { it.kind == "worktree" }
                             ) {
                                 OutlinedButton(
                                     onClick = {

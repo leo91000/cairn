@@ -471,8 +471,9 @@ so its answer and withdrawal actions are unavailable. A quota or coding-agent sw
 card still says why the conversation stopped, without its actions. Pending invitations
 are listed without a switch, and run workspace cleanup is offered only with access to
 the run's agent. Both apps offer cleanup for stopped executions with managed
-Git worktrees or clones, including multi-project and older single-project
-executions. Cleanup requires that Git can check every managed workspace and
+linked Git worktrees, including multi-project and older single-project
+executions. It preserves local Git clones, whose branches can hold unique commits.
+Cleanup requires that Git can check every managed workspace and
 that recovery, scheduled continuation, queued input and questions are resolved.
 Both run pages show a pending continuation while the last turn is completed
 and offer the stop action. Both apps

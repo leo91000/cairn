@@ -824,9 +824,12 @@ abstract class NodePlacementCases {
                 }
                 if (wakeup != null) {
                     compose.onNodeWithContentDescription("Arrêter").assertExists()
-                    compose
-                        .onNodeWithText("Reprise programmée en pause", substring = false)
-                        .assertExists()
+                    assertTrue(
+                        compose
+                            .onAllNodesWithText("Reprise programmée en pause")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    )
                 }
                 compose.onNodeWithContentDescription("Options de l’exécution").performClick()
                 compose.onNodeWithText("Détails de l’exécution").performClick()
