@@ -257,6 +257,11 @@ de fichiers, et un pool plein doit encore pouvoir écrire ses reçus de nettoyag
 Les historiques et artefacts conservés par le manager ne sont pas déplacés dans
 ce pool. Les cgroups bornent CPU/RAM/processus et les débits IO, pas les octets
 occupés. Le contrôleur vérifie aussi que les quotas sont effectivement actifs.
+Il borne aussi strictement les pages sales du périphérique du pool à 256 MiB
+(`/sys/class/bdi/<périphérique>/max_bytes` et `strict_limit`). Un `syncfs` du
+pool attend en effet les écritures de toutes les conversations, chacune à son débit
+plafonné. Sur une partition, dont le disque partage cet état avec ses voisines,
+le contrôleur laisse ce réglage à l’exploitant et le signale dans son journal.
 
 Pour une nouvelle installation, préparez un volume XFS dédié avec
 `mkfs.xfs -m crc=1,reflink=1 -i projid32bit=1` sur une cible vide, puis montez-le
