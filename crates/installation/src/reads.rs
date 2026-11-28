@@ -288,11 +288,26 @@ pub(crate) async fn snooze(
         .transaction(move |db| {
             db.start_reading(&account, at)?;
             if let Some(snooze) = snooze {
-                db.set_snooze(&account, &chat, Some(snooze))?;
+                let conversation = crate::chats::conversation(db, &chat)?;
+                let finished_at = conversation
+                    .run_id
+                    .as_deref()
+                    .map(|run| db.conversation_run(run))
+                    .transpose()?
+                    .flatten()
+                    .and_then(|run| run["finishedAt"].as_i64());
+                let (_, question_at) = db.pending_question_summary(&chat)?;
+                let activity_at = question_at
+                    .max(finished_at)
+                    .unwrap_or(conversation.updated_at);
+                if snooze.finished_at >= activity_at {
+                    db.set_snooze(&account, &chat, Some(snooze))?;
+                }
+                db.snoozed_until(&account, &chat, activity_at)
             } else {
                 db.restore_snooze(&account, &chat)?;
+                Ok(None)
             }
-            db.snoozed_until(&account, &chat)
         })
         .await?;
     Ok(SetConversationSnoozeOutput {

@@ -90,12 +90,10 @@ export const isUnread = (item: FilItem) => item.unread ?? (item.kind === 'unread
  * What needs the user first (questions, failures, blocked conversations to review, then finished
  * work they have not read), then live work, waiting/snoozed conversations, then recent conversations.
  * `read` holds marks taken on this page before the server's lists reflect them.
- * `snoozes` holds optimistic snooze updates (`null` = restored or marked read).
  */
 export function filOf(
   chats: ChatView[],
   read: Record<string, number> = {},
-  snoozes: Record<string, number | null> = {},
   now = Date.now(),
   usable: UsableAgents = null,
 ): Fil {
@@ -107,7 +105,7 @@ export function filOf(
   for (const chat of chats) {
     if (chat.lifecycle && chat.lifecycle !== 'active')
       continue
-    const snoozedUntil = snoozes[chat.id] !== undefined ? snoozes[chat.id] : chat.snoozedUntil
+    const snoozedUntil = chat.snoozedUntil
     const isSnoozed = !!snoozedUntil && snoozedUntil > now
     const readTimestamp = chat.readAt ?? chat.finishedAt ?? chat.updatedAt
     const unread = !isSnoozed

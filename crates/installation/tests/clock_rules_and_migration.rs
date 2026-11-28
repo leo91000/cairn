@@ -26,6 +26,7 @@ struct App {
 impl App {
     async fn new() -> Self {
         let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("home")).unwrap();
         let service = cairn_installation::service::Service::new(common::config(root.path()))
             .await
             .unwrap();
@@ -375,10 +376,11 @@ async fn clock_single_date_fires_once_and_never_repeats() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    let def = schedule_rule_definition(
+    let mut def = schedule_rule_definition(
         "One-shot deploy check",
         &json!({ "type": "clock", "at": target, "timezone": "UTC" }),
     );
+    def["steps"][0]["then"][0]["action"]["prompt"]["value"] = "/clear is part of my brief".into();
     let (status, created) = app
         .request(
             &app.owner,
@@ -428,13 +430,23 @@ async fn clock_single_date_fires_once_and_never_repeats() {
     let (_, chats) = app
         .request(&app.owner, "GET", "/api/chats", Value::Null)
         .await;
-    let count = chats
+    let started: Vec<&Value> = chats
         .as_array()
         .unwrap()
         .iter()
-        .filter(|c| c["originRule"]["ruleId"] == rule_id)
-        .count();
-    assert_eq!(count, 1);
+        .filter(|chat| chat["originRule"]["ruleId"] == rule_id)
+        .collect();
+    assert_eq!(started.len(), 1);
+    let chat = text(started[0], "id");
+    app.service
+        .chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let detail = app.service.chat_detail(chat).await.unwrap();
+    assert_eq!(
+        detail["run"]["chatExecution"]["text"],
+        "Task brief:\n/clear is part of my brief"
+    );
 }
 
 #[test]
@@ -792,6 +804,35 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     )
     .unwrap();
 
+    let interrupted_run = id();
+    conn.execute(
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,session_id,snapshot,boundary, \
+          recovery_pending,resume_available,resume_count) \
+         VALUES(?1,?2,'interrupted','manual',?3,?3,?3,'old-session',?4,'{}',0,1,0)",
+        params![
+            interrupted_run,
+            suspended_mission_id,
+            t0 + 9_000,
+            json!({ "agent": agent, "task": { "name": "Interrupted mission", "prompt": "/clear this is a brief" } }).to_string(),
+        ],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO run_checkpoints(run_id,state) VALUES(?1,?2)",
+        params![
+            interrupted_run,
+            json!({ "launched": true, "launchedTurn": "" }).to_string()
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO run_checkpoints(run_id,state) VALUES(?1,?2)",
+        params![
+            queued_continuation,
+            json!({ "launched": true, "launchedTurn": "", "turnPending": true }).to_string(),
+        ],
+    )
+    .unwrap();
+
     // Seed legacy account_reads & account_dismissals (1 active snooze, 1 permanent dismiss).
     conn.execute(
         "INSERT INTO account_reads VALUES('owner-acct','chat',?1,?2)",
@@ -1034,6 +1075,26 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         )
         .unwrap();
     assert!(continuation.contains("Wait for the CI") && continuation.contains("succeeded"));
+    let interrupted: (bool, String, String) = migrated
+        .query_row(
+            "SELECT json_extract(r.boundary,'$.chatExecution.recovery'), \
+         json_extract(r.boundary,'$.chatExecution.text'),json_extract(k.state,'$.launchedTurn') \
+         FROM runs r JOIN run_checkpoints k ON k.run_id=r.id WHERE r.id=?",
+            [&interrupted_run],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert!(interrupted.0);
+    assert!(interrupted.1.contains("verify external effects"));
+    assert_eq!(interrupted.2, interrupted_run);
+    let fresh_continuation: bool = migrated
+        .query_row(
+            "SELECT json_extract(boundary,'$.chatExecution.recovery') FROM runs WHERE id=?",
+            [&queued_continuation],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!fresh_continuation);
 
     let queued_snooze_count: i64 = migrated
         .query_row(

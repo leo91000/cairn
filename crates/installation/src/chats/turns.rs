@@ -625,9 +625,22 @@ pub(super) fn launch_turn(
     provider
         .adapter()
         .validate_agent(&snapshot["snapshot"]["agent"])?;
+    let message_id = text(&message, "id");
+    let input = text(&message, "text");
+    let scheduled_brief = run.is_none()
+        && crate::rules::engine::conversations::origin_rule_for_chat(db, chat_id)?
+            .is_some_and(|origin| origin.schedule)
+        && crate::conversation_writers::person(db, chat_id, message_id)?.is_none();
+    // A scheduled brief is text for the model. A leading slash otherwise
+    // becomes an engine command when it is the first input in Claude Code.
+    let input = if scheduled_brief {
+        format!("Task brief:\n{input}")
+    } else {
+        input.to_owned()
+    };
     let execution = ChatExecution {
-        message_id: text(&message, "id").to_owned(),
-        text: with_invoked_skills(text(&message, "text"), &snapshot["snapshot"]["skills"]),
+        message_id: message_id.to_owned(),
+        text: with_invoked_skills(&input, &snapshot["snapshot"]["skills"]),
         attachments: serde_json::from_value(message["attachments"].clone())?,
         recovery: false,
         context: None,

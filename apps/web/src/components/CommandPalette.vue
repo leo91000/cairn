@@ -15,7 +15,6 @@ import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { canUseAgent, defaultAgent } from '../agent-use'
 import { state } from '../api'
 import { chatList } from '../chat-list'
-import { localSnoozes } from '../dismissals'
 import {
   Activity,
   BookOpen,
@@ -176,7 +175,7 @@ const commands = computed<Command[]>(() => {
     }
   }
 
-  const fil = filOf(chatList.value, localReads, localSnoozes, undefined, state.usableAgents)
+  const fil = filOf(chatList.value, localReads, undefined, state.usableAgents)
   for (const item of filViews(fil).unread) {
     items.push({
       id: `need-${item.key}`,

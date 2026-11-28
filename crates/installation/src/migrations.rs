@@ -67,6 +67,9 @@ struct LegacyRun {
     agent_name: String,
     snapshot: Option<String>,
     boundary: String,
+    status: String,
+    session_id: Option<String>,
+    checkpoint: Option<String>,
 }
 
 fn table_exists(tx: &Connection, name: &str) -> rusqlite::Result<bool> {
@@ -414,7 +417,8 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
     let legacy_runs = {
         let mut stmt = tx.prepare(
             "SELECT r.id,r.task_id,r.project_id,r.created_at,r.started_at,r.finished_at,\
-             r.task_name,r.agent_name,r.snapshot,r.boundary FROM runs r \
+             r.task_name,r.agent_name,r.snapshot,r.boundary,r.status,r.session_id,k.state \
+             FROM runs r LEFT JOIN run_checkpoints k ON k.run_id=r.id \
              WHERE r.trigger!='chat' AND NOT EXISTS(SELECT 1 FROM conversations c WHERE c.run_id=r.id) \
              ORDER BY r.created_at ASC, r.id ASC",
         )?;
@@ -430,6 +434,9 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 agent_name: r.get(7)?,
                 snapshot: r.get(8)?,
                 boundary: r.get(9)?,
+                status: r.get(10)?,
+                session_id: r.get(11)?,
+                checkpoint: r.get(12)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
@@ -564,8 +571,25 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             .as_str()
             .or_else(|| meta.map(|mission| mission.brief.as_str()))
             .unwrap_or(&title);
+        let checkpoint: Value = run
+            .checkpoint
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or_default();
+        let launched = checkpoint["turnPending"] != true
+            && (checkpoint["launched"] == true
+                || checkpoint["launchedTurn"].is_string()
+                || (run.started_at.is_some() && run.session_id.is_some()));
+        let recovery = launched && run.status != "succeeded";
         let text = boundary["waitContinuation"]["reason"].as_str().map_or_else(
-            || format!("Task brief:\n{brief}"),
+            || {
+                if recovery {
+                    crate::run_output::RESUME_PROMPT.to_owned()
+                } else {
+                    format!("Task brief:\n{brief}")
+                }
+            },
             |reason| {
                 let observation = boundary["waitContinuation"]
                     .get("observation")
@@ -577,7 +601,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             "messageId": turn,
             "text": text,
             "attachments": [],
-            "recovery": false,
+            "recovery": recovery,
         });
         // Older mission processes used the saved turn id without a conversation
         // message. Preserve that id in the conversation, wakeup and checkpoint.
@@ -589,12 +613,13 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                  '$.sourceTaskPrompt',?6,'$.sourceSessionId',session_id) WHERE id=?7",
             params![chat_id, legacy_wait.is_some(), updated_at, execution.to_string(), run.task_id, brief, run.id],
         )?;
-        tx.execute(
-            "UPDATE run_checkpoints SET state=json_set(state,'$.launchedTurn',?2) \
-             WHERE run_id=?1 AND json_extract(state,'$.launched')=1 \
-             AND json_extract(state,'$.launchedTurn') IS NULL",
-            params![run.id, turn],
-        )?;
+        if launched {
+            tx.execute(
+                "UPDATE run_checkpoints SET state=json_set(state,'$.launchedTurn',?2) \
+                 WHERE run_id=?1 AND coalesce(json_extract(state,'$.launchedTurn'),'')=''",
+                params![run.id, turn],
+            )?;
+        }
         if legacy_wait.is_some() {
             tx.execute(
                 "UPDATE durable_wakeups SET chat_id=?1,mission_run_id=NULL,message_id=?2 \

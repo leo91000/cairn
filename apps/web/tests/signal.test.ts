@@ -160,10 +160,10 @@ describe('the Fil', () => {
 
   it('leaves questions a member cannot answer waiting for someone with access', () => {
     const question = chat('question', { pendingQuestions: 1, status: 'running' })
-    const fil = filOf([question], {}, {}, Date.now(), [])
+    const fil = filOf([question], {}, Date.now(), [])
     expect(fil.forYou).toEqual([])
     expect(fil.waiting).toMatchObject([{ title: 'question', kind: 'waiting', subtitle: 'Waiting for someone with access' }])
-    expect(filOf([question], {}, {}, Date.now(), ['main']).forYou.map(item => item.kind)).toEqual(['question'])
+    expect(filOf([question], {}, Date.now(), ['main']).forYou.map(item => item.kind)).toEqual(['question'])
   })
 
   it('keeps finished work the user has not read in For you, below what needs an answer', () => {
@@ -441,7 +441,7 @@ it('shows blocked conversations until read or snoozed for the account', () => {
     outcome,
   }), chat('question', { pendingQuestions: 1, unread: true, readAt: 30 })]
   expect(filOf(chats).forYou.map(item => item.kind)).toEqual(['review', 'question'])
-  expect(filOf(chats, {}, { schedule: 100, question: 100 }, 50).waiting.map(item => item.kind)).toEqual(['snoozed', 'snoozed'])
+  expect(filOf(chats.map(chat => ({ ...chat, snoozedUntil: 100 })), {}, 50).waiting.map(item => item.kind)).toEqual(['snoozed', 'snoozed'])
   expect(filOf(chats, { 'chat:schedule': 20 }).recent[0]).toMatchObject({ outcome: 'blocked' })
 })
 

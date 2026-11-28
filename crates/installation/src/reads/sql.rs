@@ -101,13 +101,18 @@ impl Db<'_> {
         Ok(snoozes)
     }
 
-    pub fn snoozed_until(&self, account: &str, chat_id: &str) -> Result<Option<i64>> {
+    pub fn snoozed_until(
+        &self,
+        account: &str,
+        chat_id: &str,
+        activity_at: i64,
+    ) -> Result<Option<i64>> {
         Ok(self
             .0
             .prepare_cached(
-                "SELECT snoozed_until FROM account_snoozes WHERE account_id=? AND chat_id=?",
+                "SELECT snoozed_until FROM account_snoozes WHERE account_id=? AND chat_id=? AND finished_at>=?",
             )?
-            .query_row(params![account, chat_id], |row| row.get(0))
+            .query_row(params![account, chat_id, activity_at], |row| row.get(0))
             .optional()?)
     }
 

@@ -286,59 +286,33 @@ constructor(
     val localReads = androidx.compose.runtime.mutableStateMapOf<String, Long>()
     private var readsGeneration = 0
 
-    val localSnoozes = androidx.compose.runtime.mutableStateMapOf<String, Long?>()
-    private val snoozeRequests = mutableMapOf<String, Any>()
-
-    fun observeSnoozes(chats: List<Chat>) {
-        for (chat in chats) {
-            if (chat.id in localSnoozes && localSnoozes[chat.id] == chat.snoozedUntil) {
-                localSnoozes.remove(chat.id)
-            }
-        }
-    }
-
     private fun clearReads() {
         readsGeneration++
         localReads.clear()
-        localSnoozes.clear()
-        snoozeRequests.clear()
     }
 
     fun snooze(chatId: String, finishedAt: Long, until: Long) =
-        updateSnooze(chatId, until) { ConversationSnoozeAction.A(finishedAt, until) }
+        updateSnooze(chatId) { ConversationSnoozeAction.A(finishedAt, until) }
 
-    fun restoreSnooze(chatId: String) = updateSnooze(chatId, null) { ConversationSnoozeAction.B() }
+    fun restoreSnooze(chatId: String) = updateSnooze(chatId) { ConversationSnoozeAction.B() }
 
-    private fun updateSnooze(
-        chatId: String,
-        until: Long?,
-        action: () -> ConversationSnoozeAction,
-    ) {
+    private fun updateSnooze(chatId: String, action: () -> ConversationSnoozeAction) {
         val target = connection ?: return
         val generation = readsGeneration
-        val previous = localSnoozes[chatId]
-        val hadPrevious = chatId in localSnoozes
-        val request = Any()
-        snoozeRequests[chatId] = request
-        localSnoozes[chatId] = until
         viewModelScope.launch {
             try {
+                val change = action()
                 val saved =
-                    target.snoozeChat(
-                        SetConversationSnoozeInput(action = action(), chatId = chatId)
-                    )
-                if (generation != readsGeneration || snoozeRequests[chatId] !== request)
-                    return@launch
-                if (chatId in localSnoozes) localSnoozes[chatId] = saved.snoozedUntil
-                if (until == null) localReads.remove("chat:$chatId")
+                    target.snoozeChat(SetConversationSnoozeInput(action = change, chatId = chatId))
+                if (generation != readsGeneration || connection !== target) return@launch
+                if (change is ConversationSnoozeAction.B) {
+                    localReads.remove("chat:$chatId")
+                } else if (saved.snoozedUntil == null) {
+                    notify("La conversation a changé. Reportez sa dernière activité.")
+                }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                if (generation != readsGeneration || snoozeRequests[chatId] !== request)
-                    return@launch
-                if (hadPrevious) localSnoozes[chatId] = previous else localSnoozes.remove(chatId)
-                report(e)
-            } finally {
-                if (snoozeRequests[chatId] === request) snoozeRequests.remove(chatId)
+                if (generation == readsGeneration && connection === target) report(e)
             }
         }
     }

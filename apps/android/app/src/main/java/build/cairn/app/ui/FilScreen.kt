@@ -166,7 +166,6 @@ internal fun tomorrowMorning(
 internal fun buildFeed(
     chats: List<Chat>,
     read: Map<String, Long> = emptyMap(),
-    snoozes: Map<String, Long?> = emptyMap(),
     now: Long = System.currentTimeMillis(),
     usable: List<String>? = null,
 ): Feed {
@@ -183,7 +182,7 @@ internal fun buildFeed(
         .forEach { chat ->
             val agent = chat.agentName.ifBlank { "Agent" }
             val activityAt = chat.readAt ?: chat.finishedAt ?: chat.updatedAt
-            val until = if (chat.id in snoozes) snoozes[chat.id] else chat.snoozedUntil
+            val until = chat.snoozedUntil
             val snoozed = until != null && until > now
             val unread =
                 !snoozed &&
@@ -416,7 +415,7 @@ fun FilScreen(
     }
     val trash = rememberConversationTrash(vm)
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
-    val feed = buildFeed(chats.orEmpty(), vm.localReads, vm.localSnoozes, now, state.usableAgents)
+    val feed = buildFeed(chats.orEmpty(), vm.localReads, now, state.usableAgents)
     var selectedView by rememberSaveable { mutableIntStateOf(0) }
     // A finished result previewed by a long press, without opening or reading it.
     var peeked by remember { mutableStateOf<FeedItem?>(null) }

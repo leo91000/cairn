@@ -369,6 +369,8 @@ pub const INTERACTIVE: &str = "This is an interactive chat. Use cairn_workspace.
     outcome retires unanswered questions at the end of the turn; a blocked outcome \
     preserves pending questions.";
 
+pub(crate) const RESUME_PROMPT: &str = "Continue the same task from the saved conversation and current workspace. Execution was interrupted. Resume the original task from its last completed step. Preserve completed work and verify external effects before repeating any action.";
+
 pub fn prompt(run: &Value, _chat: bool) -> String {
     // Set at launch from the plugins granting this run's agent (`agents::with_instructions`).
     let plugins = if run["isolated"] == true {

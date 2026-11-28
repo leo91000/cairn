@@ -12,7 +12,7 @@ import {
 import { useRouter } from 'vue-router'
 import { state } from '../api'
 import { waitLeft } from '../chat-wait'
-import { localSnoozes, restoreConversation, snoozeConversation } from '../dismissals'
+import { restoreConversation, snoozeConversation } from '../dismissals'
 import { activeFilView } from '../fil-view'
 import {
   Check,
@@ -61,7 +61,7 @@ const tab = activeFilView
 const now = ref(Date.now())
 const clock = setInterval(() => now.value = Date.now(), 30000)
 onBeforeUnmount(() => clearInterval(clock))
-const views = computed(() => filViews(filOf(props.chats, localReads, localSnoozes, now.value, state.usableAgents)))
+const views = computed(() => filViews(filOf(props.chats, localReads, now.value, state.usableAgents)))
 const tabs = computed(() => [
   { key: 'unread' as const, label: 'À lire', count: views.value.unread.length },
   { key: 'ongoing' as const, label: 'En cours', count: views.value.ongoing.length },

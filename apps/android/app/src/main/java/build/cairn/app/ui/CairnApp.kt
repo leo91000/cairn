@@ -378,14 +378,10 @@ private fun WorkspaceApp(
     val focused = focusedContent || focusedRoute(route)
     val selected = dockSelection(route)
     val conversations = rememberFilConversations(vm, state)
-    LaunchedEffect(conversations.state?.chats) {
-        conversations.state?.chats?.let(vm::observeSnoozes)
-    }
     val feed =
         buildFeed(
             conversations.state?.chats.orEmpty().filter { it.lifecycle == "active" },
             vm.localReads,
-            vm.localSnoozes,
             usable = state.usableAgents,
         )
     val attention = filAttention(feed)

@@ -25,7 +25,6 @@ import FilColumn from './components/FilColumn.vue'
 import Icon from './components/Icon.vue'
 import ShortcutSheet from './components/ShortcutSheet.vue'
 import ThemeControl from './components/ThemeControl.vue'
-import { localSnoozes } from './dismissals'
 import {
   Check,
   Inbox,
@@ -133,7 +132,7 @@ const selectedChatId = computed(() => {
   const id = route.params.id as string
   return chats.value.find(chat => chat.id === id || chat.slug === id)?.id ?? id
 })
-const fil = computed(() => filOf(chats.value, localReads, localSnoozes, undefined, state.usableAgents))
+const fil = computed(() => filOf(chats.value, localReads, undefined, state.usableAgents))
 const toRead = computed(() => filViews(fil.value).unread.length)
 const needsYou = computed(() => 0)
 // The Fil's badge: coral when something needs the user, the accent when work only waits to be read.

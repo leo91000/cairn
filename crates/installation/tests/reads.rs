@@ -480,6 +480,36 @@ async fn conversations_can_be_snoozed_restored_and_cleared_by_mark_read() {
 }
 
 #[tokio::test]
+async fn snoozing_a_previous_observation_leaves_a_new_turn_unread() {
+    let app = App::new().await;
+    app.get(&app.owner, "/api/chats").await;
+    let chat = app.finished_chat().await;
+    let chat_id = text(&chat, "id");
+    let run_id = text(&chat, "runId");
+    let previous = chat["finishedAt"].as_i64().unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    app.service
+        .store
+        .change_run_fixture(run_id, json!({ "finishedAt": now() }))
+        .await
+        .unwrap();
+
+    let (status, result) = app
+        .snooze(
+            &app.owner,
+            chat_id,
+            json!({ "kind": "snooze", "finishedAt": previous, "until": now() + 60_000 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert!(result["snoozedUntil"].is_null());
+    let chats = app.get(&app.owner, "/api/chats").await;
+    let current = find(&chats, "id", chat_id);
+    assert!(current["snoozedUntil"].is_null());
+    assert_eq!(current["unread"], true);
+}
+
+#[tokio::test]
 async fn rule_started_conversations_stay_quiet_unless_blocked_or_a_person_writes() {
     let app = App::new().await;
     app.get(&app.owner, "/api/chats").await;
