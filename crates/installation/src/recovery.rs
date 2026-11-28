@@ -602,6 +602,22 @@ pub(crate) async fn observe_pending_native_cleanup(
                 && status["reusable"] == true
                 && (pending.awaiting_retirement() || status["flushed"] == true));
         }
+        if matches!(
+            status.status(),
+            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND
+        ) {
+            // A compatible controller or relay may have rolled back after the
+            // receipt. The legacy route still requires exact evidence from
+            // both the retirement wait and the current quarantine check.
+            return Ok(confirm_late_native_cleanup(
+                s,
+                &url,
+                attempt,
+                &credential,
+                &crate::authorization::Authorization::default(),
+            )
+            .await);
+        }
         Ok::<_, Error>(false)
     };
     // Keep the slot through the bounded manager-side request. Its timeout

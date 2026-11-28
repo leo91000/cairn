@@ -78,6 +78,9 @@ of ordinary recovery. Observations are tracked by execution attempt. Waiting
 attempts receive a slot before earlier attempts retry. The authenticated
 cleanup status identifies the attempt and reports both a clean flush and
 whether the workspace is available for reuse.
+If a compatible controller or relay stops serving that endpoint during an
+upgrade or rollback, the manager can use the bounded legacy retirement check
+for the same attempt. The original settlement deadline still applies.
 The recovery loop settles each run independently. A clean flush and current
 quarantine clearance establish success. A missing proof at the deadline
 publishes the original cleanup failure and keeps the original turn end. Later

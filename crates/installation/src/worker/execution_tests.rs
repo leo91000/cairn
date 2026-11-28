@@ -345,6 +345,113 @@ async fn request_during_native_delete(stop: bool, response: NativeDeleteResponse
 }
 
 #[tokio::test]
+async fn native_cleanup_can_read_legacy_retirement_after_a_controller_rollback() {
+    use crate::recovery::DeferredCleanupState;
+    use axum::{
+        Json, Router,
+        http::{StatusCode, Uri},
+        routing::{delete, get, post},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for (status, awaiting_retirement, matching) in [
+        (StatusCode::NOT_FOUND, false, true),
+        (StatusCode::BAD_REQUEST, true, true),
+        (StatusCode::NOT_FOUND, false, false),
+        (StatusCode::SERVICE_UNAVAILABLE, false, true),
+    ] {
+        let attempt = crate::config::id();
+        let observed = Arc::new(AtomicUsize::new(0));
+        let stops = observed.clone();
+        let receipt_attempt = if matching {
+            attempt.clone()
+        } else {
+            crate::config::id()
+        };
+        let wait_attempt = attempt.clone();
+        let app = Router::new()
+            .route(
+                "/runs/{attempt}/cleanup-status",
+                get(move || async move { status }),
+            )
+            .route(
+                "/runs/{attempt}/wait",
+                post(move |uri: Uri| async move {
+                    assert_eq!(
+                        uri.query(),
+                        Some(crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY)
+                    );
+                    Json(json!({
+                        "StatusCode": crate::runner::CONTROLLER_FAILED,
+                        "FinalizationFailed": true,
+                        "NativeCleanup": {
+                            "attemptId": wait_attempt, "workloadFenced": true,
+                            "retired": true, "message": "Native disk cleanup was pending.",
+                        },
+                    }))
+                }),
+            )
+            .route(
+                "/runs/{attempt}",
+                delete(move || async move {
+                    stops.fetch_add(1, Ordering::Relaxed);
+                    Json(json!({ "NativeCleanupRetired": { "attemptId": receipt_attempt } }))
+                }),
+            );
+        let (_root, service, server) = fence_service(app).await;
+        let id = crate::config::id();
+        let fixture_id = id.clone();
+        let initial = if awaiting_retirement {
+            DeferredCleanupState::AwaitingRetirement
+        } else {
+            DeferredCleanupState::Observing
+        };
+        let saved = service
+            .store
+            .transaction(move |db| {
+                db.add_run_fixture(
+                    &json!({
+                        "id": fixture_id, "taskId": fixture_id, "trigger": "chat",
+                        "status": if awaiting_retirement { "failed" } else { "succeeded" },
+                        "isolated": true, "recoveryPending": !awaiting_retirement,
+                    }),
+                    None,
+                )?;
+                let saved = RunCheckpoint::from_value(json!({
+                    "runnerId": attempt,
+                    "prepared": { "backend": "native", "isolated": true },
+                    "pendingNativeCleanup": {
+                        "attempt": attempt, "state": initial, "until": now() + 60_000,
+                        "message": "Native disk cleanup was pending.",
+                    },
+                }))?;
+                saved.store_in(db, &fixture_id)?;
+                Ok(saved)
+            })
+            .await
+            .unwrap();
+        crate::recovery::observe_pending_native_cleanup(&service, &id, saved)
+            .await
+            .unwrap();
+        let saved = RunCheckpoint::load(&service.store, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        let used_legacy = status != StatusCode::SERVICE_UNAVAILABLE;
+        assert_eq!(observed.load(Ordering::Relaxed), usize::from(used_legacy));
+        assert_eq!(
+            saved.pending_native_cleanup().unwrap().state,
+            if used_legacy && matching {
+                DeferredCleanupState::Retired
+            } else {
+                initial
+            },
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn restarted_recovery_hands_off_before_waiting_on_the_account() {
     use axum::{Json, Router, routing::delete};
 
