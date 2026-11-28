@@ -702,7 +702,12 @@ async fn scheduled_conversation_wakeups_are_visible_and_cancellable_through_both
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|event| { event["type"] == "chat.wait" && event["text"] == reason }),
+                .map(|entry| &entry["event"])
+                .any(|event| {
+                    event["type"] == "chat.wait"
+                        && event["text"] == reason
+                        && event["payload"]["id"] == wakeup["id"]
+                }),
             "{history}"
         );
         let (_, listed) =
