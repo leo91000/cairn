@@ -298,18 +298,17 @@ fn head_timeout(method: &str, path: &str, native: bool) -> Duration {
     if native && crate::nodes::is_project_import_request(method, path) {
         return crate::nodes::PROJECT_OPEN_HEAD_TIMEOUT;
     }
+    if native && method == "DELETE" && path.starts_with("/runs/") && path.matches('/').count() == 2
+    {
+        return crate::nodes::NATIVE_STOP_RELAY_TIMEOUT;
+    }
     let seconds = if method == "POST" && matches!(path, "/exclusive/acquire" | "/exclusive/release")
     {
         150
-    } else if path.starts_with("/prepare/")
-        || native
-            && method == "DELETE"
-            && path.starts_with("/runs/")
-            && path.matches('/').count() == 2
-    {
+    } else if path.starts_with("/prepare/") {
         300
     } else {
-        30
+        return crate::nodes::EXECUTION_RELAY_HEAD_TIMEOUT;
     };
     Duration::from_secs(seconds)
 }

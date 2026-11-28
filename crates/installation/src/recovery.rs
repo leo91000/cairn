@@ -488,8 +488,7 @@ pub(crate) async fn fence_retired(
         .await
 }
 
-// Once the workload is fenced, observe delayed disk retirement on the normal
-// completed-environment recovery loop without retaining the execution slot.
+// Bound settlement of the completed turn while the manager observes retirement.
 const NATIVE_CLEANUP_FOLLOW_UP_MS: i64 = 5 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -498,6 +497,7 @@ pub(crate) enum DeferredCleanupState {
     Observing,
     Retired,
     Unconfirmed,
+    AwaitingRetirement,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -512,6 +512,10 @@ pub(crate) struct PendingNativeCleanup {
 impl PendingNativeCleanup {
     pub(crate) fn needs_observation(&self) -> bool {
         self.state == DeferredCleanupState::Observing && now() < self.until
+    }
+
+    pub(crate) fn awaiting_retirement(&self) -> bool {
+        self.state == DeferredCleanupState::AwaitingRetirement
     }
 
     pub(crate) fn failure(self) -> crate::runner::ControllerResult {
@@ -540,12 +544,8 @@ pub(crate) async fn observe_pending_native_cleanup(
     let Some(pending) = expected.pending_native_cleanup() else {
         return Ok(());
     };
-    if pending.state != DeferredCleanupState::Observing || s.shutdown.is_cancelled() {
-        return Ok(());
-    }
-    let remaining = pending.until.saturating_sub(now());
-    if remaining <= 0 {
-        // The recovery scan can settle expiry without speaking to the controller.
+    if s.shutdown.is_cancelled() || !(pending.needs_observation() || pending.awaiting_retirement())
+    {
         return Ok(());
     }
     let url = crate::nodes::transport::url_for_node(
@@ -564,16 +564,19 @@ pub(crate) async fn observe_pending_native_cleanup(
         if !result.physical_finalized || result.native_cleanup.is_none() {
             return Ok(false);
         }
+        if !(pending.needs_observation() || pending.awaiting_retirement()) {
+            return Ok(false);
+        }
         confirm_native_retirement(s, &url, attempt, &credential, &authorize).await
     };
+    // Keep this attempt's slot for the bounded relay request's lifetime so
+    // another probe cannot duplicate an outstanding node command.
     let retired = tokio::select! {
         () = s.shutdown.cancelled() => return Ok(()),
-        result = tokio::time::timeout(Duration::from_millis(remaining.unsigned_abs()), observe) => {
-            matches!(result, Ok(Ok(true)))
-        }
+        result = observe => matches!(result, Ok(true)),
     };
     let mut verdict = pending.clone();
-    if now() >= pending.until {
+    if pending.state == DeferredCleanupState::Observing && now() >= pending.until {
         verdict.state = DeferredCleanupState::Unconfirmed;
     } else if retired {
         verdict.state = DeferredCleanupState::Retired;
@@ -637,9 +640,6 @@ async fn fence_runner(
                 .and_then(|result| result.native_cleanup.as_ref())
                 && settled_status == Some(RunStatus::Succeeded)
             {
-                if confirm_late_native_cleanup(s, &url, attempt, &credential, authorize).await {
-                    return Ok(FencedCleanup::Clear);
-                }
                 if may_defer {
                     return Ok(FencedCleanup::Deferred(PendingNativeCleanup {
                         attempt: attempt.to_owned(),
@@ -647,6 +647,9 @@ async fn fence_runner(
                         until: now() + NATIVE_CLEANUP_FOLLOW_UP_MS,
                         message: message.clone(),
                     }));
+                }
+                if confirm_late_native_cleanup(s, &url, attempt, &credential, authorize).await {
+                    return Ok(FencedCleanup::Clear);
                 }
             } else if cleanup.is_none() && settled_status.is_some() {
                 // Both controllers expose explicit flush failures through the
@@ -718,6 +721,9 @@ async fn confirm_native_retirement(
         .http
         .delete(url)
         .bearer_auth(credential)
+        .timeout(
+            crate::nodes::NATIVE_STOP_RELAY_TIMEOUT + crate::nodes::EXECUTION_RELAY_HEAD_TIMEOUT,
+        )
         .send()
         .await
         .map_err(Error::internal)?;

@@ -128,7 +128,7 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Retirement {
         WithinGrace,
-        InconclusiveGrace,
+        FirstProbeUnavailable,
         Deferred,
         Expired,
     }
@@ -175,7 +175,7 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
         (
             json!({ "NativeCleanupRetired": { "attemptId": attempt } }),
             true,
-            Retirement::InconclusiveGrace,
+            Retirement::FirstProbeUnavailable,
         ),
         (
             json!({ "NativeCleanupRetired": { "attemptId": attempt } }),
@@ -217,7 +217,7 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                         Some(crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY)
                     );
                     let observed = route_observations.fetch_add(1, Ordering::Relaxed);
-                    if observed == 0 && retirement == Retirement::InconclusiveGrace {
+                    if observed == 0 && retirement == Retirement::FirstProbeUnavailable {
                         status = axum::http::StatusCode::SERVICE_UNAVAILABLE;
                     }
                     if (!after_grace && observed > 0) || route_retired.load(Ordering::Relaxed) {
@@ -264,6 +264,14 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
             .fence(&service, &service.store.run(&id).await.unwrap())
             .await
             .unwrap();
+        if after_grace {
+            let saved = RunCheckpoint::load(&service.store, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(saved.pending_native_cleanup().unwrap().needs_observation());
+            assert_eq!(observations.load(Ordering::Relaxed), 0);
+        }
         release(&service, &checkpoint, None, true).await.unwrap();
         let state = service.store.run_state(&id).await.unwrap();
         if cleared {
@@ -280,11 +288,6 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
         if after_grace {
             assert!(state.recovery_pending);
             assert_eq!(state.finished_at, Some(42));
-            if retirement == Retirement::InconclusiveGrace {
-                assert_eq!(observations.load(Ordering::Relaxed), 1);
-            } else {
-                assert!(observations.load(Ordering::Relaxed) > 2);
-            }
             assert_eq!(stops.load(Ordering::Relaxed), 1);
             super::super::schedule::observe_native_cleanup(&service)
                 .await
@@ -294,6 +297,7 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
             assert_eq!(still_pending.status, RunStatus::Succeeded);
             assert!(still_pending.recovery_pending);
             assert_eq!(stops.load(Ordering::Relaxed), 1);
+            assert_eq!(observations.load(Ordering::Relaxed), 1);
 
             if retirement == Retirement::Expired {
                 let saved = RunCheckpoint::load(&service.store, &id)
@@ -396,7 +400,12 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(saved.pending_native_cleanup.is_none());
+            assert_eq!(
+                saved
+                    .pending_native_cleanup()
+                    .is_some_and(crate::recovery::PendingNativeCleanup::awaiting_retirement,),
+                retirement == Retirement::Expired,
+            );
         } else {
             assert_eq!(observations.load(Ordering::Relaxed), 2);
             assert_eq!(stops.load(Ordering::Relaxed), 2);

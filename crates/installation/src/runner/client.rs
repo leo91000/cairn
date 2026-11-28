@@ -547,9 +547,13 @@ async fn wait_value(http: &reqwest::Client, url: &str, token: &str, query: &str)
     } else {
         format!("{url}/wait?{query}")
     };
-    let response = http
-        .post(wait_url)
-        .bearer_auth(token)
+    let request = http.post(wait_url).bearer_auth(token);
+    let request = if query == NATIVE_CLEANUP_RETIREMENT_QUERY {
+        request.timeout(crate::nodes::EXECUTION_RELAY_HEAD_TIMEOUT)
+    } else {
+        request
+    };
+    let response = request
         .send()
         .await
         .map_err(|_| Error::unavailable("Could not wait for execution."))?;

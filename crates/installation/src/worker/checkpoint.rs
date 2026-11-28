@@ -44,7 +44,7 @@ pub struct RunCheckpoint {
     /// A new turn was explicitly queued after this attempt's failure was shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) acknowledged_finalization_failure_attempt: Option<String>,
-    /// A fenced native attempt whose successful turn awaits physical retirement.
+    /// Retirement evidence for a fenced native attempt and its retained workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending_native_cleanup: Option<crate::recovery::PendingNativeCleanup>,
     /// A successful controller turn receipt, recorded before the run view is settled.
@@ -556,7 +556,12 @@ impl RunCheckpoint {
         if let Some(attempt) = &self.finalization_failure_attempt {
             self.acknowledged_finalization_failure_attempt = Some(attempt.clone());
         }
+        let prior_cleanup = self
+            .pending_native_cleanup
+            .take()
+            .filter(crate::recovery::PendingNativeCleanup::awaiting_retirement);
         self.reset_finalization_observation();
+        self.pending_native_cleanup = prior_cleanup;
     }
 
     /// Publish the cleanup failure once the optional proof has settled.

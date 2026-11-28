@@ -67,22 +67,24 @@ physical closure after the disk flushes and retires. Recovery resumes an
 interrupted cleanup observation and commits its diagnostic with publication.
 The recorded execution failure continues to block automatic replay because
 the workload's exit status remains unknown.
-After DELETE has acknowledged a pending cleanup, the manager gives an already
-settled successful turn a short window to observe retirement. If that
-observation cannot confirm retirement, the manager releases the execution
-reservation and durably defers settlement with a five-minute deadline.
+After DELETE acknowledges a pending cleanup for an already settled successful
+chat turn, the manager records the fence and releases the execution reservation
+in one transaction. That transaction starts a five-minute settlement deadline
+before the first follow-up request.
 The manager resumes bounded observations across restarts on a timer independent
 of ordinary recovery. Observations are tracked by execution attempt. Waiting
-attempts receive a slot before earlier attempts retry. The manager settles the
-saved reply only when DELETE returns the
+attempts receive a slot before earlier attempts retry. Each slot covers the
+lifetime of the underlying relay request. The manager settles the saved reply
+only when DELETE returns the
 attempt-bound `NativeCleanupRetired` receipt, which also checks the current
 conversation quarantine. A missing proof at the deadline publishes the original
 cleanup failure. The manager stores the verdict with its fence until it commits
-the run result. That publication retains the original turn end so later messages
-stay queued for the next turn. Environment detachment settles the saved verdict
+the run result, with the original turn end. Later messages stay queued for
+execution on the retained workspace while the manager waits for retirement.
+Environment detachment settles the saved verdict
 before replacing the execution checkpoint. Without proof it publishes the
-original cleanup diagnostic. Expiring a fenced environment preserves an
-explicit Stop and does not create a new one.
+original cleanup diagnostic. Expiration leaves a fenced turn's cancellation
+state as set by explicit Stop.
 The live manager checkpoint serializes fencing and reloads its durable evidence
 before heartbeat or output persistence can overwrite it; placement lease renewal
 continues independently while the fence waits.
@@ -92,7 +94,8 @@ handed to execution. This reader accepts v1/v2 and upgrades only its marker;
 v2 controllers reject v3 rather than ignoring the cleanup quarantine.
 The manager records a published failure in the checkpoint's existing last-error
 field. A deferred settlement also preserves the pending diagnostic and deadline
-in the checkpoint until it can settle. A run
+in the checkpoint. Managers need support for that field to recover these
+checkpoints. A run
 interrupted before its first v3 mount has no new pending physical close state.
 No journal format change or automatic migration of disk content is introduced.
 The cleanup record is additive controller state and is removed only after verified

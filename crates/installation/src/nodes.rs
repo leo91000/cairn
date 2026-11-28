@@ -56,6 +56,12 @@ const HEARTBEAT_TIMEOUT_MS: i64 = 60_000;
 const HEARTBEAT_INTERVAL_MS: i64 = 10_000;
 const ENROLLMENT_TTL_MS: i64 = 600_000;
 
+pub(crate) const NATIVE_STOP_RELAY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(300);
+
+pub(crate) const EXECUTION_RELAY_HEAD_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 /// End-to-end ceiling for opening an on-demand project in a running execution.
 pub(crate) const PROJECT_OPEN_REQUEST_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(300);

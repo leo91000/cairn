@@ -174,6 +174,171 @@ async fn fixture_with_runner(
 }
 
 #[tokio::test]
+async fn the_next_chat_turn_waits_for_old_native_cleanup_after_the_deadline() {
+    use axum::{
+        Json, Router,
+        routing::{delete, post},
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let attempt = crate::config::id();
+    let cleared = Arc::new(AtomicBool::new(false));
+    let deletes = Arc::new(AtomicUsize::new(0));
+    let stop_attempt = attempt.clone();
+    let wait_attempt = attempt.clone();
+    let app = Router::new()
+        .route("/runs/{attempt}", delete({
+            let cleared = cleared.clone();
+            let deletes = deletes.clone();
+            move || async move {
+                deletes.fetch_add(1, Ordering::Relaxed);
+                Json(if cleared.load(Ordering::Acquire) {
+                    json!({ "NativeCleanupRetired": { "attemptId": stop_attempt } })
+                } else {
+                    json!({
+                        "StatusCode": crate::runner::CONTROLLER_FAILED,
+                        "FinalizationFailed": true,
+                        "NativeCleanup": {
+                            "attemptId": stop_attempt, "workloadFenced": true,
+                            "message": "Disk cleanup pending",
+                        }
+                    })
+                })
+            }
+        }))
+        .route("/runs/{attempt}/wait", post({
+            let cleared = cleared.clone();
+            move || async move {
+                Json(json!({
+                    "StatusCode": crate::runner::CONTROLLER_FAILED,
+                    "FinalizationFailed": true,
+                    "NativeCleanup": {
+                        "attemptId": wait_attempt, "workloadFenced": true,
+                        "retired": cleared.load(Ordering::Acquire), "message": "Disk cleanup pending",
+                    }
+                }))
+            }
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (_root, service, chat, run, _) = fixture_with_runner(format!("http://{address}")).await;
+    tokio::fs::create_dir_all(&service.config.home)
+        .await
+        .unwrap();
+    let id = run.clone();
+    service
+        .store
+        .transaction(move |db| {
+            let agent = db.agent_snapshot(crate::config::MAIN_AGENT_ID)?.unwrap();
+            crate::run_fixture::change_run_fixture(
+                db,
+                &id,
+                &json!({
+                    "status": RunStatus::Succeeded, "trigger": "chat", "sessionId": "saved-session",
+                    "resumeAvailable": true, "finishedAt": 42, "recoveryPending": true,
+                    "snapshot": { "agent": agent },
+                    "chatExecution": { "messageId": "completed-message" },
+                }),
+            )?;
+            let saved = RunCheckpoint::from_value(json!({
+                "runnerId": attempt, "launched": true, "launchedTurn": "completed-message",
+                "prepared": { "backend": "native", "isolated": true },
+                "settled": { "status": "succeeded", "finishedAt": 42 },
+                "pendingNativeCleanup": {
+                    "attempt": attempt, "state": "unconfirmed", "until": 0,
+                    "message": "Disk cleanup pending"
+                },
+            }))?;
+            saved.store_in(db, &id)?;
+            finish_recovery(db, &id, Some(&saved))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        service.store.run_state(&run).await.unwrap().status,
+        RunStatus::Failed
+    );
+    service
+        .chat_send(
+            &chat,
+            json!({ "id": crate::config::id(), "text": "Next turn" }),
+        )
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        service.chat_tick(&HashSet::new()).await.unwrap();
+    }
+    let queued = service.store.run(&run).await.unwrap();
+    assert_eq!(
+        RunStatus::of(&queued),
+        Some(RunStatus::Queued),
+        "chat preparation: {:?}",
+        service
+            .store
+            .kv(&format!("chat-error:{chat}"))
+            .await
+            .unwrap(),
+    );
+    assert!(!recover_or_wait(&service, &queued).await.unwrap());
+
+    observe_native_cleanup(&service).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while service
+            .worker
+            .deferred_cleanup_observers
+            .lock()
+            .await
+            .is_observing()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let blocked = service.store.run_state(&run).await.unwrap();
+    assert_eq!(blocked.status, RunStatus::Queued);
+    assert!(blocked.recovery_pending);
+    assert_eq!(deletes.load(Ordering::Relaxed), 0);
+    let chat_for_read = chat.clone();
+    service
+        .store
+        .read(move |db| {
+            let message = &db.messages(&chat_for_read)?[0];
+            assert_eq!(message["status"], "sending");
+            assert!(message["returnedTo"].is_null());
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    cleared.store(true, Ordering::Release);
+    observe_native_cleanup(&service).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while service
+            .worker
+            .deferred_cleanup_observers
+            .lock()
+            .await
+            .is_observing()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(recover(&service, &queued).await.unwrap());
+    assert_eq!(deletes.load(Ordering::Relaxed), 1);
+    let ready = service.store.run_state(&run).await.unwrap();
+    assert_eq!(ready.status, RunStatus::Queued);
+    assert!(!ready.recovery_pending);
+    assert_eq!(ready.session_id.as_deref(), Some("saved-session"));
+    server.abort();
+}
+
+#[tokio::test]
 async fn manual_resume_resets_the_budget_but_still_fences_the_old_attempt() {
     use axum::{Router, http::StatusCode, routing::delete};
     use std::sync::atomic::{AtomicBool, Ordering};

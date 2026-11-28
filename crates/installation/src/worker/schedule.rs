@@ -511,21 +511,17 @@ pub(super) async fn observe_native_cleanup(s: &Arc<Service>) -> Result<()> {
         .store
         .read(|db| {
             let mut ready = Vec::new();
-            for run_id in db.completed_recovery_ids()? {
+            for run_id in db.native_cleanup_observation_ids()? {
                 let Some(saved) = RunCheckpoint::load_in(db, &run_id)? else {
                     continue;
                 };
-                let Some(pending) = saved
-                    .pending_native_cleanup()
-                    .filter(|p| p.needs_observation())
-                else {
+                let Some(pending) = saved.pending_native_cleanup().filter(|pending| {
+                    pending.needs_observation()
+                        || pending.awaiting_retirement() && saved.turn_pending == Some(true)
+                }) else {
                     continue;
                 };
-                if crate::environment_expiration::pending(db, &run_id)?
-                    || db
-                        .run_state(&run_id)?
-                        .is_none_or(|run| run.cancel_requested_at.is_some())
-                {
+                if crate::environment_expiration::pending(db, &run_id)? {
                     continue;
                 }
                 let key = CleanupObservation {
@@ -737,6 +733,16 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     let run_id = text(run, "id");
     let mut checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
     let initial_state = s.store.run_state(run_id).await?;
+    if initial_state.cancel_requested_at.is_none()
+        && checkpoint
+            .as_ref()
+            .and_then(RunCheckpoint::pending_native_cleanup)
+            .is_some_and(recovery::PendingNativeCleanup::awaiting_retirement)
+    {
+        return Err(Error::unavailable(
+            "Waiting for the previous native environment to finish cleanup.",
+        ));
+    }
     let parked = matches!(
         initial_state.status,
         RunStatus::Waiting | RunStatus::Succeeded
@@ -1030,7 +1036,10 @@ pub(crate) fn finish_deferred_cleanup_before_detach(
 ) -> Result<bool> {
     use crate::recovery::DeferredCleanupState;
 
-    let Some(pending) = saved.pending_native_cleanup() else {
+    let Some(pending) = saved
+        .pending_native_cleanup()
+        .filter(|p| !p.awaiting_retirement())
+    else {
         return Ok(false);
     };
     let mut pending = pending.clone();
@@ -1077,6 +1086,9 @@ pub(super) fn finish_recovery(
     {
         use crate::recovery::DeferredCleanupState;
 
+        if pending.awaiting_retirement() && current.cancel_requested_at.is_none() {
+            return Ok(false);
+        }
         let mut saved = saved.clone();
         if current.cancel_requested_at.is_none()
             && observed_control_failure.is_none()
@@ -1091,12 +1103,17 @@ pub(super) fn finish_recovery(
                     &pending.attempt,
                     Some(pending.clone().failure()),
                 )?,
-                DeferredCleanupState::Retired => {}
+                DeferredCleanupState::Retired | DeferredCleanupState::AwaitingRetirement => {}
             }
         }
-        // Keep the fence and outcome durable until the transaction publishing
-        // the run result consumes them together.
-        saved.pending_native_cleanup = None;
+        // Retain the fence across turn boundaries while this disk still needs
+        // retirement. A later turn can wait for proof without replaying this one.
+        saved.pending_native_cleanup =
+            (pending.state != DeferredCleanupState::Retired).then(|| {
+                let mut pending = pending.clone();
+                pending.state = DeferredCleanupState::AwaitingRetirement;
+                pending
+            });
         saved.store_in(db, id)?;
         published = Some(saved);
     }
