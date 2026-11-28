@@ -156,14 +156,14 @@ abstract class ResourceSaveCases {
                                 check(allowRecoveryProbe.await(20, TimeUnit.SECONDS))
                                 traceRecovery("GET /overview released")
                             }
-                            if (path.endsWith("/tasks") && mutations.size == 1) {
-                                traceRecovery("GET /tasks recovery refresh waiting")
+                            if (path.endsWith("/skills") && mutations.size == 1) {
+                                traceRecovery("GET /skills recovery refresh waiting")
                                 recoveryRefreshStarted.countDown()
                                 check(allowRecoveryRefresh.await(20, TimeUnit.SECONDS))
-                                traceRecovery("GET /tasks recovery refresh released")
+                                traceRecovery("GET /skills recovery refresh released")
                             }
                         }
-                        if (path.endsWith("/tasks") && failRefresh.get())
+                        if (path.endsWith("/skills") && failRefresh.get())
                             return MockResponse()
                                 .setResponseCode(409)
                                 .setBody("""{"error":"Lecture refusée"}""")

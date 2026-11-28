@@ -321,7 +321,7 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   // G chords move between the three places.
   await page.keyboard.press('g')
   await page.keyboard.press('r')
-  await expect(page.getByRole('heading', { name: 'Rules' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Rules', exact: true, level: 1 })).toBeVisible()
   await page.keyboard.press('g')
   await page.keyboard.press('a')
   await expect(page.getByRole('heading', { name: 'Atelier', exact: true })).toBeVisible()
@@ -386,7 +386,7 @@ test('phones use the floating dock and read conversations full screen', async ({
   await capture(page, testInfo, 'signal-fil-mobile')
 
   await dock.getByRole('link', { name: 'Rules' }).click()
-  await expect(page.getByRole('heading', { name: 'Rules' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Rules', exact: true, level: 1 })).toBeVisible()
   await dock.getByRole('link', { name: 'Atelier' }).click()
   await expect(page.getByRole('heading', { name: 'Atelier', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible()

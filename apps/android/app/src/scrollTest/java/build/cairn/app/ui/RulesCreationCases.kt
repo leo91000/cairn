@@ -87,6 +87,23 @@ abstract class RulesCreationCases {
     }
 
     @Test
+    fun openingAOneShotKeepsTheExactSavedInstant() {
+        val changes = AtomicBoolean(false)
+        val instant = java.time.Instant.parse("2028-10-29T01:30:25Z").toEpochMilli()
+        compose.setContent {
+            CairnTheme {
+                ClockScheduleFields(
+                    build.cairn.contracts.HookRuleTrigger.C(at = instant, timezone = "Europe/Paris")
+                ) {
+                    changes.set(true)
+                }
+            }
+        }
+        compose.onNodeWithText("Date unique").assertIsDisplayed()
+        compose.runOnIdle { assertFalse(changes.get()) }
+    }
+
+    @Test
     fun quickScheduleCreatesAnEditableClockRuleAndRunsItNow() {
         val requestBody = AtomicReference<JsonObject>()
         val ran = AtomicBoolean(false)
@@ -146,6 +163,7 @@ abstract class RulesCreationCases {
                         }
                     }
                 }
+            val origin = server.url("/").toString()
             val vm =
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
@@ -161,7 +179,7 @@ abstract class RulesCreationCases {
                 ui.setContent(vm) {
                     LaunchedEffect(Unit) {
                         vm.state.first { it.ready }
-                        vm.connect(server.url("/").toString())
+                        vm.connect(origin)
                     }
                     val state by vm.state.collectAsState()
                     if (state.installation != null) CairnTheme { RulesScreen(vm, state, edit = {}) }

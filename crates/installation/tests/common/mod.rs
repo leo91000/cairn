@@ -308,8 +308,11 @@ impl ChatRunFixture for Service {
         }
         let chat = self.chat_create(create).await?;
         let chat_id = chat["id"].as_str().unwrap().to_owned();
-        self.chat_send(&chat_id, serde_json::json!({ "text": prompt }))
-            .await?;
+        self.chat_send(
+            &chat_id,
+            serde_json::json!({ "id": cairn_installation::config::id(), "text": prompt }),
+        )
+        .await?;
         self.chat_tick(&std::collections::HashSet::new()).await?;
         let detail = self.chat_detail(&chat_id).await?;
         let run = self.store.run(detail["runId"].as_str().unwrap()).await?;

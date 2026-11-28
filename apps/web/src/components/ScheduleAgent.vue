@@ -9,7 +9,9 @@ import {
   watch,
 } from 'vue'
 import { createHookRule } from '../../../../packages/contracts/generated/createHookRule'
+import { replaceHookRule } from '../../../../packages/contracts/generated/replaceHookRule'
 import { api, state } from '../api'
+import { sameRuleDefinition } from '../hook-rules'
 import ClockScheduleFields from './ClockScheduleFields.vue'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
@@ -41,8 +43,7 @@ watch(projects, (options) => {
 })
 const saving = ref(false)
 const error = ref('')
-let creationId = crypto.randomUUID()
-let lastDefinition = ''
+const creationId = crypto.randomUUID()
 const ready = computed(() => agent.value && name.value.trim() && brief.value.trim()
   && (trigger.value.cron || (trigger.value.at != null && trigger.value.at > Date.now())))
 
@@ -76,16 +77,20 @@ async function save() {
         otherwise: [],
       }],
     }
-    const serialized = JSON.stringify(definition)
-    if (lastDefinition !== serialized) {
-      creationId = crypto.randomUUID()
-      lastDefinition = serialized
+    // The same form keeps its creation identity after a lost response, including
+    // when the user has made corrections before retrying.
+    let rule = await createHookRule(api, { creationId, definition, enabled: true })
+    if (!sameRuleDefinition(rule.definition, definition)) {
+      if (rule.version !== 1)
+        throw new Error('This schedule was changed elsewhere. Open it from Rules to continue editing.')
+
+      rule = await replaceHookRule(api, { ruleId: rule.id, revision: rule.revision, definition })
     }
 
-    emit('created', await createHookRule(api, { creationId, definition, enabled: true }))
+    emit('created', rule)
   }
   catch (e) {
-    error.value = (e as Error).message
+    error.value = (e as Error).message || 'Could not confirm the schedule was saved. Try again to recover it.'
   }
   finally {
     saving.value = false

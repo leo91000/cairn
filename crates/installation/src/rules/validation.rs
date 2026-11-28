@@ -417,10 +417,7 @@ fn trigger_payload(
             if timezone.trim().is_empty() || timezone.parse::<chrono_tz::Tz>().is_err() {
                 checker.problem("/trigger/timezone", "Choose a valid IANA timezone.");
             }
-            match (
-                cron.as_deref().map(str::trim).filter(|c| !c.is_empty()),
-                *at,
-            ) {
+            match (cron.as_deref(), *at) {
                 (Some(pattern), None) => {
                     if let Err(error) =
                         crate::service::next_occurrences(pattern, timezone, crate::config::now(), 1)

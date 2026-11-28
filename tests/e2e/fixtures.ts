@@ -1,6 +1,5 @@
 import type { Locator, Page, WorkerInfo } from '@playwright/test'
 import { execFileSync, spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import {
   copyFile,
@@ -340,12 +339,7 @@ async function withWorkspace(
       const project = await service.project({ name: 'Design system', path: projectPath })
       await service.skills.save('review', '---\nname: review\ndescription: Review the project carefully\n---\nInspect the project and report checks.')
       const startChat = async (text: string) => {
-        const chat = await api('/api/chats', 'POST', {
-          agentId: agent.id,
-          projectId: project.id,
-        })
-        await api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text })
-        service.store.put('chats', { id: chat.id, title: 'Weekly dependency review' })
+        const chat = service.queueChat({ agentId: agent.id, projectId: project.id }, 'Weekly dependency review', text)
         await expect.poll(() => service.chats.detail(chat.id).runId, { timeout: 10000 }).not.toBeNull()
         return service.chats.detail(chat.id).runId!
       }

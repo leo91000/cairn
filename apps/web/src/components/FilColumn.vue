@@ -489,7 +489,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
             </template>
             <template #default="{ select }">
               <button
-                v-if="isUnread(item) && item.readAt"
+                v-if="(isUnread(item) || item.kind === 'snoozed') && item.readAt"
                 type="button"
                 role="menuitem"
                 tabindex="-1"

@@ -442,6 +442,16 @@ async fn conversations_can_be_snoozed_restored_and_cleared_by_mark_read() {
     assert!(owner_item["snoozedUntil"].is_null());
     assert_eq!(owner_item["unread"], false);
 
+    // A Restore sent by another device after Mark read has nothing left to restore.
+    assert_eq!(
+        app.snooze(&app.owner, chat_id, json!({ "kind": "restore" }))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let owner_list = app.get(&app.owner, "/api/chats").await;
+    assert_eq!(find(&owner_list, "id", chat_id)["unread"], false);
+
     // Validation checks on /api/snoozes.
     for action in [
         json!({ "kind": "snooze" }),
@@ -474,8 +484,8 @@ async fn rule_started_conversations_stay_quiet_unless_blocked_or_a_person_writes
         .store
         .transaction(move |db| {
             db.0.execute(
-                "INSERT INTO hook_rules(id,creator_account_id,creator_access_id,creator_owner,version,created_at,updated_at) \
-                 VALUES(?1,'owner-account','owner-access',1,1,?2,?2)",
+                "INSERT INTO hook_rules(id,creator_account_id,creator_access_id,creator_owner,revision,version,created_at,updated_at) \
+                 VALUES(?1,'owner-account','owner-access',1,'revision',1,?2,?2)",
                 rusqlite::params![rule_id_for_db, now()],
             )?;
             db.0.execute(
@@ -522,7 +532,7 @@ async fn rule_started_conversations_stay_quiet_unless_blocked_or_a_person_writes
     let listed = app.get(&app.owner, "/api/chats").await;
     assert_eq!(find(&listed, "id", &chat_id)["unread"], true);
 
-    // Waiting on external does NOT surface.
+    // A blocked outcome also surfaces while an outside check runs.
     app.service
         .store
         .change_run_fixture(
@@ -532,7 +542,7 @@ async fn rule_started_conversations_stay_quiet_unless_blocked_or_a_person_writes
         .await
         .unwrap();
     let listed = app.get(&app.owner, "/api/chats").await;
-    assert_eq!(find(&listed, "id", &chat_id)["unread"], false);
+    assert_eq!(find(&listed, "id", &chat_id)["unread"], true);
 
     // Once a person participates, even an ordinary completion becomes unread.
     app.service

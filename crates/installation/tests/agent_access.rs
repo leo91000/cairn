@@ -204,8 +204,7 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
 
     let (_, created_chat) = owner(&s, "POST", "/api/chats", json!({ "agentId": reviewer })).await;
     let chat = created_chat["id"].as_str().unwrap().to_owned();
-    // A conversation's finished runs, which a retry would start again: its current one
-    // and an earlier one, which still follows the conversation.
+    // The current and earlier runs both follow this conversation's authority.
     let chat_run = cairn_installation::config::id();
     let earlier_run = cairn_installation::config::id();
     for run in [&chat_run, &earlier_run] {
@@ -214,6 +213,7 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
             "taskId": chat,
             "createdAt": 0,
             "status": "failed",
+            "trigger": "chat",
             "nativeProvenanceUnknown": true,
             "nativePrincipals": [],
             "nativeAuthorityNodes": [],
@@ -270,8 +270,8 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
         ("POST", format!("/api/chats/{chat}/resume"), json!({})),
         ("POST", format!("/api/runs/{run}/resume"), json!({})),
         ("POST", format!("/api/runs/{run}/cleanup"), json!({})),
-        ("POST", format!("/api/runs/{chat_run}/retry"), json!({})),
-        ("POST", format!("/api/runs/{earlier_run}/retry"), json!({})),
+        ("POST", format!("/api/runs/{chat_run}/resume"), json!({})),
+        ("POST", format!("/api/runs/{earlier_run}/resume"), json!({})),
         ("POST", format!("/api/chats/{chat}/restore"), json!({})),
         (
             "PUT",

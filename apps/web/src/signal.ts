@@ -151,6 +151,18 @@ export function filOf(
     else if (chat.status === 'failed' || chat.status === 'interrupted') {
       forYou.push({ ...base, kind: 'failed', subtitle: chat.status === 'failed' ? 'Failed' : 'Interrupted' })
     }
+    else if (blocked) {
+      const item = {
+        ...base,
+        at: chat.finishedAt ?? chat.updatedAt,
+        outcome: 'blocked' as const,
+        subtitle: `Blocked · ${blocked.reason}`,
+      }
+      if (unread)
+        forYou.push({ ...item, kind: 'review' })
+      else
+        recent.push({ ...item, kind: 'recent' })
+    }
     else if (chat.paused) {
       recent.push({ ...base, kind: 'paused', subtitle: 'Paused' })
     }
@@ -176,18 +188,6 @@ export function filOf(
         // Recorded by plugin condition polling; another run's result is only computed at resumption.
         resolved: !!chat.wakeup.observation,
       })
-    }
-    else if (blocked) {
-      const item = {
-        ...base,
-        at: chat.finishedAt ?? chat.updatedAt,
-        outcome: 'blocked' as const,
-        subtitle: `Blocked · ${blocked.reason}`,
-      }
-      if (unread)
-        forYou.push({ ...item, kind: 'review' })
-      else
-        recent.push({ ...item, kind: 'recent' })
     }
     else if (base.unread) {
       forYou.push({

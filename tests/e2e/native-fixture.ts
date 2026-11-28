@@ -61,6 +61,8 @@ export class NativeFixture {
   })
 
   project = (input: unknown): Project => this.call('project', input)
+  queueChat = (input: { agentId?: string, projectId?: string }, title: string, text: string): ChatDetail => this.call('queueChat', input, title, text)
+
   /** An existing conversation owns the synthetic run used to seed timeline and artifacts. */
   chatRun = (chatId: string, title: string): Run => this.call('chatRun', chatId, title)
   skills = { save: (name: string, content: string) => this.call('skill', name, content) }

@@ -23,9 +23,11 @@ import build.cairn.contracts.CreateHookRuleInput
 import build.cairn.contracts.HookRuleCatalog
 import build.cairn.contracts.HookRuleDefinition
 import build.cairn.contracts.HookRuleTrigger
+import build.cairn.contracts.ReplaceHookRuleInput
 import build.cairn.contracts.RuleCondition
 import build.cairn.contracts.RuleNode
 import build.cairn.contracts.createHookRule
+import build.cairn.contracts.replaceHookRule
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -88,38 +90,49 @@ internal fun ClockScheduleFields(
             (value ?: LocalDateTime.now(zone).plusDays(1).withHour(9).withMinute(0)).toString()
         )
     }
-    val local = LocalDateTime.parse(date).withSecond(0).withNano(0)
+    val local = LocalDateTime.parse(date)
     fun update() {
         val zone = runCatching { ZoneId.of(timezone.trim()) }.getOrNull()
-        val offset = zone?.rules?.getValidOffsets(local)?.firstOrNull()
+        val selected = LocalDateTime.parse(date).withSecond(0).withNano(0)
+        val offset = zone?.rules?.getValidOffsets(selected)?.firstOrNull()
         changed(
             HookRuleTrigger.C(
-                at = if (recurring) null else offset?.let { local.toInstant(it).toEpochMilli() },
+                at = if (recurring) null else offset?.let { selected.toInstant(it).toEpochMilli() },
                 cron = cron.trim().takeIf { recurring },
                 timezone = timezone.trim(),
             )
         )
     }
-    LaunchedEffect(recurring, cron, date, timezone) { update() }
     Choice(
         "Fréquence",
         if (recurring) "cron" else "once",
         listOf("cron" to "Récurrente", "once" to "Date unique"),
     ) {
         recurring = it == "cron"
+        update()
     }
     if (recurring)
         OutlinedTextField(
             cron,
-            { cron = it },
+            {
+                cron = it
+                update()
+            },
             Modifier.fillMaxWidth(),
             label = { Text("Cron (cinq champs)") },
             singleLine = true,
         )
-    else DateAndTime(local) { date = it.toString() }
+    else
+        DateAndTime(local) {
+            date = it.toString()
+            update()
+        }
     OutlinedTextField(
         timezone,
-        { timezone = it },
+        {
+            timezone = it
+            update()
+        },
         Modifier.fillMaxWidth(),
         label = { Text("Fuseau horaire (IANA)") },
         singleLine = true,
@@ -145,13 +158,17 @@ internal fun ScheduleAgentDialog(
     }
     var project by rememberSaveable { mutableStateOf("") }
     var brief by rememberSaveable { mutableStateOf("") }
-    var trigger by remember {
-        mutableStateOf(HookRuleTrigger.C(cron = "0 9 * * *", timezone = ZoneId.systemDefault().id))
+    var triggerJson by rememberSaveable {
+        mutableStateOf(
+            wireJson.encodeToString(
+                HookRuleTrigger.C(cron = "0 9 * * *", timezone = ZoneId.systemDefault().id)
+            )
+        )
     }
+    val trigger = wireJson.decodeFromString<HookRuleTrigger.C>(triggerJson)
     var error by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    var lastDefinition by rememberSaveable { mutableStateOf("") }
-    var creationId by rememberSaveable { mutableStateOf(UUID.randomUUID().toString()) }
+    val creationId by rememberSaveable { mutableStateOf(UUID.randomUUID().toString()) }
     val allowedProjects = state.agents.find { it.id == agent }?.access?.projects
     val projects = state.projects.filter { allowedProjects == null || it.id in allowedProjects }
     LaunchedEffect(agent, projects) {
@@ -191,7 +208,7 @@ internal fun ScheduleAgentDialog(
                     label = { Text("Brief") },
                     minLines = 3,
                 )
-                ClockScheduleFields(trigger) { trigger = it }
+                ClockScheduleFields(trigger) { triggerJson = wireJson.encodeToString(it) }
                 if (error.isNotBlank()) Text(error)
             }
         },
@@ -242,17 +259,31 @@ internal fun ScheduleAgentDialog(
                                         ),
                                     trigger = trigger,
                                 )
-                            val serialized = wireJson.encodeToJsonElement(definition).toString()
-                            if (serialized != lastDefinition) {
-                                lastDefinition = serialized
-                                creationId = UUID.randomUUID().toString()
-                            }
-                            val saved =
+                            var saved =
                                 vm.api.createHookRule(CreateHookRuleInput(creationId, definition))
+                            val storedDefinition =
+                                wireJson.encodeToJsonElement(saved.definition).jsonObject
+                            val desiredDefinition =
+                                wireJson.encodeToJsonElement(definition).jsonObject
+                            if (!sameRuleDefinition(storedDefinition, desiredDefinition)) {
+                                check(saved.version == 1L) {
+                                    "Cette programmation a été modifiée ailleurs. Ouvrez-la depuis les Règles."
+                                }
+                                saved =
+                                    vm.api.replaceHookRule(
+                                        ReplaceHookRuleInput(
+                                            definition = definition,
+                                            revision = saved.revision,
+                                            ruleId = saved.id,
+                                        )
+                                    )
+                            }
                             created(wireJson.encodeToJsonElement(saved).jsonObject)
                         } catch (e: Exception) {
                             if (e is CancellationException) throw e
-                            error = e.message.orEmpty()
+                            error =
+                                e.message?.takeIf { it.isNotBlank() }
+                                    ?: "Impossible de confirmer la création. Réessayez."
                         } finally {
                             busy = false
                         }

@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
     let arg = |index: usize| args.get(index).cloned().unwrap_or(Value::Null);
     let string = |index: usize| args.get(index).and_then(Value::as_str).unwrap_or("");
     let result = match operation {
-        "agent" | "project" | "skill" | "detail" => {
+        "agent" | "project" | "skill" | "detail" | "queueChat" => {
             let service = open_service(config).await?;
             let existing = args.get(1).and_then(Value::as_str);
             match operation {
@@ -83,6 +83,22 @@ async fn main() -> Result<()> {
                             .await?
                     };
                     serde_json::to_value(project)?
+                }
+                "queueChat" => {
+                    let chat = service.chat_create(arg(0)).await?;
+                    let chat_id = text(&chat, "id");
+                    service
+                        .chat_send(
+                            chat_id,
+                            json!({
+                                "id": cairn_installation::config::id(),
+                                "text": string(2),
+                            }),
+                        )
+                        .await?;
+                    let mut record = service.conversation_boundary(chat_id).await?;
+                    record["title"] = arg(1);
+                    service.store.save_conversation_boundary(record).await?
                 }
                 "skill" => service.skills.save(string(0), string(1), None).await?,
                 _ => service.chat_detail(string(0)).await?,

@@ -42,6 +42,20 @@ struct LegacyMission {
     native_plugin_grants: Option<String>,
 }
 
+struct MigratedMission {
+    rule_id: String,
+    name: String,
+    creator: String,
+    agent: String,
+    brief: String,
+}
+
+struct MigratedRun {
+    chat_id: String,
+    activity_at: i64,
+    needs_review: bool,
+}
+
 struct LegacyRun {
     id: String,
     task_id: String,
@@ -52,6 +66,7 @@ struct LegacyRun {
     task_name: String,
     agent_name: String,
     snapshot: Option<String>,
+    boundary: String,
 }
 
 fn table_exists(tx: &Connection, name: &str) -> rusqlite::Result<bool> {
@@ -154,7 +169,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
 
     let at = now();
     let known_owner = known_owner_account(&tx)?;
-    let mut mission_meta: HashMap<String, (String, String, String)> = HashMap::new();
+    let mut mission_meta = HashMap::new();
 
     if table_exists(&tx, "missions")? {
         let missions = {
@@ -203,13 +218,20 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             // engine verifies member authority with Beacon before it acts, and reconciliation
             // recognizes the confirmed owner and exact membership generation.
             let membership_ended = mission.author_removed || mission.author_id.is_none();
+            let rule_id = if db.hook_rule(&mission.id)?.is_some() {
+                id()
+            } else {
+                mission.id.clone()
+            };
             mission_meta.insert(
                 mission.id.clone(),
-                (
-                    mission.name.clone(),
-                    creator_account_id.clone(),
-                    mission.agent_id.clone(),
-                ),
+                MigratedMission {
+                    rule_id: rule_id.clone(),
+                    name: mission.name.clone(),
+                    creator: creator_account_id.clone(),
+                    agent: mission.agent_id.clone(),
+                    brief: mission.prompt.clone(),
+                },
             );
 
             let Ok(agent_uuid) = uuid::Uuid::parse_str(&mission.agent_id) else {
@@ -293,7 +315,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
 
             let disabled = !mission.enabled || mission.archived || cron.is_none();
             let row = RuleRow {
-                id: mission.id.clone(),
+                id: rule_id,
                 creator_account_id: creator_account_id.clone(),
                 creator_access_id: mission.author_access_id.clone(),
                 creator_owner: false,
@@ -321,70 +343,68 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 "nativePluginGrants": mission.native_plugin_grants.as_deref().map(serde_json::from_str::<Value>).transpose()?,
             });
 
-            if db.hook_rule(&row.id)?.is_none() {
-                db.save_hook_rule(&row)?;
-                let uses = vec![
-                    Use {
-                        kind: "executionAgent",
-                        agent_id: mission.agent_id.clone(),
-                        instance_id: String::new(),
-                        name: String::new(),
-                    },
-                    Use {
-                        kind: "startedAgent",
-                        agent_id: mission.agent_id.clone(),
-                        instance_id: String::new(),
-                        name: String::new(),
-                    },
-                    Use {
-                        kind: "clock",
-                        agent_id: mission.agent_id.clone(),
-                        instance_id: String::new(),
-                        name: String::new(),
-                    },
-                ];
-                db.insert_hook_rule_version(
-                    &VersionRow {
+            db.save_hook_rule(&row)?;
+            let uses = vec![
+                Use {
+                    kind: "executionAgent",
+                    agent_id: mission.agent_id.clone(),
+                    instance_id: String::new(),
+                    name: String::new(),
+                },
+                Use {
+                    kind: "startedAgent",
+                    agent_id: mission.agent_id.clone(),
+                    instance_id: String::new(),
+                    name: String::new(),
+                },
+                Use {
+                    kind: "clock",
+                    agent_id: mission.agent_id.clone(),
+                    instance_id: String::new(),
+                    name: String::new(),
+                },
+            ];
+            db.insert_hook_rule_version(
+                &VersionRow {
+                    rule_id: row.id.clone(),
+                    version: 1,
+                    definition,
+                    saved_by: creator_account_id,
+                    source: HookRuleSource::Migration,
+                    conversation_id: None,
+                    native_grant,
+                    saved_at: mission.created_at,
+                },
+                &uses,
+            )?;
+            let schedule = match &cron {
+                Some(pattern) if !disabled && !membership_ended => {
+                    let next = mission.next_run.or_else(|| {
+                        crate::service::next_occurrences(pattern, &timezone, at, 1)
+                            .ok()
+                            .and_then(|v| v.into_iter().next())
+                    });
+                    ScheduleRow {
                         rule_id: row.id.clone(),
-                        version: 1,
-                        definition,
-                        saved_by: creator_account_id,
-                        source: HookRuleSource::Migration,
-                        conversation_id: None,
-                        native_grant,
-                        saved_at: mission.created_at,
-                    },
-                    &uses,
-                )?;
-                let schedule = match &cron {
-                    Some(pattern) if !disabled && !membership_ended => {
-                        let next = mission.next_run.or_else(|| {
-                            crate::service::next_occurrences(pattern, &timezone, at, 1)
-                                .ok()
-                                .and_then(|v| v.into_iter().next())
-                        });
-                        ScheduleRow {
-                            rule_id: row.id.clone(),
-                            next_run: next,
-                            last_scheduled_for: None,
-                            fired_at: None,
-                        }
-                    }
-                    None => ScheduleRow {
-                        rule_id: row.id.clone(),
-                        next_run: None,
-                        last_scheduled_for: None,
-                        fired_at: Some(mission.created_at.max(1)),
-                    },
-                    _ => ScheduleRow {
-                        rule_id: row.id.clone(),
-                        next_run: None,
+                        next_run: next,
                         last_scheduled_for: None,
                         fired_at: None,
-                    },
-                };
-                db.save_hook_rule_schedule(&schedule)?;
-            }
+                    }
+                }
+                None => ScheduleRow {
+                    rule_id: row.id.clone(),
+                    next_run: None,
+                    last_scheduled_for: None,
+                    fired_at: Some(mission.created_at.max(1)),
+                },
+                _ => ScheduleRow {
+                    rule_id: row.id.clone(),
+                    next_run: None,
+                    last_scheduled_for: None,
+                    fired_at: None,
+                },
+            };
+            db.save_hook_rule_schedule(&schedule)?;
         }
     }
 
@@ -393,7 +413,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
     let legacy_runs = {
         let mut stmt = tx.prepare(
             "SELECT r.id,r.task_id,r.project_id,r.created_at,r.started_at,r.finished_at,\
-             r.task_name,r.agent_name,r.snapshot FROM runs r \
+             r.task_name,r.agent_name,r.snapshot,r.boundary FROM runs r \
              WHERE r.trigger!='chat' AND NOT EXISTS(SELECT 1 FROM conversations c WHERE c.run_id=r.id) \
              ORDER BY r.created_at ASC, r.id ASC",
         )?;
@@ -408,14 +428,14 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 task_name: r.get(6)?,
                 agent_name: r.get(7)?,
                 snapshot: r.get(8)?,
+                boundary: r.get(9)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
     };
 
     // Track migrated chats per legacy mission id for read-mark and dismissal migration.
-    let mut migrated_chats_by_mission: HashMap<String, Vec<(String, i64)>> = HashMap::new();
-    let mut latest_chat_by_mission: HashMap<String, String> = HashMap::new();
+    let mut migrated_chats_by_mission: HashMap<String, Vec<MigratedRun>> = HashMap::new();
 
     for run in legacy_runs {
         let snapshot: Value = run
@@ -427,7 +447,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         let agent_id = snapshot["agent"]["id"]
             .as_str()
             .map(str::to_owned)
-            .or_else(|| meta.map(|m| m.2.clone()))
+            .or_else(|| meta.map(|m| m.agent.clone()))
             .unwrap_or_default();
         if agent_id.is_empty() {
             continue;
@@ -452,7 +472,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         let title = if !run.task_name.trim().is_empty() {
             run.task_name.clone()
         } else if let Some(m) = meta {
-            m.0.clone()
+            m.name.clone()
         } else {
             "Migrated run".to_owned()
         };
@@ -490,11 +510,12 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             ],
         )?;
 
-        let rule_name = meta.map_or_else(|| title.clone(), |m| m.0.clone());
+        let rule_name = meta.map_or_else(|| title.clone(), |m| m.name.clone());
         let creator_account_id = meta
-            .map(|m| m.1.clone())
+            .map(|m| m.creator.clone())
             .or_else(|| known_owner.clone())
             .unwrap_or_else(|| "owner".to_owned());
+        let rule_id = meta.map_or(run.task_id.as_str(), |mission| mission.rule_id.as_str());
         let origin_json = json!({
             "hook": "clock",
             "ruleName": rule_name,
@@ -509,7 +530,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 chat_id,
                 creator_account_id,
                 agent_id,
-                run.task_id,
+                rule_id,
                 origin_json,
                 run.id,
                 run.created_at,
@@ -522,29 +543,53 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
              chat_id,account_id,agent_id,plugin_instructions,created_at,instruction_tainted,\
              reached_at,reached_by,reached_account_id,reached_rule_id\
             ) VALUES(?1,NULL,?2,'',?3,0,?3,'rule',NULL,?4)",
-            params![chat_id, agent_id, run.created_at, run.task_id],
+            params![chat_id, agent_id, run.created_at, rule_id],
         )?;
 
-        // Update run to belong to the new conversation and carry trigger='chat'.
+        let boundary: Value = serde_json::from_str(&run.boundary)?;
+        let legacy_wait: Option<Option<String>> = tx
+            .query_row(
+                "SELECT message_id FROM durable_wakeups WHERE mission_run_id=?",
+                [&run.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let turn = legacy_wait
+            .as_ref()
+            .and_then(|message| message.as_deref())
+            .or_else(|| boundary["missionTurnId"].as_str())
+            .unwrap_or(&run.id);
+        let brief = snapshot["task"]["prompt"]
+            .as_str()
+            .or_else(|| meta.map(|mission| mission.brief.as_str()))
+            .unwrap_or(&title);
+        let execution = json!({
+            "messageId": turn,
+            "text": format!("Task brief:\n{brief}"),
+            "attachments": [],
+            "recovery": false,
+        });
+        // Older mission processes used the saved turn id without a conversation
+        // message. Preserve that id in the conversation, wakeup and checkpoint.
         tx.execute(
-            "UPDATE runs SET task_id=?1,trigger='chat' WHERE id=?2",
-            params![chat_id, run.id],
+            "UPDATE runs SET task_id=?1,trigger='chat', \
+             status=CASE WHEN status='waiting' AND ?2 THEN 'succeeded' ELSE status END, \
+             finished_at=CASE WHEN status='waiting' AND ?2 THEN coalesce(finished_at,?3) ELSE finished_at END, \
+             boundary=json_set(boundary,'$.chatExecution',json(?4),'$.sourceTaskId',?5, \
+                 '$.sourceTaskPrompt',?6,'$.sourceSessionId',session_id) WHERE id=?7",
+            params![chat_id, legacy_wait.is_some(), updated_at, execution.to_string(), run.task_id, brief, run.id],
         )?;
-
-        // A legacy mission waits as a RunStatus::Waiting. A conversation holds the
-        // same continuation after a succeeded turn, tied to its saved message (if any).
-        if table_exists(&tx, "durable_wakeups")? {
+        tx.execute(
+            "UPDATE run_checkpoints SET state=json_set(state,'$.launchedTurn',?2) \
+             WHERE run_id=?1 AND json_extract(state,'$.launched')=1 \
+             AND json_extract(state,'$.launchedTurn') IS NULL",
+            params![run.id, turn],
+        )?;
+        if legacy_wait.is_some() {
             tx.execute(
-                "UPDATE runs SET status='succeeded',finished_at=coalesce(finished_at,?2), \
-                 boundary=CASE WHEN (SELECT message_id FROM durable_wakeups WHERE mission_run_id=?1) IS NOT NULL \
-                 THEN json_set(boundary,'$.chatExecution.messageId',(SELECT message_id FROM durable_wakeups WHERE mission_run_id=?1)) \
-                 ELSE boundary END \
-                 WHERE id=?1 AND status='waiting' AND EXISTS(SELECT 1 FROM durable_wakeups WHERE mission_run_id=?1)",
-                params![run.id, updated_at],
-            )?;
-            tx.execute(
-                "UPDATE durable_wakeups SET chat_id=?1,mission_run_id=NULL WHERE mission_run_id=?2",
-                params![chat_id, run.id],
+                "UPDATE durable_wakeups SET chat_id=?1,mission_run_id=NULL,message_id=?2 \
+                 WHERE mission_run_id=?3",
+                params![chat_id, turn, run.id],
             )?;
         }
 
@@ -556,10 +601,41 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         )?;
 
         migrated_chats_by_mission
-            .entry(run.task_id.clone())
+            .entry(run.task_id)
             .or_default()
-            .push((chat_id.clone(), updated_at));
-        latest_chat_by_mission.insert(run.task_id.clone(), chat_id);
+            .push(MigratedRun {
+                chat_id,
+                activity_at: updated_at,
+                needs_review: run.finished_at.is_some()
+                    && matches!(
+                        boundary["outcome"]["status"].as_str(),
+                        Some("blocked" | "needs_input")
+                    ),
+            });
+    }
+
+    // A conversation created by the old conversion already owns its run. Give
+    // it the same schedule origin without replacing its messages or identity.
+    for (mission_id, mission) in &mission_meta {
+        let origin = json!({
+            "hook": "clock",
+            "ruleName": mission.name,
+            "schedule": true,
+        });
+        tx.execute(
+            "INSERT INTO hook_rule_conversations( \
+                chat_id,creator_account_id,agent_id,rule_id,origin,run_id,created_at) \
+             SELECT c.id,?2,c.agent_id,?3,?4,r.id,c.created_at FROM conversations c \
+             JOIN runs r ON r.id=c.run_id \
+             WHERE r.trigger='chat' AND json_extract(r.boundary,'$.sourceTaskId')=?1 \
+             ON CONFLICT(chat_id) DO NOTHING",
+            params![
+                mission_id,
+                mission.creator,
+                mission.rule_id,
+                origin.to_string()
+            ],
+        )?;
     }
 
     // Migrate account_reads and account_dismissals to v39 chat-only tables.
@@ -600,12 +676,12 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         };
         for (account_id, mission_id, finished_at) in mission_reads {
             if let Some(chats) = migrated_chats_by_mission.get(&mission_id) {
-                for (chat_id, chat_at) in chats {
-                    if *chat_at <= finished_at {
+                for chat in chats {
+                    if chat.activity_at <= finished_at {
                         tx.execute(
                             "INSERT INTO account_reads_v39(account_id,chat_id,finished_at) VALUES(?1,?2,?3) \
                              ON CONFLICT(account_id,chat_id) DO UPDATE SET finished_at=max(finished_at,excluded.finished_at)",
-                            params![account_id, chat_id, finished_at],
+                            params![account_id, chat.chat_id, finished_at],
                         )?;
                     }
                 }
@@ -631,26 +707,31 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             .collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (account_id, mission_id, finished_at, snoozed_until) in dismissals {
-            let Some(chat_id) = latest_chat_by_mission.get(&mission_id) else {
+            let Some(chats) = migrated_chats_by_mission.get(&mission_id) else {
                 continue;
             };
-            match snoozed_until {
-                Some(until) if until > finished_at => {
-                    tx.execute(
-                        "INSERT INTO account_snoozes(account_id,chat_id,finished_at,snoozed_until) VALUES(?1,?2,?3,?4) \
-                         ON CONFLICT(account_id,chat_id) DO UPDATE SET finished_at=excluded.finished_at,snoozed_until=excluded.snoozed_until",
-                        params![account_id, chat_id, finished_at, until],
-                    )?;
+            for chat in chats
+                .iter()
+                .filter(|chat| chat.needs_review && chat.activity_at <= finished_at)
+            {
+                match snoozed_until {
+                    Some(until) if until > finished_at => {
+                        tx.execute(
+                            "INSERT INTO account_snoozes(account_id,chat_id,finished_at,snoozed_until) VALUES(?1,?2,?3,?4) \
+                             ON CONFLICT(account_id,chat_id) DO UPDATE SET finished_at=excluded.finished_at,snoozed_until=excluded.snoozed_until",
+                            params![account_id, chat.chat_id, finished_at, until],
+                        )?;
+                    }
+                    None => {
+                        // ADR-0094: dismiss becomes mark read.
+                        tx.execute(
+                            "INSERT INTO account_reads(account_id,chat_id,finished_at) VALUES(?1,?2,?3) \
+                             ON CONFLICT(account_id,chat_id) DO UPDATE SET finished_at=max(finished_at,excluded.finished_at)",
+                            params![account_id, chat.chat_id, finished_at],
+                        )?;
+                    }
+                    _ => {}
                 }
-                None => {
-                    // ADR-0094: dismiss becomes mark read.
-                    tx.execute(
-                        "INSERT INTO account_reads(account_id,chat_id,finished_at) VALUES(?1,?2,?3) \
-                         ON CONFLICT(account_id,chat_id) DO UPDATE SET finished_at=max(finished_at,excluded.finished_at)",
-                        params![account_id, chat_id, finished_at],
-                    )?;
-                }
-                _ => {}
             }
         }
         tx.execute("DROP TABLE account_dismissals", [])?;
@@ -714,6 +795,14 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             CREATE UNIQUE INDEX durable_wakeups_chat ON durable_wakeups(chat_id);",
         )?;
     }
+
+    // Pending questions keep the original follow-up. Older outcomes retain their
+    // reason and evidence under the remaining status for unresolved work.
+    tx.execute(
+        "UPDATE runs SET boundary=json_set(boundary,'$.outcome.status','blocked') \
+         WHERE json_extract(boundary,'$.outcome.status')='needs_input'",
+        [],
+    )?;
 
     // Drop retired mission tables.
     tx.execute_batch(

@@ -278,9 +278,10 @@ pub(crate) async fn snooze(
     s.store
         .transaction(move |db| {
             db.start_reading(&account, at)?;
-            db.set_snooze(&account, &chat, snooze)?;
-            if snooze.is_none() {
-                db.clear_read_mark(&account, &chat)?;
+            if let Some(snooze) = snooze {
+                db.set_snooze(&account, &chat, Some(snooze))?;
+            } else {
+                db.restore_snooze(&account, &chat)?;
             }
             Ok(())
         })

@@ -256,6 +256,14 @@ internal fun buildFeed(
                             chat.error?.lineSequence()?.firstOrNull()?.ifBlank { null }
                                 ?: statusLabel(chat.status),
                         )
+                chat.status == "succeeded" && chat.outcome?.status == "blocked" -> {
+                    val outcome = chat.outcome
+                    val label = "Bloquée · ${outcome.reason}"
+                    if (unread) forYou += item(FeedKind.REVIEW, label)
+                    else
+                        recent +=
+                            item(FeedKind.CHAT, label).copy(unread = false, statusLabel = "Bloquée")
+                }
                 !chat.paused &&
                     !chat.exclusiveSuspended &&
                     isQuotaWait(
@@ -292,14 +300,6 @@ internal fun buildFeed(
                                 // at resumption.
                                 resolved = chat.wakeup.observation != null,
                             )
-                chat.status == "succeeded" && chat.outcome?.status == "blocked" -> {
-                    val outcome = chat.outcome
-                    val label = "Bloquée · ${outcome.reason}"
-                    if (unread) forYou += item(FeedKind.REVIEW, label)
-                    else
-                        recent +=
-                            item(FeedKind.CHAT, label).copy(unread = false, statusLabel = "Bloquée")
-                }
                 unread && !chat.paused ->
                     toRead +=
                         item(FeedKind.UNREAD_CHAT, context(agent, chat.projectName))
@@ -907,7 +907,7 @@ internal fun FilRowActions(
             menu = true
         }
         DropdownMenu(menu, { menu = false }) {
-            if (item.unread && item.readAt > 0)
+            if ((item.unread || item.kind == FeedKind.SNOOZED) && item.readAt > 0)
                 DropdownMenuItem(
                     text = { Text("Marquer comme lu") },
                     onClick = {

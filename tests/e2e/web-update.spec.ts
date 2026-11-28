@@ -70,7 +70,7 @@ async function account(page: Page, authenticated = true) {
   })
 }
 
-test('offers recovery when Missions cannot load after a deployment', async ({ page, webUrl, previousBuild }) => {
+test('offers recovery when Connections cannot load after a deployment', async ({ page, webUrl, previousBuild }) => {
   let deployed = false
   // Two actual builds give the old tab stale imports and the reload fresh URLs.
   // Reusing a failed module URL would test a transient outage, not a deployment.
@@ -100,14 +100,14 @@ test('offers recovery when Missions cannot load after a deployment', async ({ pa
   deployed = true
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
-  await page.getByRole('link', { name: 'Missions', exact: true }).click()
+  await page.getByRole('link', { name: 'Connections', exact: true }).click()
   await expect(page.getByRole('alert').filter({ hasText: 'Reload Cairn' })).toContainText('This page couldn’t load.')
   await expect(page).toHaveURL(`${webUrl}/installations/demo/atelier`)
   await expect(page.getByRole('heading', { name: 'Atelier', exact: true })).toBeVisible()
   await page.screenshot({ path: test.info().outputPath('web-update.png') })
   await page.getByRole('button', { name: 'Reload Cairn' }).click()
-  await expect(page).toHaveURL(`${webUrl}/installations/demo/tasks`)
-  await expect(page.getByRole('heading', { name: 'Missions', exact: true })).toBeVisible()
+  await expect(page).toHaveURL(`${webUrl}/installations/demo/connections`)
+  await expect(page.getByRole('heading', { name: 'Connections', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Reload Cairn' })).toHaveCount(0)
   expect(errors).toEqual([])
 })

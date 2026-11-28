@@ -256,7 +256,7 @@ class WorkspaceJourneyTest {
                                 "/api/installations/fixture/api/settings/conversations" ->
                                     """{"inactivityDays":30}"""
                                 "/api/installations/fixture/api/overview" ->
-                                    """{"runsByStatus":{},"agents":1,"projects":1,"missions":0,"concurrency":1}"""
+                                    """{"runsByStatus":{},"agents":1,"projects":1,"hookRules":0,"concurrency":1}"""
                                 "/api/installations/fixture/api/tasks/00000000-0000-4000-8000-000000000099/run",
                                 "/api/installations/fixture/api/runs/run" ->
                                     """{"id":"run","taskId":"00000000-0000-4000-8000-000000000099","status":"running","snapshot":{"task":$task,"agent":${wireJson.encodeToString(newAgent().copy(name = "Reviewer"))},"project":null,"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/fixtures/cairn","origin":"","revision":"fixture","createdAt":0}]}}"""

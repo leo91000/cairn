@@ -184,7 +184,7 @@ export function catalogTool(catalog: HookRuleCatalog | null, instanceId: string,
 export function describeTrigger(trigger: HookRuleTrigger, catalog: HookRuleCatalog | null) {
   const hook = catalogHook(catalog, trigger)
   if (trigger.type === 'clock') {
-    const timing = trigger.cron ?? (trigger.at == null ? '' : new Date(trigger.at).toLocaleString())
+    const timing = trigger.cron ?? (trigger.at == null ? '' : new Date(trigger.at).toLocaleString(undefined, { timeZone: trigger.timezone }))
     return { title: timing ? `Schedule · ${timing} (${trigger.timezone})` : 'Clock', source: 'Cairn', description: hook?.description ?? '' }
   }
 

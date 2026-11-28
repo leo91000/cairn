@@ -513,7 +513,10 @@ pub async fn chat_run_fixture(
         .unwrap();
     let chat_id = chat["id"].as_str().unwrap().to_owned();
     installation
-        .chat_send(&chat_id, json!({ "id": uuid::Uuid::new_v4(), "text": prompt }))
+        .chat_send(
+            &chat_id,
+            json!({ "id": uuid::Uuid::new_v4(), "text": prompt }),
+        )
         .await
         .unwrap();
     installation
@@ -535,8 +538,17 @@ pub async fn seeded_artifact(
     bytes: &[u8],
     media_type: &str,
 ) -> (String, String) {
+    let (_, run, artifact) = seeded_conversation_artifact(relay, bytes, media_type).await;
+    (run, artifact)
+}
+
+pub async fn seeded_conversation_artifact(
+    relay: &RelayedInstallation,
+    bytes: &[u8],
+    media_type: &str,
+) -> (Value, String, String) {
     let installation = &relay.installation;
-    let (_, run) = chat_run_fixture(installation, "Make a report").await;
+    let (conversation, run) = chat_run_fixture(installation, "Make a report").await;
     let run = run["id"].as_str().unwrap().to_owned();
     let artifact = uuid::Uuid::new_v4().to_string();
     let directory = installation.config.data_dir.join("artifacts");
@@ -556,7 +568,7 @@ pub async fn seeded_artifact(
         .transaction(move |db| db.insert_artifact(&record))
         .await
         .unwrap();
-    (run, artifact)
+    (conversation, run, artifact)
 }
 
 /// Three independent accounts can fill all 24 installation stream slots while

@@ -28,7 +28,7 @@ watch(chatList, (chats) => {
 
 async function send(chatId: string, action: ConversationSnoozeAction, until: number | null, message: string) {
   const current = generation
-  const request = Symbol()
+  const request = Symbol('conversation snooze')
   requests.set(chatId, request)
   localSnoozes[chatId] = until
   const latest = () => current === generation && requests.get(chatId) === request

@@ -60,7 +60,7 @@ impl App {
     }
 }
 
-fn schedule_rule_definition(name: &str, trigger: Value) -> Value {
+fn schedule_rule_definition(name: &str, trigger: &Value) -> Value {
     json!({
         "name": name,
         "description": "ADR-0094 test schedule",
@@ -121,7 +121,7 @@ async fn clock_cron_rule_catches_up_once_guards_overlap_and_runs_now() {
     // 2. Create a cron Clock rule with !ruleConversationWorking guard.
     let def = schedule_rule_definition(
         "Morning triage",
-        json!({ "type": "clock", "cron": "*/5 * * * *", "timezone": "UTC" }),
+        &json!({ "type": "clock", "cron": "*/5 * * * *", "timezone": "UTC" }),
     );
     let (status, created) = app
         .request(
@@ -301,9 +301,23 @@ async fn clock_cron_rule_catches_up_once_guards_overlap_and_runs_now() {
 async fn clock_single_date_fires_once_and_never_repeats() {
     let app = App::new().await;
     let target = now() + 60_000;
+    let ambiguous = schedule_rule_definition(
+        "Invalid clock",
+        &json!({ "type": "clock", "cron": "   ", "at": target, "timezone": "UTC" }),
+    );
+    let (status, _) = app
+        .request(
+            &app.owner,
+            "POST",
+            "/api/hook-rules",
+            json!({ "definition": ambiguous }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
     let def = schedule_rule_definition(
         "One-shot deploy check",
-        json!({ "type": "clock", "at": target, "timezone": "UTC" }),
+        &json!({ "type": "clock", "at": target, "timezone": "UTC" }),
     );
     let (status, created) = app
         .request(
@@ -392,12 +406,22 @@ fn report_outcome_rejects_needs_input_and_accepts_completed_or_blocked() {
     ));
 }
 
-#[test]
-fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
+#[tokio::test]
+async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
     let dir = TempDir::new().unwrap();
-    // Bootstrap current schema first, then reconstruct legacy v38 tables on manager.db.
-    drop(Store::open(dir.path()).unwrap());
-    let db_path = dir.path().join("manager.db");
+    let config = common::config(dir.path());
+    std::fs::create_dir_all(&config.home).unwrap();
+    let initial = cairn_installation::service::Service::new(config.clone())
+        .await
+        .unwrap();
+    let agent = initial
+        .store
+        .read(|db| db.agent_snapshot(MAIN_AGENT_ID))
+        .await
+        .unwrap()
+        .unwrap();
+    drop(initial);
+    let db_path = config.data_dir.join("manager.db");
     let conn = Connection::open(&db_path).unwrap();
     conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
 
@@ -577,6 +601,26 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
     )
     .unwrap();
 
+    // A rule and mission could share a client-supplied UUID in v38.
+    conn.execute(
+        "INSERT INTO hook_rules(id,creator_account_id,creator_owner,revision,version,created_at,updated_at) \
+         VALUES(?1,'owner-acct',1,'r1',1,?2,?2)",
+        params![disabled_mission_id, t0],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO hook_rule_versions VALUES(?1,1,?2,'owner-acct','app',NULL,'{}',?3)",
+        params![
+            disabled_mission_id,
+            schedule_rule_definition(
+                "Independent rule",
+                &json!({ "type": "cairn", "hook": "ended" })
+            )
+            .to_string(),
+            t0,
+        ],
+    )
+    .unwrap();
+
     // Seed two legacy mission runs: one finished+blocked (for active_mission_id) and one waiting with wakeup (for oneshot_mission_id).
     conn.execute(
         "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,snapshot,boundary,\
@@ -588,15 +632,33 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
             t0,
             t0 + 5000,
             json!({ "task": { "name": "Daily standup" }, "agent": { "id": MAIN_AGENT_ID, "name": "Main" } }).to_string(),
-            json!({ "outcome": { "status": "blocked", "reason": "Waiting on review" }, "nativeProvenanceUnknown": false }).to_string(),
+            json!({ "outcome": { "status": "needs_input", "reason": "Waiting on review" }, "nativeProvenanceUnknown": false }).to_string(),
         ],
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,boundary,\
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,boundary,snapshot,session_id, \
            recovery_pending,resume_available,resume_count) \
-         VALUES(?1,?2,'waiting','manual',?3,?3,'{}',0,1,0)",
-        params![waiting_run_id, oneshot_mission_id, t0],
+         VALUES(?1,?2,'waiting','manual',?3,?3,?4,?5,'saved-session',0,1,0)",
+        params![
+            waiting_run_id,
+            oneshot_mission_id,
+            t0,
+            json!({ "missionTurnId": "legacy-turn", "nativeProvenanceUnknown": false }).to_string(),
+            json!({
+                "agent": agent,
+                "task": { "id": oneshot_mission_id, "name": "Manual one-shot", "agentId": MAIN_AGENT_ID, "prompt": "Run once", "worktree": true },
+                "project": null, "projects": [], "skills": [],
+            }).to_string(),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO run_checkpoints(run_id,state) VALUES(?1,?2)",
+        params![
+            waiting_run_id,
+            json!({ "launched": true, "completed": true }).to_string()
+        ],
     )
     .unwrap();
     conn.execute(
@@ -605,6 +667,19 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
         params![waiting_run_id, t0, t0 + 60_000],
     )
     .unwrap();
+
+    let queued_id = id();
+    conn.execute(
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,snapshot,boundary, \
+          recovery_pending,resume_available,resume_count) \
+         VALUES(?1,?2,'queued','schedule',?3,?4,'{}',0,0,0)",
+        params![
+            queued_id,
+            active_mission_id,
+            t0 + 7_000,
+            json!({ "agent": agent, "task": { "name": "Daily standup", "prompt": "Summarize updates" } }).to_string(),
+        ],
+    ).unwrap();
 
     // Seed legacy account_reads & account_dismissals (1 active snooze, 1 permanent dismiss).
     conn.execute(
@@ -632,7 +707,7 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
     drop(conn);
 
     // Open through Store::open to run the v38 -> v39 migration.
-    let store = Store::open(dir.path()).unwrap();
+    let store = Store::open(&config.data_dir).unwrap();
     drop(store);
 
     let migrated = Connection::open(&db_path).unwrap();
@@ -700,13 +775,15 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
 
     // Disabled/archived -> disabled_at set; removed author -> membership_ended_at set;
     // a suspended author still needs current agent access; one-shot -> disabled_at set (no cron).
-    let disabled_at: Option<i64> = migrated
+    let (replacement, disabled_at): (String, Option<i64>) = migrated
         .query_row(
-            "SELECT disabled_at FROM hook_rules WHERE id=?1",
-            [&disabled_mission_id],
-            |row| row.get(0),
+            "SELECT r.id,r.disabled_at FROM hook_rules r JOIN hook_rule_versions v ON v.rule_id=r.id \
+             WHERE v.source='migration' AND json_extract(v.definition,'$.name')='Paused mission'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
+    assert_ne!(replacement, disabled_mission_id);
     assert!(disabled_at.is_some());
     let removed_at: Option<i64> = migrated
         .query_row(
@@ -803,6 +880,31 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
         )
         .unwrap();
     assert_eq!(owner_snooze, future_snooze);
+    let queued: (String, String) = migrated
+        .query_row(
+            "SELECT task_id,json_extract(boundary,'$.chatExecution.text') FROM runs WHERE id=?",
+            [&queued_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(queued.1.contains("Summarize updates"));
+    let queued_snooze_count: i64 = migrated
+        .query_row(
+            "SELECT count(*) FROM account_snoozes WHERE chat_id=?",
+            [&queued.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(queued_snooze_count, 0);
+    let outcome: String = migrated
+        .query_row(
+            "SELECT json_extract(boundary,'$.outcome.status') FROM runs WHERE id=?",
+            [&blocked_run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, "blocked");
+
     let member_read: i64 = migrated
         .query_row(
             "SELECT finished_at FROM account_reads WHERE account_id='member-acct' AND chat_id=?1",
@@ -811,4 +913,25 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
         )
         .unwrap();
     assert_eq!(member_read, t0 + 5000);
+
+    drop(migrated);
+    let service = cairn_installation::service::Service::new(config)
+        .await
+        .unwrap();
+    let detail = service.chat_detail(&waiting_chat_id).await.unwrap();
+    assert_eq!(detail["run"]["chatExecution"]["messageId"], "legacy-turn");
+    assert_eq!(detail["wakeup"]["messageId"], "legacy-turn");
+    service
+        .chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let resumed = service.store.run(&waiting_run_id).await.unwrap();
+    let after = service.chat_detail(&waiting_chat_id).await.unwrap();
+    assert_eq!(
+        resumed["status"], "queued",
+        "wake: {}, error: {}",
+        after["wakeup"], after["error"]
+    );
+    assert_ne!(resumed["chatExecution"]["messageId"], "legacy-turn");
+    assert!(text(&resumed["chatExecution"], "text").contains("Wait for deploy"));
 }
