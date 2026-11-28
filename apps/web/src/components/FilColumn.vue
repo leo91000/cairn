@@ -188,8 +188,6 @@ function mark(item: FilItem) {
 function label(item: FilItem) {
   if (item.kind === 'question')
     return 'Answer'
-  if (item.kind === 'unread')
-    return 'Finished'
   if (item.kind === 'review')
     return 'Blocked'
   return item.subtitle
@@ -244,7 +242,7 @@ function snooze() {
     return
 
   snoozing.value = null
-  void snoozeConversation({ id: item.chatId, readAt: item.readAt, updatedAt: item.at }, snoozeDeadline.value)
+  void snoozeConversation(item.chatId, item.snoozeAt ?? item.at, snoozeDeadline.value)
 }
 
 function move(delta: number) {

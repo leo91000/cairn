@@ -646,6 +646,54 @@ async fn preparation_failure_surfaces_after_an_acknowledged_and_snoozed_turn() {
 }
 
 #[tokio::test]
+async fn a_queued_followup_ends_a_snooze_without_marking_a_read_result_unread() {
+    let app = App::new().await;
+    let chat = app.finished_chat().await;
+    let chat_id = text(&chat, "id");
+    let listed = app.get(&app.owner, "/api/chats").await;
+    let previous = find(&listed, "id", chat_id);
+    let (_, marked) = app
+        .read(&app.owner, &[chat_read(chat_id, &previous["readAt"])])
+        .await;
+    assert_eq!(marked["read"], 1);
+    let until = now() + 60_000;
+    let action = json!({ "kind": "snooze", "finishedAt": previous["readAt"], "until": until });
+    let (status, snoozed) = app.snooze(&app.owner, chat_id, action.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{snoozed}");
+    assert_eq!(snoozed["snoozedUntil"], until);
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let (status, sent) = app
+        .request(
+            &app.owner,
+            "POST",
+            &format!("/api/chats/{chat_id}/messages"),
+            json!({ "id": id(), "text": "Please verify the totals." }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let listed = app.get(&app.owner, "/api/chats").await;
+    let current = find(&listed, "id", chat_id);
+    assert_eq!(current["finishedAt"], previous["finishedAt"]);
+    assert_eq!(current["readAt"], previous["readAt"]);
+    assert_eq!(current["unread"], false);
+    assert!(current["snoozedUntil"].is_null());
+
+    let (status, stale) = app.snooze(&app.owner, chat_id, action).await;
+    assert_eq!(status, StatusCode::OK, "{stale}");
+    assert!(stale["snoozedUntil"].is_null());
+    let (status, latest) = app
+        .snooze(
+            &app.owner,
+            chat_id,
+            json!({ "kind": "snooze", "finishedAt": current["lastActivityAt"], "until": until }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{latest}");
+    assert_eq!(latest["snoozedUntil"], until);
+}
+
+#[tokio::test]
 async fn snoozing_a_previous_observation_leaves_a_new_turn_unread() {
     let app = App::new().await;
     app.get(&app.owner, "/api/chats").await;

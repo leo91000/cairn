@@ -40,6 +40,8 @@ export interface FilItem {
   unread?: boolean
   /** Observed question/turn timestamp to acknowledge. */
   readAt?: number
+  /** Latest observed activity that a snooze is allowed to cover. */
+  snoozeAt?: number
   /** The opening of the agent's final message, for finished work not read yet. */
   preview?: string
   chatId: string
@@ -128,6 +130,7 @@ export function filOf(
       to: chatPath(chat),
       chatId: chat.id,
       readAt: readTimestamp,
+      snoozeAt: Math.max(readTimestamp, chat.lastActivityAt ?? 0),
       unread,
       requester,
       originRule: chat.originRule ?? undefined,

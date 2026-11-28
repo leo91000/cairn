@@ -22,7 +22,6 @@ private data class BackendMigrationState(
     val toBackend: String = "firecracker",
     val nodes: List<MigrationNode> = emptyList(),
     val conversion: Boolean = false,
-    val mission: Boolean = false,
     val pending: Boolean = false,
     val environmentExpired: Boolean = false,
     val reason: String? = null,

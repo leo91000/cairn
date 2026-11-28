@@ -288,7 +288,7 @@ des VM suivent la politique existante des réveils durables.
 | Message d’un plugin ou connecteur | Inspecter un événement reçu, par exemple dans une intégration de discussion | Nécessite une source installée et autorisée, un événement identifié et une politique sur les données reçues |
 | Credential reconnecté | Continuer après intervention du propriétaire | La file des comptes gère déjà une partie de ce cas ; une attente dédiée ne doit pas accorder de nouveaux droits |
 | Capacité ou node disponible | Reprendre quand un travail peut être admis | L’admission et le placement le gèrent déjà ; une observation ne remplace pas une réservation |
-| Date ou retry après délai | Continuer après une heure donnée ou un délai de service | Disponible avec `wait_for` et ses conditions `delay` / `at` ; les tâches planifiées servent aux travaux récurrents |
+| Date ou retry après délai | Continuer après une heure donnée ou un délai de service | `wait_for` propose `delay` et `at`. Les programmations Horloge servent aux travaux récurrents |
 | Processus local ou fichier produit dans la VM courante | Attendre une commande locale sans interrompre son travail | Utiliser l’attente native ; une attente qui libère la VM exige un job ayant sa propre exécution |
 
 Cette matrice sépare les capacités livrées des extensions à concevoir. Une
@@ -297,8 +297,8 @@ périmètre de la demande initiale et des permissions courantes.
 
 ## Contrat de reprise
 
-- Un seul réveil par conversation ou exécution de mission. Une répétition identique conserve l’échéance ;
-  une autre demande remplace la précédente, y compris entre durée, date et résultat.
+- Un seul réveil par conversation. Une répétition identique conserve l’échéance.
+  Une autre demande remplace la précédente, y compris entre durée, date et résultat.
 - Le timeout est obligatoire pour une condition externe ou un groupe, entre
   1 seconde et 24 heures, et interdit pour les conditions temporelles. Dans une attente
   conditionnelle, `wakeAt` représente l’échéance de secours, pas l’heure minimale
@@ -364,22 +364,13 @@ limitée à trois lignes, dépliables. Les notifications doivent encore la disti
 d’un travail achevé.
 
 
-## Missions
+## Programmations
 
-L’outil est également disponible pendant les missions. Une attente différée
-reste attachée à l’exécution de la mission, sans créer de conversation cachée.
-Après la fin réussie du tour, le statut devient `waiting`, sans `finishedAt` ni
-résultat final. La mission conserve son emplacement actif : aucun second lancement
-de cette même mission n’est admis pendant l’attente.
+Une programmation Horloge ouvre une conversation ordinaire. L’agent peut y
+utiliser `wait_for` et poser une question comme dans les autres conversations.
+La condition de chevauchement proposée à la création garde le créneau suivant
+libre tant qu’une conversation de cette règle travaille ou attend un réveil.
 
-Cairn arrête et clôture l’exécution précédente, libère son compte et ses jetons,
-puis observe la condition sans LLM. À l’échéance ou au résultat, la même exécution
-repart avec sa session et son espace de travail, une nouvelle identité de tour
-et les données observées. Le temps passé en attente ne consomme pas le budget
-d’exécution restant. Une fin de tour en erreur ou une annulation supprime l’attente.
-
-Arrêter la mission annule l’attente. Mettre sa **planification** en pause ne touche
-que ses futurs lancements. Les outils de questions restent réservés aux conversations
-interactives ; une mission qui nécessite une décision utilise `report_outcome`.
-Le web, Android, le MCP public et `cairn_installation` exposent `waiting`, son
-`wakeup` et l’annulation via les interfaces d’exécution existantes.
+Désactiver la règle empêche ses futurs lancements. Le réveil reste attaché à sa
+conversation. La pause de la conversation retient sa reprise et l’arrêt
+annule son attente.

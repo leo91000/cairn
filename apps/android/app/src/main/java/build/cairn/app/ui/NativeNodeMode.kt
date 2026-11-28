@@ -111,7 +111,10 @@ internal fun NativeNodeMode(vm: CairnViewModel, node: ExecutionNode, changed: su
                 style = MaterialTheme.typography.titleSmall,
             )
             impact.preview.conversations.forEach { Text("${it.name ?: it.id} · ${it.status}") }
-            Text("Tâches planifiées", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Règles qui peuvent démarrer des conversations",
+                style = MaterialTheme.typography.titleSmall,
+            )
             impact.preview.tasks.forEach { Text(it.name) }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Button(

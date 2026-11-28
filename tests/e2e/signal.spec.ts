@@ -469,6 +469,7 @@ test('opening a returned reminder acknowledges an idle conversation', async ({ p
   await signIn(page)
   const row = page.locator(`[data-fil-key="chat:${chat.id}"]`)
   await expect(row).toHaveAttribute('data-unread', '')
+  await expect(row).toContainText('Snooze ended')
   await row.getByRole('button', { name: /^Open “/ }).click()
   await expect(page).toHaveURL(workspacePath(`/chats/${chat.slug}`))
   await expect.poll(async () => (await item()).unread, { timeout: 20000 }).toBe(false)

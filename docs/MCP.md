@@ -482,9 +482,9 @@ every environment on the revoked node; `releasePlacements` still controls pins
 and preferences. The destination's first admission waits for capacity while it
 remains authorized and non-revoked, otherwise automatic placement chooses it.
 A new explicit choice replaces a pending destination without another loss warning.
-Messages and scheduled/conditional waits keep their continuations. An active
-mission, or an agent moving its own conversation, continues automatically in a
-fresh environment with the expiration warning; other chats wait for a message.
+Messages and scheduled/conditional waits keep their continuations. An agent
+moving its own conversation continues automatically in a fresh environment
+with the expiration warning. Other chats wait for a message.
 Automatic capacity relocation and recovery on another node are removed: existing
 environments wait for their current node or a confirmed change. See
 [environment expiration](CONVERSATION-RETENTION.md) and ADR-0083 (local conversation disks).

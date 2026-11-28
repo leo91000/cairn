@@ -291,7 +291,7 @@ internal object CairnIcons {
             close()
         }
     val Orbit =
-        line("Missions") {
+        line("Activité") {
             moveTo(12f, 3f)
             arcTo(9f, 9f, 0f, true, true, 3f, 12f)
             moveTo(12f, 8f)

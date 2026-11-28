@@ -65,11 +65,15 @@ fn activity_at(chat: &Value) -> Option<i64> {
         .or_else(|| chat["updatedAt"].as_i64())
 }
 
+fn snooze_activity_at(chat: &Value) -> Option<i64> {
+    activity_at(chat).max(chat["lastActivityAt"].as_i64())
+}
+
 /// Opening a synchronized conversation acknowledges a due reminder, including
 /// one for an idle conversation that has never run.
 pub(crate) fn detail_reminder(db: &Db<'_>, account: &str, chat: &mut Value) -> Result<()> {
     if chat["lifecycle"] == "active"
-        && let Some(activity_at) = activity_at(chat)
+        && let Some(activity_at) = snooze_activity_at(chat)
         && let Some(until) = db.snoozed_until(account, text(chat, "id"), activity_at)?
         && until <= now()
     {
@@ -147,7 +151,7 @@ impl Reads {
 
             let activity_at = activity_at(chat);
             let matching_snooze = self.snoozes.get(&id).copied().filter(|snooze| {
-                activity_at.is_some_and(|observed| observed <= snooze.finished_at)
+                snooze_activity_at(chat).is_some_and(|observed| observed <= snooze.finished_at)
             });
             chat["snoozedUntil"] =
                 matching_snooze.map_or(Value::Null, |snooze| snooze.until.into());
@@ -325,7 +329,8 @@ pub(crate) async fn snooze(
                 let activity_at = question_at
                     .max(finished_at)
                     .max(failure_at)
-                    .unwrap_or(conversation.updated_at);
+                    .unwrap_or(conversation.updated_at)
+                    .max(conversation.last_activity_at.unwrap_or(0));
                 if snooze.finished_at >= activity_at {
                     db.set_snooze(&account, &chat, Some(snooze))?;
                 }

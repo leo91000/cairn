@@ -34,14 +34,8 @@ async function send(chatId: string, action: ConversationSnoozeAction) {
   }
 }
 
-export function snoozeConversation(chat: {
-  id: string
-  finishedAt?: number | null
-  readAt?: number | null
-  updatedAt?: number
-}, until: number) {
-  const finishedAt = chat.readAt ?? chat.finishedAt ?? chat.updatedAt ?? Date.now()
-  return send(chat.id, { kind: 'snooze', finishedAt, until })
+export function snoozeConversation(chatId: string, finishedAt: number, until: number) {
+  return send(chatId, { kind: 'snooze', finishedAt, until })
 }
 
 export function restoreConversation(chatId: string) {

@@ -20,7 +20,7 @@ pub(crate) const PERSONAL_OPERATIONS: &[PersonalOperation] = &[
     },
     PersonalOperation {
         name: "snooze_chat",
-        description: "Snooze any conversation until a later time (up to 30 days) or restore it early, for the Cairn account that authorized this connection. Later activity in the conversation cancels the snooze. Executions have no account delegation and are refused.",
+        description: "Snooze any conversation until a later time (up to 30 days) or restore it early, for the Cairn account that authorized this connection. For a new snooze, pass the later of lastActivityAt and readAt (or updatedAt if readAt is absent) as finishedAt. Newer activity cancels the snooze. Executions have no account delegation and are refused.",
     },
 ];
 

@@ -18,6 +18,7 @@ use cairn_installation::{
 use common::reconfigure;
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -509,7 +510,7 @@ async fn delivered_message_retains_its_original_submission_timestamp() {
         .chat_send(chat_id, json!({ "id": id(), "text": "Hello" }))
         .await
         .unwrap();
-    s.chat_tick(&Default::default()).await.unwrap();
+    s.chat_tick(&HashSet::new()).await.unwrap();
     let chat = s.chat_detail(chat_id).await.unwrap();
     let run = &chat["run"];
     s.chat_acknowledge(text(run, "id"), text(&message, "id"))

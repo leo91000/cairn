@@ -107,6 +107,7 @@ internal data class FeedItem(
     val project: String? = null,
     val unread: Boolean = kind == FeedKind.UNREAD_CHAT,
     val readAt: Long = stamp,
+    val snoozeAt: Long = readAt,
     /** It finished as expected: its row shows no status label, only a quiet mark. */
     val finished: Boolean = false,
 ) {
@@ -229,6 +230,7 @@ internal fun buildFeed(
                             else -> if (chat.paused) "En pause" else statusLabel(chat.status)
                         },
                     readAt = activityAt,
+                    snoozeAt = maxOf(activityAt, chat.lastActivityAt ?: 0),
                     unread = unread,
                 )
             val wait = chatWaitNotice(chat.run)
@@ -435,7 +437,7 @@ fun FilScreen(
     snoozing?.let { item ->
         SnoozeConversationDialog(item.title, dismiss = { snoozing = null }) { until ->
             snoozing = null
-            item.chatId?.let { vm.snooze(it, item.readAt, until) }
+            item.chatId?.let { vm.snooze(it, item.snoozeAt, until) }
         }
     }
     peeked?.let { item ->

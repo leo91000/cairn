@@ -268,7 +268,7 @@ export interface LiveWait {
   settled: boolean
   /** Another action is under way, so pausing would be ignored. */
   busy?: boolean
-  /** Mission waits can be cancelled with the run, but have no conversation pause. */
+  /** A read-only view shows the wait without pause controls. */
   canPause?: boolean
 }
 
