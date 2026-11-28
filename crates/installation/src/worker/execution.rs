@@ -563,6 +563,13 @@ async fn release(
             })
             .await?;
     }
+    if fenced && let Some(pending) = saved.pending_native_cleanup() {
+        s.worker
+            .deferred_cleanup_observers
+            .lock()
+            .await
+            .accept_handoff(run_id, &pending.attempt);
+    }
     if fenced
         && let Some(account) = account
         && s.accounts.release(s, account).await.is_err()

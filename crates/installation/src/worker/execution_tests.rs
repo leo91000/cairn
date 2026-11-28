@@ -204,6 +204,119 @@ async fn stop_while_native_delete_is_in_flight_keeps_the_workspace_fence() {
 }
 
 #[tokio::test]
+async fn a_live_native_handoff_settles_while_credential_release_is_blocked() {
+    use crate::environment_expiration::Expiration;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Settlement {
+        Deadline,
+        Stop,
+        Detach,
+    }
+
+    for settlement in [Settlement::Deadline, Settlement::Stop, Settlement::Detach] {
+        let (root, service, server) = fence_service(axum::Router::new()).await;
+        let id = crate::config::id();
+        let account = crate::config::id();
+        let fixture = id.clone();
+        let saved =
+            service
+                .store
+                .transaction(move |db| {
+                    let attempt = crate::config::id();
+                    db.add_run_fixture(&json!({
+                "id": fixture, "taskId": fixture, "status": "succeeded", "trigger": "chat",
+                "isolated": true, "recoveryPending": true, "finishedAt": 42,
+            }), None)?;
+                    let until = if settlement == Settlement::Deadline {
+                        0
+                    } else {
+                        now() + 60_000
+                    };
+                    let saved = RunCheckpoint::from_value(json!({
+                        "runnerId": attempt,
+                        "prepared": { "backend": "native", "isolated": true },
+                        "settled": { "status": "succeeded", "finishedAt": 42 },
+                        "pendingNativeCleanup": {
+                            "attempt": attempt, "state": "observing", "until": until,
+                            "message": "Native disk cleanup is still in progress."
+                        },
+                    }))?;
+                    saved.store_in(db, &fixture)?;
+                    Ok(saved)
+                })
+                .await
+                .unwrap();
+        service
+            .worker
+            .active
+            .lock()
+            .await
+            .insert(id.clone(), CancellationToken::new());
+        let credentials = service.accounts.lock(&account).await;
+        let lease = Lease {
+            account_id: account,
+            provider: Provider::Codex,
+            run_id: id.clone(),
+            home: root.path().join("provider"),
+            model: String::new(),
+        };
+        let active_service = service.clone();
+        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+        let releasing =
+            tokio::spawn(
+                async move { release(&active_service, &checkpoint, Some(&lease), true).await },
+            );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !service
+                .worker
+                .deferred_cleanup_observers
+                .lock()
+                .await
+                .has_handoff(&id)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        match settlement {
+            Settlement::Deadline => {}
+            Settlement::Stop => service.worker.cancel(&service, &id).await.unwrap(),
+            Settlement::Detach => service
+                .expire_environment(
+                    &id,
+                    Expiration::new(cairn_contracts::EnvironmentExpirationCause::NodeChange),
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap(),
+        }
+        super::super::schedule::observe_native_cleanup(&service)
+            .await
+            .unwrap();
+        assert!(!releasing.is_finished());
+        assert!(service.worker.active.lock().await.contains_key(&id));
+        let result = service.store.run_state(&id).await.unwrap();
+        assert_eq!(result.finished_at, Some(42));
+        assert!(!result.recovery_pending);
+        if settlement == Settlement::Stop {
+            assert_eq!(result.status, RunStatus::Cancelled);
+        } else {
+            assert_eq!(result.status, RunStatus::Failed);
+            assert_eq!(
+                result.error.as_deref(),
+                Some("Native disk cleanup is still in progress.")
+            );
+        }
+        drop(credentials);
+        releasing.await.unwrap().unwrap();
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
     use axum::{Json, Router, http::Request, routing::any};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

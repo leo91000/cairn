@@ -260,7 +260,16 @@ impl Worker {
                 cancel,
             )
             .await;
-            worker.active.lock().await.remove(&run_id);
+            {
+                let mut active = worker.active.lock().await;
+                worker
+                    .deferred_cleanup_observers
+                    .lock()
+                    .await
+                    .live_handoffs
+                    .remove(&run_id);
+                active.remove(&run_id);
+            }
             worker.held.lock().await.remove(&run_id);
             worker.job_redactions.lock().await.remove(&run_id);
             worker.notify();
@@ -346,6 +355,16 @@ async fn run_to_completion(
     // disk/database failure must not strand a running record or
     // launch a second process before the previous one is fenced.
     loop {
+        if s.worker
+            .deferred_cleanup_observers
+            .lock()
+            .await
+            .has_handoff(&run_id)
+        {
+            // The exact fenced checkpoint is already owned by deferred
+            // recovery. A later housekeeping error does not requeue it.
+            break;
+        }
         let result = match s.accounts.lease(s, &run_id).await {
             Ok(lease) => requeue_after_error(&s.store, &run_id, lease).await,
             Err(error) => Err(error),
@@ -469,9 +488,19 @@ struct CleanupObservation {
 pub(super) struct DeferredCleanupObservers {
     in_flight: HashSet<CleanupObservation>,
     waiting: VecDeque<CleanupObservation>,
+    live_handoffs: HashMap<String, String>,
 }
 
 impl DeferredCleanupObservers {
+    pub(super) fn accept_handoff(&mut self, run_id: &str, attempt: &str) {
+        self.live_handoffs
+            .insert(run_id.to_owned(), attempt.to_owned());
+    }
+
+    pub(super) fn has_handoff(&self, run_id: &str) -> bool {
+        self.live_handoffs.contains_key(run_id)
+    }
+
     fn admit(
         &mut self,
         candidates: Vec<(CleanupObservation, RunCheckpoint)>,
@@ -519,9 +548,7 @@ pub(super) async fn observe_native_cleanup(s: &Arc<Service>) -> Result<()> {
                 let Some(pending) = saved.pending_native_cleanup() else {
                     continue;
                 };
-                if crate::environment_expiration::pending(db, &run_id)? {
-                    continue;
-                }
+                let expiring = crate::environment_expiration::pending(db, &run_id)?;
                 let Some(state) = db.run_state(&run_id)? else {
                     continue;
                 };
@@ -538,28 +565,33 @@ pub(super) async fn observe_native_cleanup(s: &Arc<Service>) -> Result<()> {
                     attempt: pending.attempt.clone(),
                 };
                 if state.status == RunStatus::Succeeded
-                    && (state.cancel_requested_at.is_some() || !pending.needs_observation())
+                    && (expiring
+                        || state.cancel_requested_at.is_some()
+                        || !pending.needs_observation())
                 {
                     completed.push((key, saved));
-                } else if pending.needs_observation() || pending.awaiting_retirement() {
+                } else if !expiring
+                    && (pending.needs_observation() || pending.awaiting_retirement())
+                {
                     ready.push((key, saved));
                 }
             }
             Ok((ready, completed))
         })
         .await?;
-    {
-        // A live worker can still be persisting its own copy of the checkpoint.
+    let admitted = {
+        // A live worker owns the checkpoint until its last write. Admission
+        // still sees the worker as active while it clears its local resources.
         let active = s.worker.active.lock().await;
-        ready.retain(|(key, _)| !active.contains_key(&key.run_id));
-        completed.retain(|(key, _)| !active.contains_key(&key.run_id));
-    }
-    let admitted = s
-        .worker
-        .deferred_cleanup_observers
-        .lock()
-        .await
-        .admit(ready);
+        let mut observers = s.worker.deferred_cleanup_observers.lock().await;
+        let eligible = |key: &CleanupObservation| {
+            !active.contains_key(&key.run_id)
+                || observers.live_handoffs.get(&key.run_id) == Some(&key.attempt)
+        };
+        ready.retain(|(key, _)| eligible(key));
+        completed.retain(|(key, _)| eligible(key));
+        observers.admit(ready)
+    };
     for (key, saved) in admitted {
         let service = s.clone();
         s.worker.spawn_recovery(async move {
@@ -591,7 +623,6 @@ async fn settle_native_cleanup(s: &Service, id: String, expected: RunCheckpoint)
             };
             if !recovery::same_execution(Some(&current), Some(&expected))
                 || current.pending_native_cleanup() != expected.pending_native_cleanup()
-                || crate::environment_expiration::pending(db, &id)?
             {
                 return Ok(false);
             }
@@ -603,7 +634,8 @@ async fn settle_native_cleanup(s: &Service, id: String, expected: RunCheckpoint)
             }
             if let Some(pending) = current.pending_native_cleanup()
                 && pending.state == DeferredCleanupState::Observing
-                && !pending.needs_observation()
+                && (!pending.needs_observation()
+                    || crate::environment_expiration::pending(db, &id)?)
             {
                 let mut pending = pending.clone();
                 pending.state = DeferredCleanupState::Unconfirmed;

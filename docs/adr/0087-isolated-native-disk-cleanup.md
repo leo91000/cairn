@@ -89,8 +89,10 @@ original cleanup diagnostic. Expiration leaves a fenced turn's cancellation
 state as set by explicit Stop. A Stop issued during cleanup uses the provider
 turn's end time to distinguish its inputs from later messages.
 The live manager checkpoint serializes fencing and reloads its durable evidence
-before heartbeat or output persistence can overwrite it; placement lease renewal
-continues independently while the fence waits.
+before heartbeat or output persistence can overwrite it. After its final
+checkpoint write, the live worker hands that attempt to deferred recovery.
+The run can settle while the worker clears its local credentials. Admission
+and physical detachment still wait for the worker to release the run.
 
 The native marker advances to `ublk-rootless-v3` before a mounted disk is
 handed to execution. This reader accepts v1/v2 and upgrades only its marker;
