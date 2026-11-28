@@ -586,12 +586,23 @@ fn detach_environment_in(
     let legacy_environment = environment["trigger"]
         .as_str()
         .is_some_and(|trigger| trigger != "chat");
+    let migrated_turn = if let Some(chat) = &chat
+        && (resume || waiting)
+    {
+        db.unsettled_migrated_occurrence(&chat.id, run_id)?
+    } else {
+        false
+    };
     let migrated_wakeup_id = chat
         .as_ref()
         .and_then(|chat| chat.wakeup.as_ref())
-        .filter(|wake| checkpoint.migrated_mission_wakeup_id.as_deref() == Some(wake.id.as_str()))
+        .filter(|wake| {
+            migrated_turn
+                || checkpoint.migrated_mission_wakeup_id.as_deref() == Some(wake.id.as_str())
+        })
         .map(|wake| wake.id.clone());
-    let keep_budget = migrated_wakeup_id.is_some() || (legacy_environment && resume);
+    let keep_budget =
+        migrated_wakeup_id.is_some() || (resume && (legacy_environment || migrated_turn));
     let node_change = expiration.cause == Cause::NodeChange;
     let keep_pins = expiration.cause == Cause::NodeRevocation;
 
@@ -1119,8 +1130,9 @@ mod tests {
         let store = crate::store::Store::open(root.path()).unwrap();
         store
             .transaction(|db| {
-                for (cancelled, persisted_wakeup) in [(false, false), (false, true), (true, false)]
-                {
+                for (cancelled, persisted_wakeup, subsequent_wait) in [
+                    (false, false, false), (false, true, false), (true, false, false), (false, true, true),
+                ] {
                     let (run, chat, turn) = (id(), id(), id());
                     let mut environment = db.add_run_fixture(&json!({
                     "id": run,
@@ -1131,7 +1143,7 @@ mod tests {
                     "chatExecution": { "messageId": turn, "text": "Continue", "attachments": [] },
                 }), None)?;
                     db.save_conversation_boundary(&json!({ "id": chat, "runId": run }))?;
-                    environment["trigger"] = "schedule".into();
+                    environment["trigger"] = if subsequent_wait { "chat" } else { "schedule" }.into();
                     environment["status"] = "waiting".into();
                     environment["wakeup"] = json!({
                         "id": "kept-wake",
@@ -1148,9 +1160,16 @@ mod tests {
                         stored_chat.wakeup = Some(serde_json::from_value(wakeup)?);
                         db.save_conversation(&stored_chat)?;
                     }
+                    if subsequent_wait {
+                        db.0.execute(
+                            "INSERT INTO hook_rule_conversations(chat_id,creator_account_id,agent_id,rule_id,origin,run_id,created_at)
+                             VALUES(?1,'fixture-owner',?2,?3,'{\"legacyRun\":{\"status\":null}}',?4,1)",
+                            rusqlite::params![chat, crate::config::MAIN_AGENT_ID, id(), run],
+                        )?;
+                    }
                     db.save_checkpoint_boundary(
                         &run,
-                        &json!({ "remainingMs": 12_000, "migratedMissionWakeupId": "kept-wake" }),
+                        &json!({ "remainingMs": 12_000, "migratedMissionWakeupId": (!subsequent_wait).then_some("kept-wake") }),
                     )?;
                     db.put(
                         PENDING,

@@ -636,6 +636,18 @@ impl Db<'_> {
         Ok(())
     }
 
+    /// Automatic continuation still belongs to the original v38 occurrence.
+    pub(crate) fn unsettled_migrated_occurrence(&self, chat: &str, run: &str) -> Result<bool> {
+        Ok(self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hook_rule_conversations h JOIN conversations c ON c.id=h.chat_id
+             WHERE h.chat_id=?1 AND h.run_id=?2 AND c.run_id=h.run_id
+             AND json_type(h.origin,'$.legacyRun')='object'
+             AND json_extract(h.origin,'$.legacyRun.status') IS NULL)",
+            params![chat, run],
+            |row| row.get(0),
+        )?)
+    }
+
     fn write_run_state(&self, state: &RunState) -> Result<()> {
         self.0.prepare_cached("UPDATE runs SET task_id=?,project_id=?,status=?,trigger=?,created_at=?,started_at=?,finished_at=?,summary=?,error=?,session_id=?,workspace=?,workspace_cleaned_at=?,recovery_pending=?,resume_available=?,resume_count=?,cancel_requested_at=?,account_id=?,account_name=?,account_wait_reason=?,account_required=?,capacity_wait_until=?,retry_attempt=?,retry_limit=?,retry_next_at=?,retry_started_at=?,retry_deadline_at=?,retry_cause=?,requested_by=? WHERE id=?")?.execute(params![
             state.task_id,

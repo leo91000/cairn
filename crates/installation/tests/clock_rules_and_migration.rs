@@ -2125,6 +2125,69 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let resumed = get(&owner, &resumed_history).await;
     assert_eq!(resumed["status"], "running");
     assert!(resumed["finishedAt"].is_null());
+    let active_chat = text(&resuming_retired, "taskId").to_owned();
+    let active_run = resuming_retirement_run_id.clone();
+    let running_wait: cairn_contracts::ChatWakeup = serde_json::from_value(json!({
+        "id": "active-continuation-wake",
+        "messageId": resuming_retired["chatExecution"]["messageId"],
+        "reason": "Wait after the provider finishes",
+        "seconds": 60,
+        "createdAt": now(),
+        "wakeAt": now() + 60_000,
+    }))
+    .unwrap();
+    let running_chat = active_chat.clone();
+    service
+        .store
+        .transaction(move |db| {
+            db.save_wakeup(true, &running_chat, Some(&running_wait))?;
+            db.change_run(
+                &active_run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    recovery_pending: Some(false),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let request = owner
+        .authorize(common::request(
+            "POST",
+            &format!("/api/chats/{active_chat}/messages"),
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "id": id(), "text": "Follow up after the active turn", "mode": "queue" })
+                .to_string(),
+        ))
+        .unwrap();
+    let response = common::send(&app, request).await;
+    let accepted = response.status();
+    let reply = common::read_json(response).await;
+    assert!(accepted.is_success(), "{reply}");
+    assert_eq!(get(&owner, &resumed_history).await["status"], "running");
+    service
+        .store
+        .change_run(
+            &resuming_retirement_run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                finished_at: Some(Some(now())),
+                summary: Some("The active mission completed".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let settled_active = get(&owner, &resumed_history).await;
+    assert_eq!(settled_active["status"], "completed");
+    assert_eq!(
+        settled_active["event"]["payload"]["migratedConversation"]["summary"],
+        "The active mission completed"
+    );
     let stopping_run = service.store.run(&stopped_wait_run_id).await.unwrap();
     let stopped_wait_chat_id = text(&stopping_run, "taskId");
     let stopped_history_path = format!("/api/hook-rule-triggerings/{stopped_wait_chat_id}");
@@ -2451,7 +2514,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let later_finish = first_finish + 1_000;
     for (run_id, chat_id) in [(&queued_id, &queued.0), (&waiting_run_id, &waiting_chat_id)] {
         let current = service.store.run(run_id).await.unwrap();
-        let wake_at = now() + 60_000;
+        let wake_at = now() - 1;
         let continued_wait: cairn_contracts::ChatWakeup = serde_json::from_value(json!({
             "id": id(),
             "messageId": current["chatExecution"]["messageId"],
@@ -2461,11 +2524,17 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             "wakeAt": wake_at,
         }))
         .unwrap();
+        let continuation_id = continued_wait.id.clone();
         let current_chat = chat_id.clone();
         let current_run = run_id.clone();
         service
             .store
             .transaction(move |db| {
+                let mut checkpoint = db
+                    .checkpoint_boundary(&current_run)?
+                    .unwrap_or_else(|| json!({}));
+                checkpoint["remainingMs"] = 7_321.into();
+                db.save_checkpoint_boundary(&current_run, &checkpoint)?;
                 db.save_wakeup(true, &current_chat, Some(&continued_wait))?;
                 db.change_run(
                     &current_run,
@@ -2485,24 +2554,22 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         assert_eq!(still_waiting["status"], "waiting", "{still_waiting}");
         assert_eq!(still_waiting["resumesAt"], wake_at);
         assert!(still_waiting["finishedAt"].is_null());
-        let current_chat = chat_id.clone();
-        let current_run = run_id.clone();
         service
-            .store
-            .transaction(move |db| {
-                db.save_wakeup(true, &current_chat, None)?;
-                db.change_run(
-                    &current_run,
-                    cairn_installation::runs::RunChanges {
-                        status: Some(cairn_contracts::RunStatus::Queued),
-                        finished_at: Some(None),
-                        ..Default::default()
-                    },
-                )?;
-                Ok(())
-            })
+            .chat_tick(&std::collections::HashSet::new())
             .await
             .unwrap();
+        let continuation = service.store.run(run_id).await.unwrap();
+        assert_eq!(continuation["status"], "queued");
+        assert_eq!(continuation["chatExecution"]["messageId"], continuation_id);
+        assert_eq!(
+            service
+                .store
+                .checkpoint_boundary(run_id)
+                .await
+                .unwrap()
+                .unwrap()["remainingMs"],
+            7_321
+        );
         for (status, finished_at) in [
             (cairn_contracts::RunStatus::Succeeded, Some(first_finish)),
             (cairn_contracts::RunStatus::Queued, None),

@@ -554,7 +554,9 @@ pub(super) fn continue_run(
         )?;
     }
     let migrated_wakeup_id = checkpoint.migrated_mission_wakeup_id.take();
-    let resumes_migrated_wait = wakeup_id.is_some() && wakeup_id == migrated_wakeup_id.as_deref();
+    let resumes_migrated_wait = wakeup_id.is_some()
+        && (wakeup_id == migrated_wakeup_id.as_deref()
+            || db.unsettled_migrated_occurrence(&chat.id, run_id)?);
     if checkpoint.held_environment.is_none() && !resumes_migrated_wait {
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(agent));
     }
@@ -563,9 +565,13 @@ pub(super) fn continue_run(
     checkpoint.retired_environment_deadline = None;
     checkpoint.retained_completion = None;
     checkpoint.store_in(db, run_id)?;
-    if wakeup_id.is_none() && chat.wakeup.is_some() {
+    if wakeup_id.is_none()
+        && let Some(wakeup) = &chat.wakeup
+    {
         // New input ends the parked occurrence before reusing its run.
-        super::continuation::stop_for_run(db, run_id)?;
+        if super::continuation::cancel_for_run(db, run_id)? {
+            super::continuation::settle_superseded_wait(db, run_id, &wakeup.id)?;
+        }
     }
     let compaction = execution.operation.as_deref() == Some(COMPACT);
     let mut patch = crate::runs::RunChanges {

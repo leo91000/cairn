@@ -152,8 +152,8 @@ pub(super) fn cancel(db: &Db<'_>, id: &str) -> Result<()> {
 /// the live conversation's completed reply.
 pub(crate) fn stop_for_run(db: &Db<'_>, run: &str) -> Result<bool> {
     let waiting = cancel_for_run(db, run)?;
-    if waiting {
-        record_stopped_occurrence(db, run)?;
+    if waiting && let Some(state) = db.run_state(run)? {
+        record_stopped_occurrence(db, state)?;
     }
     Ok(waiting)
 }
@@ -161,18 +161,27 @@ pub(crate) fn stop_for_run(db: &Db<'_>, run: &str) -> Result<bool> {
 /// The new message and the removal of its superseded wait share one transaction.
 pub(super) fn settle_superseded_wait(db: &Db<'_>, run: &str, wakeup: &str) -> Result<()> {
     clear_migrated_wait(db, run, wakeup)?;
-    record_stopped_occurrence(db, run)
+    let Some(state) = db.run_state(run)? else {
+        return Ok(());
+    };
+    if state.status.is_active() || state.recovery_pending {
+        // A queued message can remove a wait while its provider is still working.
+        // That occurrence's own terminal transition records the result.
+        return Ok(());
+    }
+    if state.status == RunStatus::Succeeded {
+        record_stopped_occurrence(db, state)
+    } else {
+        db.record_migrated_settlement(&state)
+    }
 }
 
-fn record_stopped_occurrence(db: &Db<'_>, run: &str) -> Result<()> {
-    if let Some(mut stopped) = db.run_state(run)? {
-        stopped.status = RunStatus::Cancelled;
-        stopped.finished_at = Some(crate::config::now());
-        stopped.recovery_pending = false;
-        stopped.retry = None;
-        db.record_migrated_settlement(&stopped)?;
-    }
-    Ok(())
+fn record_stopped_occurrence(db: &Db<'_>, mut stopped: cairn_contracts::RunState) -> Result<()> {
+    stopped.status = RunStatus::Cancelled;
+    stopped.finished_at = Some(crate::config::now());
+    stopped.recovery_pending = false;
+    stopped.retry = None;
+    db.record_migrated_settlement(&stopped)
 }
 
 /// A failed legacy attempt's explicit wait removal follows the migrated chat.
@@ -180,14 +189,7 @@ pub(crate) fn cancel_failed_migrated_wait(
     db: &Db<'_>,
     run: &cairn_contracts::RunState,
 ) -> Result<()> {
-    let original_unsettled: bool = db.0.query_row(
-        "SELECT EXISTS(SELECT 1 FROM hook_rule_conversations WHERE chat_id=?1 AND run_id=?2
-             AND json_type(origin,'$.legacyRun')='object'
-             AND json_extract(origin,'$.legacyRun.status') IS NULL)",
-        rusqlite::params![run.task_id, run.id],
-        |row| row.get(0),
-    )?;
-    if original_unsettled {
+    if db.unsettled_migrated_occurrence(&run.task_id, &run.id)? {
         cancel_for_run(db, &run.id)?;
     }
     Ok(())
