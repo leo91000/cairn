@@ -1207,6 +1207,34 @@ fn migrated_view(
         "cancelled" => HookRuleTriggeringStatus::Stopped,
         _ => HookRuleTriggeringStatus::Failed,
     };
+    let (event, error) = if visible && detail {
+        let (history, brief): (String, Option<String>) = db.0.query_row(
+            "SELECT json_extract(h.origin,'$.legacyRun'),json_extract(r.boundary,'$.sourceTaskPrompt')
+             FROM hook_rule_conversations h LEFT JOIN runs r ON r.id=h.run_id WHERE h.chat_id=?1",
+            [chat_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let history: Json = serde_json::from_str(&history)?;
+        let event = HookRuleTriggeringEvent {
+            hook: "clock".into(),
+            instance_id: None,
+            received_at: created_at,
+            payload: json!({
+                "migratedConversation": {
+                    "id": chat_id,
+                    "slug": slug,
+                    "title": title,
+                    "runStatus": status,
+                    "brief": brief,
+                    "summary": history["summary"],
+                    "outcome": history["outcome"],
+                },
+            }),
+        };
+        (Some(event), history["error"].as_str().map(str::to_owned))
+    } else {
+        (None, None)
+    };
     Ok(HookRuleTriggering {
         id: uuid::Uuid::parse_str(chat_id).map_err(Error::internal)?,
         rule_id: cairn_contracts::HookRuleId(
@@ -1220,20 +1248,8 @@ fn migrated_view(
         finished_at,
         resumes_at: None,
         details_visible: visible,
-        error: None,
-        event: (visible && detail).then(|| HookRuleTriggeringEvent {
-            hook: "clock".into(),
-            instance_id: None,
-            received_at: created_at,
-            payload: json!({
-                "migratedConversation": {
-                    "id": chat_id,
-                    "slug": slug,
-                    "title": title,
-                    "runStatus": status,
-                },
-            }),
-        }),
+        error,
+        event,
         steps: None,
     })
 }

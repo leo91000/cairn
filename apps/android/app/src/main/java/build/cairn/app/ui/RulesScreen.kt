@@ -633,6 +633,7 @@ private fun RuleVersionsPanel(
                             "publicMcp" -> "depuis le MCP public"
                             "duplicate" -> "par duplication"
                             "template" -> "depuis un modèle"
+                            "migration" -> "depuis une mission migrée"
                             else -> "depuis les applications"
                         }
                     Text("Enregistrée $source", style = MaterialTheme.typography.bodySmall)
@@ -829,7 +830,10 @@ internal fun RuleHistoryPanel(
                                 RuleDataDisclosure("Entrée", step.jsonObject["input"])
                                 RuleDataDisclosure("Résultat", step.jsonObject["result"])
                             }
-                            RuleDataDisclosure("Événement reçu", loaded["event"])
+                            RuleDataDisclosure(
+                                if (migrated == null) "Événement reçu" else "Exécution d’origine",
+                                loaded["event"],
+                            )
                         }
                     }
                 }

@@ -88,6 +88,10 @@ class RulesCreationDeviceTest : RulesCreationCases() {
                                 reply("""{"triggerings":[$encoded],"withoutEffect":0}""")
                             }
                             path.endsWith("/hook-rule-triggerings/$id") -> reply(triggering(id))
+                            path.endsWith("/hook-rules/$id/versions") ->
+                                reply(
+                                    """{"versions":[{"version":1,"source":"migration","savedAt":1}]}"""
+                                )
                             path.endsWith("/hook-rules/$id") && requestBody.get() != null ->
                                 reply(saved(requestBody.get()))
                             path.endsWith("/hook-rules") && request.method == "POST" -> {
@@ -188,6 +192,13 @@ class RulesCreationDeviceTest : RulesCreationCases() {
                             .onAllNodesWithText("Terminé · 1 actions")
                             .fetchSemanticsNodes()
                             .size == 2
+                }
+                compose.onNodeWithText("Versions").performScrollTo().performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Enregistrée depuis une mission migrée")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
                 }
             } finally {
                 ui.close()

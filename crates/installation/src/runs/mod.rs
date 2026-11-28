@@ -565,6 +565,13 @@ impl Db<'_> {
             if let Some(boundary) = boundary {
                 self.write_run_boundary(id, &boundary)?;
             }
+            if state.status != previous_state.status
+                || state.finished_at != previous_state.finished_at
+                || state.recovery_pending != previous_state.recovery_pending
+                || state.retry != previous_state.retry
+            {
+                self.record_migrated_settlement(&state)?;
+            }
             Ok(state)
         })();
         match result {
@@ -579,6 +586,42 @@ impl Db<'_> {
                 Err(error)
             }
         }
+    }
+
+    /// Freezes the old mission occurrence while its live conversation continues to use the run.
+    pub(crate) fn record_migrated_settlement(&self, state: &RunState) -> Result<()> {
+        let Some(finished_at) = state.finished_at.filter(|_| {
+            !state.status.is_active()
+                && !state.recovery_pending
+                && state.trigger == "chat"
+                && state
+                    .retry
+                    .as_ref()
+                    .is_none_or(|retry| retry.next_attempt_at.is_none())
+        }) else {
+            return Ok(());
+        };
+        self.0
+            .prepare_cached(
+                "UPDATE hook_rule_conversations
+             SET origin=json_set(origin,'$.legacyRun.status',?3,'$.legacyRun.finishedAt',?4,
+                 '$.legacyRun.summary',?5,'$.legacyRun.error',?6,
+                 '$.legacyRun.outcome',json((SELECT json_extract(boundary,'$.outcome') FROM runs
+                     WHERE id=?2 AND json_type(boundary,'$.outcome')='object')))
+             WHERE chat_id=?1 AND run_id=?2 AND json_type(origin,'$.legacyRun')='object'
+             AND json_extract(origin,'$.legacyRun.status') IS NULL
+             AND NOT EXISTS (SELECT 1 FROM run_checkpoints WHERE run_id=?2
+                 AND json_type(state,'$.migratedMissionWakeupId')='text')",
+            )?
+            .execute(params![
+                state.task_id,
+                state.id,
+                state.status.as_str(),
+                finished_at,
+                state.summary,
+                state.error
+            ])?;
+        Ok(())
     }
 
     fn write_run_state(&self, state: &RunState) -> Result<()> {

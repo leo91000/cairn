@@ -563,6 +563,12 @@ pub(super) fn continue_run(
     checkpoint.retired_environment_deadline = None;
     checkpoint.retained_completion = None;
     checkpoint.store_in(db, run_id)?;
+    if migrated_wakeup_id.is_some() && !resumes_migrated_wait {
+        // New input can supersede a parked legacy wakeup. Keep the prior result
+        // before reusing the run for a different turn.
+        let previous = required(db.run_state(run_id)?, "Run not found")?;
+        db.record_migrated_settlement(&previous)?;
+    }
     let compaction = execution.operation.as_deref() == Some(COMPACT);
     let mut patch = crate::runs::RunChanges {
         snapshot: Some(serde_json::from_value(snapshot["snapshot"].clone())?),

@@ -9,7 +9,7 @@ use crate::{
 };
 use cairn_contracts::{
     AgentId, HookRuleDefinition, HookRuleLimits, HookRuleSource, HookRuleTrigger, ProjectId,
-    RuleAction, RuleCondition, RuleNode, RuleValue,
+    RuleAction, RuleCondition, RuleNode, RuleValue, RunStatus,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -73,12 +73,14 @@ struct LegacyRun {
     status: String,
     session_id: Option<String>,
     checkpoint: Option<String>,
+    summary: String,
+    error: Option<String>,
 }
 
 fn legacy_run_batch(tx: &Connection, cursor: &(i64, String)) -> Result<Vec<LegacyRun>> {
     let mut stmt = tx.prepare_cached(
         "SELECT r.id,r.task_id,r.project_id,r.created_at,r.started_at,r.finished_at,\
-             r.task_name,r.agent_name,r.snapshot,r.boundary,r.status,r.session_id,k.state \
+             r.task_name,r.agent_name,r.snapshot,r.boundary,r.status,r.session_id,k.state,r.summary,r.error \
              FROM runs r LEFT JOIN run_checkpoints k ON k.run_id=r.id \
              WHERE (r.created_at,r.id)>(?1,?2) AND r.trigger!='chat' \
              AND NOT EXISTS(SELECT 1 FROM conversations c WHERE c.run_id=r.id) \
@@ -100,6 +102,8 @@ fn legacy_run_batch(tx: &Connection, cursor: &(i64, String)) -> Result<Vec<Legac
                 status: r.get(10)?,
                 session_id: r.get(11)?,
                 checkpoint: r.get(12)?,
+                summary: r.get(13)?,
+                error: r.get(14)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -223,6 +227,13 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
     }
 
     rebuild_rule_tables(&tx)?;
+
+    // Older outcomes retain their reason and evidence under the unresolved status.
+    tx.execute(
+        "UPDATE runs SET boundary=json_set(boundary,'$.outcome.status','blocked') \
+         WHERE json_extract(boundary,'$.outcome.status')='needs_input'",
+        [],
+    )?;
 
     let at = now();
     let known_owner = known_owner_account(&tx)?;
@@ -615,13 +626,17 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 Some(mission) => mission.rule_id.clone(),
                 None => retired_mission_rule_id(&tx, &mut retired_rules, &run.task_id)?,
             };
+            let finished = RunStatus::parse(&run.status).is_some_and(|status| !status.is_active());
             let origin_json = json!({
                 "hook": "clock",
                 "ruleName": rule_name,
                 "schedule": true,
                 "legacyRun": {
-                    "status": run.finished_at.map(|_| &run.status),
+                    "status": finished.then_some(&run.status),
                     "finishedAt": run.finished_at,
+                    "summary": finished.then_some(&run.summary),
+                    "error": if finished { run.error.as_deref() } else { None },
+                    "outcome": if finished { &boundary["outcome"] } else { &Value::Null },
                 },
             })
             .to_string();
@@ -962,14 +977,6 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         )?;
     }
 
-    // Pending questions keep the original follow-up. Older outcomes retain their
-    // reason and evidence under the remaining status for unresolved work.
-    tx.execute(
-        "UPDATE runs SET boundary=json_set(boundary,'$.outcome.status','blocked') \
-         WHERE json_extract(boundary,'$.outcome.status')='needs_input'",
-        [],
-    )?;
-
     // Drop retired mission tables.
     tx.execute_batch(
         "DROP TABLE IF EXISTS hook_rule_task_depths;
@@ -999,7 +1006,10 @@ fn link_converted_mission_runs(
                 (SELECT e.created_at FROM events e WHERE e.run_id=r.id \
                  AND e.type='status' AND e.text='succeeded' ORDER BY e.id LIMIT 1), \
                 CASE WHEN r.status='succeeded' AND json_type(r.boundary,'$.chatExecution') IS NULL \
-                     THEN r.finished_at END) \
+                     THEN r.finished_at END), \
+            CASE WHEN json_type(r.boundary,'$.chatExecution') IS NULL THEN r.summary END, \
+            CASE WHEN json_type(r.boundary,'$.chatExecution') IS NULL \
+                 AND json_type(r.boundary,'$.outcome')='object' THEN json_extract(r.boundary,'$.outcome') END \
          FROM conversations c JOIN runs r ON r.id=c.run_id \
          WHERE r.trigger='chat' AND json_type(r.boundary,'$.sourceTaskId')='text'",
     )?;
@@ -1029,6 +1039,11 @@ fn link_converted_mission_runs(
         let created_at: i64 = row.get(2)?;
         let run_id: String = row.get(3)?;
         let finished_at: Option<i64> = row.get(6)?;
+        let summary: Option<String> = row.get(7)?;
+        let outcome = row
+            .get::<_, Option<String>>(8)?
+            .map(|value| serde_json::from_str::<Value>(&value))
+            .transpose()?;
         let origin = json!({
             "hook": "clock",
             "ruleName": rule_name,
@@ -1037,6 +1052,8 @@ fn link_converted_mission_runs(
                 // The v38 converter admitted only successful mission runs.
                 "status": "succeeded",
                 "finishedAt": finished_at,
+                "summary": summary,
+                "outcome": outcome,
             },
         });
         insert.execute(params![

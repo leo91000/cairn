@@ -227,7 +227,7 @@ const pretty = (value: unknown) => JSON.stringify(value, null, 2)
             </section>
             <details v-if="detail.event">
               <summary class="cursor-pointer text-xs font-semibold text-muted">
-                Event · {{ detail.event.hook }} · {{ new Date(detail.event.receivedAt).toLocaleString() }}
+                {{ migratedConversation ? 'Original execution' : `Event · ${detail.event.hook}` }} · {{ new Date(detail.event.receivedAt).toLocaleString() }}
               </summary>
               <pre class="mt-1 max-h-72 overflow-auto rounded-lg bg-canvas p-2.5 text-2xs">{{ pretty(detail.event.payload) }}</pre>
             </details>

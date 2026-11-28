@@ -1089,9 +1089,9 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .unwrap();
     }
     conn.execute(
-        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,snapshot,boundary,dedupe,\
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,snapshot,boundary,dedupe,summary,\
            recovery_pending,resume_available,resume_count) \
-         VALUES(?1,?2,'succeeded','schedule',?3,?3,?4,?5,?6,?7,0,0,0)",
+         VALUES(?1,?2,'succeeded','schedule',?3,?3,?4,?5,?6,?7,'Original summary',0,0,0)",
         params![
             blocked_run_id,
             active_mission_id,
@@ -1099,7 +1099,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             t0 + 5000,
             json!({ "task": { "name": "Daily standup" }, "agent": { "id": MAIN_AGENT_ID, "name": "Main" } }).to_string(),
             json!({
-                "outcome": { "status": "needs_input", "reason": "Waiting on review" },
+                "outcome": { "status": "needs_input", "reason": "Waiting on review", "evidence": ["saved report"] },
                 "nativeProvenanceUnknown": false,
                 "environmentState": "expired",
                 "environmentExpiredAt": t0 + 6_000,
@@ -2131,6 +2131,18 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             .iter()
             .any(|entry| { entry["id"] == blocked_chat_id && entry["status"] == "completed" })
     );
+    service
+        .store
+        .change_run(
+            &blocked_run_id,
+            cairn_installation::runs::RunChanges {
+                summary: Some("Later reply".into()),
+                boundary: Some(json!({ "outcome": null })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     let retained = get(&owner, &entry).await;
     assert_eq!(
         retained["event"]["payload"]["migratedConversation"]["id"],
@@ -2141,6 +2153,13 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         "succeeded"
     );
     let hidden = get(&member, &entry).await;
+    let original = &retained["event"]["payload"]["migratedConversation"];
+    assert_eq!(original["summary"], "Original summary");
+    assert_eq!(original["brief"], "Summarize updates");
+    assert_eq!(
+        original["outcome"],
+        json!({ "status": "blocked", "reason": "Waiting on review", "evidence": ["saved report"] })
+    );
     assert_eq!(hidden["detailsVisible"], false);
     assert!(hidden["event"].is_null());
     let converted_entry = get(
@@ -2151,4 +2170,39 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     assert_eq!(converted_entry["status"], "completed");
     assert_eq!(converted_entry["createdAt"], original_run_created_at);
     assert_eq!(converted_entry["finishedAt"], original_run_finished_at);
+
+    // Both an already-admitted run and an automatic continuation of a legacy
+    // wait settle in v39. A later reply reuses the run without rewriting history.
+    let first_finish = now() - 2_000;
+    let later_finish = first_finish + 1_000;
+    for (run_id, chat_id) in [(&queued_id, &queued.0), (&waiting_run_id, &waiting_chat_id)] {
+        for (status, finished_at) in [
+            (cairn_contracts::RunStatus::Succeeded, Some(first_finish)),
+            (cairn_contracts::RunStatus::Queued, None),
+            (cairn_contracts::RunStatus::Failed, Some(later_finish)),
+        ] {
+            service.store.change_run(run_id, cairn_installation::runs::RunChanges {
+                status: Some(status),
+                recovery_pending: Some(false),
+                finished_at: Some(finished_at),
+                summary: Some(if finished_at == Some(first_finish) { "First result" } else { "Later state" }.into()),
+                boundary: Some(json!({
+                    "outcome": (finished_at == Some(first_finish)).then(|| json!({ "status": "completed", "reason": "Original work finished", "evidence": [] })),
+                })),
+                ..Default::default()
+            }).await.unwrap();
+        }
+        let history = get(&owner, &format!("/api/hook-rule-triggerings/{chat_id}")).await;
+        assert_eq!(history["status"], "completed", "{history}");
+        assert_eq!(history["finishedAt"], first_finish, "{history}");
+        assert_eq!(
+            history["event"]["payload"]["migratedConversation"]["summary"],
+            "First result"
+        );
+        assert_eq!(
+            history["event"]["payload"]["migratedConversation"]["outcome"]["reason"],
+            "Original work finished"
+        );
+        assert_eq!(service.store.run(run_id).await.unwrap()["status"], "failed");
+    }
 }
