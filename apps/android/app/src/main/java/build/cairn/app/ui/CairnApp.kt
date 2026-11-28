@@ -10,6 +10,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -21,6 +23,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -142,17 +146,36 @@ private fun CairnAppContent(
     }
     // Pages outside the workspace Scaffold each apply the system bar insets once themselves.
     if (state.restoringSession) {
-        Box(Modifier.fillMaxSize().systemBarsPadding()) {
-            Page {
-                Heading(
-                    "Connexion à Beacon",
-                    "Votre session est conservée sur cet appareil.",
-                )
-                Text(state.error.orEmpty())
-                Button(onClick = { vm.perform { retrySession() } }, enabled = !state.busy) {
-                    Text("Réessayer")
+        AuthBackdrop {
+            Box(
+                Modifier.fillMaxSize().systemBarsPadding().padding(20.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    Modifier.widthIn(max = 440.dp).fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                ) {
+                    Wordmark()
+                    AuthCard {
+                        Heading(
+                            "Connexion à Beacon",
+                            "Votre session est conservée sur cet appareil.",
+                        )
+                        if (!state.error.isNullOrBlank()) {
+                            ErrorNotice(state.error, vm::clearMessage)
+                        }
+                        if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                        Button(
+                            onClick = { vm.perform { retrySession() } },
+                            enabled = !state.busy,
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        ) {
+                            Text("Réessayer")
+                        }
+                    }
                 }
-                if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             }
         }
         return
@@ -160,6 +183,52 @@ private fun CairnAppContent(
     if (!state.session.authenticated) {
         LoginScreen(vm, state)
         return
+    }
+    var authorizationUrl by rememberSaveable(state.session.account?.id) { mutableStateOf("") }
+    var shareRevision by rememberSaveable(state.session.account?.id) { mutableIntStateOf(0) }
+    val sharedConsent: McpConsentState = viewModel(key = "shared-mcp-consent")
+    // A share waits for an in-flight decision and for this account's open summary, which holds
+    // the client's single-use return link, so a new request never discards an approval. A summary
+    // whose dialog was dropped (sign-out, account switch) no longer holds anything.
+    val showingSummary =
+        authorizationUrl.isNotBlank() &&
+            sharedConsent.completed?.let { it.accountId == state.session.account?.id } == true
+    LaunchedEffect(sharedUrl, state.busy, showingSummary) {
+        if (sharedUrl.isNotBlank() && !state.busy && !showingSummary) {
+            sharedConsent.completed = null
+            authorizationUrl = sharedUrl
+            shareRevision++
+            consumedShare()
+        }
+    }
+    if (authorizationUrl.isNotBlank()) {
+        val dismissAuthorization = {
+            if (!state.busy) {
+                sharedConsent.completed = null
+                authorizationUrl = ""
+            }
+        }
+        Dialog(
+            onDismissRequest = dismissAuthorization,
+            properties =
+                DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+        ) {
+            Surface(Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
+                    key(state.session.account?.id, shareRevision) {
+                        AuthorizeScreen(
+                            vm,
+                            state,
+                            authorizationUrl,
+                            sharedConsent,
+                            dismissAuthorization,
+                            pendingShare = sharedUrl.isNotBlank(),
+                        )
+                    }
+                    SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
+                }
+            }
+        }
     }
     var approvedTarget by
         remember(targetChat, targetCacheScope, targetAccount) { mutableStateOf(false) }
@@ -254,8 +323,6 @@ private fun CairnAppContent(
                 vm,
                 state,
                 snackbar,
-                sharedUrl,
-                consumedShare,
                 if (approvedTarget) targetChat else "",
                 targetCacheScope,
                 consumedTarget,
@@ -279,8 +346,6 @@ private fun WorkspaceApp(
     vm: CairnViewModel,
     state: Workspace,
     snackbar: SnackbarHostState,
-    sharedUrl: String,
-    consumedShare: () -> Unit,
     targetChat: String,
     targetCacheScope: String,
     consumedTarget: () -> Unit,
@@ -299,15 +364,6 @@ private fun WorkspaceApp(
     var detailScreen by remember(route) { mutableStateOf<PerfScreen?>(null) }
     val performanceScreen = detailScreen ?: PerfScreen.fromRoute(route)
     SideEffect { Performance.screen = performanceScreen }
-    LaunchedEffect(sharedUrl) {
-        if (sharedUrl.isNotBlank()) {
-            if (state.isOwner) nav.navigate("authorize") { launchSingleTop = true }
-            else {
-                vm.notify("Cette action est réservée au propriétaire de l’installation.")
-                consumedShare()
-            }
-        }
-    }
     LaunchedEffect(targetChat, vm.api.cacheScope) {
         if (targetChat.isNotBlank() && targetCacheScope == vm.api.cacheScope) {
             nav.navigate(notificationRoute(targetChat)) {
@@ -436,7 +492,8 @@ private fun WorkspaceApp(
                         if (pushReenrollmentRequired) PushReenrollmentNotice()
                         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                         ConnectionLostNotice(state.connectionLost)
-                        state.error?.let { ErrorNotice(it, vm::clearMessage) }
+                        if (route != "authorize")
+                            state.error?.let { ErrorNotice(it, vm::clearMessage) }
                         NavHost(
                             nav,
                             "fil",
@@ -684,7 +741,7 @@ private fun WorkspaceApp(
                                 }
                             if (state.isOwner)
                                 composable("authorize") {
-                                    AuthorizeScreen(vm, state, sharedUrl, consumedShare)
+                                    AuthorizeScreen(vm, state)
                                 }
                         }
                     }
@@ -699,83 +756,166 @@ private fun LoginScreen(vm: CairnViewModel, state: Workspace) {
     var email by rememberSaveable(state.origin) { mutableStateOf("") }
     // Verification codes never enter saved instance state.
     var code by remember(state.emailForCode) { mutableStateOf("") }
-    Scaffold { padding ->
+    var hasProviders by remember(state.origin) { mutableStateOf(false) }
+    var resendCooldown by rememberSaveable(state.origin) { mutableIntStateOf(0) }
+    fun changeEmail() {
+        resendCooldown = 0
+        vm.changeEmail()
+    }
+    LaunchedEffect(state.emailForCode, resendCooldown) {
+        if (state.emailForCode != null && resendCooldown > 0) {
+            delay(1000)
+            resendCooldown--
+        }
+    }
+    AuthBackdrop {
         Box(
-            Modifier.padding(padding).imePadding().fillMaxSize(),
+            Modifier.fillMaxSize()
+                .systemBarsPadding()
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 24.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Column(Modifier.widthIn(max = 520.dp)) {
-                Page {
-                    Wordmark()
-                    Heading("Bienvenue dans Cairn", "Connectez-vous à votre compte Cairn.")
-                    Panel {
-                        if (state.origin.isBlank()) {
-                            Text("Beacon n’est pas configuré dans cette version de l’application.")
-                        } else if (state.emailForCode == null) {
-                            OutlinedTextField(
-                                email,
-                                { email = it },
-                                Modifier.fillMaxWidth(),
-                                label = { Text("Adresse e-mail") },
-                                singleLine = true,
-                                keyboardOptions =
-                                    androidx.compose.foundation.text.KeyboardOptions(
-                                        keyboardType =
-                                            androidx.compose.ui.text.input.KeyboardType.Email
-                                    ),
-                            )
-                            Button(
-                                onClick = { vm.perform { requestEmailCode(email) } },
-                                enabled = email.isNotBlank() && !state.busy,
-                                modifier = Modifier.fillMaxWidth(),
+            Column(
+                Modifier.widthIn(max = 440.dp).fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+            ) {
+                Wordmark()
+                AuthCard {
+                    if (state.origin.isBlank()) {
+                        Heading(
+                            "Bienvenue dans Cairn",
+                            "Beacon n’est pas configuré dans cette version de l’application.",
+                        )
+                    } else if (state.emailForCode == null) {
+                        Heading(
+                            "Bienvenue dans Cairn",
+                            "Connectez-vous à votre compte Cairn.",
+                        )
+                        ProviderButtons(vm, state) { hasProviders = it }
+                        if (hasProviders) AuthDivider("ou par e-mail")
+                        OutlinedTextField(
+                            email,
+                            { email = it },
+                            Modifier.fillMaxWidth(),
+                            label = { Text("Adresse e-mail") },
+                            placeholder = { Text("vous@exemple.fr") },
+                            singleLine = true,
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                            keyboardOptions =
+                                androidx.compose.foundation.text.KeyboardOptions(
+                                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Email
+                                ),
+                        )
+                        Button(
+                            onClick = {
+                                vm.perform {
+                                    requestEmailCode(email)
+                                    resendCooldown = 30
+                                }
+                            },
+                            enabled = email.isNotBlank() && !state.busy,
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        ) {
+                            Text("Recevoir un code")
+                        }
+                    } else {
+                        Heading(
+                            "Vérifiez vos e-mails",
+                            "Saisissez le code à 8 chiffres envoyé à :",
+                        )
+                        Surface(
+                            onClick = ::changeEmail,
+                            enabled = !state.busy,
+                            shape = androidx.compose.foundation.shape.CircleShape,
+                            color = MaterialTheme.colorScheme.surfaceContainer,
+                            border =
+                                androidx.compose.foundation.BorderStroke(
+                                    1.dp,
+                                    MaterialTheme.colorScheme.outlineVariant,
+                                ),
+                        ) {
+                            Row(
+                                Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                Text("Recevoir un code")
+                                Text(
+                                    state.emailForCode,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                )
+                                Icon(
+                                    AuthIcons.Pencil,
+                                    "Changer d’adresse e-mail",
+                                    Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
-                        } else {
-                            Text("Un code a été envoyé à ${state.emailForCode}.")
-                            OutlinedTextField(
-                                code,
-                                { code = it },
-                                Modifier.fillMaxWidth(),
-                                label = { Text("Code reçu par e-mail") },
-                                singleLine = true,
-                                keyboardOptions =
-                                    androidx.compose.foundation.text.KeyboardOptions(
-                                        keyboardType =
-                                            androidx.compose.ui.text.input.KeyboardType.Number
-                                    ),
-                            )
-                            Button(
+                        }
+                        OtpCodeField(
+                            label = "Code reçu par e-mail",
+                            value = code,
+                            onValueChange = { code = it },
+                            enabled = !state.busy,
+                        )
+                        Text(
+                            "Un code est valable jusqu’à 10 minutes après son envoi. Cairn en envoie un nouveau après l’expiration du précédent.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Button(
+                            onClick = {
+                                vm.perform {
+                                    verifyEmailCode(code)
+                                    code = ""
+                                }
+                            },
+                            enabled = code.length == EMAIL_CODE_LENGTH && !state.busy,
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        ) {
+                            Text("Se connecter")
+                        }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            TextButton(
                                 onClick = {
                                     vm.perform {
-                                        verifyEmailCode(code)
-                                        code = ""
+                                        requestEmailCode(state.emailForCode)
+                                        resendCooldown = 30
                                     }
                                 },
-                                enabled = code.isNotBlank() && !state.busy,
-                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !state.busy && resendCooldown == 0,
                             ) {
-                                Text("Se connecter")
+                                Text(
+                                    if (resendCooldown > 0) "Réessayer dans ${resendCooldown} s"
+                                    else "Demander un code"
+                                )
                             }
-                            TextButton(
-                                onClick = { vm.perform { requestEmailCode(state.emailForCode) } },
-                                enabled = !state.busy,
-                            ) {
-                                Text("Renvoyer un code")
-                            }
-                            TextButton(onClick = vm::changeEmail, enabled = !state.busy) {
+                            TextButton(onClick = ::changeEmail, enabled = !state.busy) {
                                 Text("Changer d’adresse e-mail")
                             }
                         }
-                        if (state.emailForCode == null && state.origin.isNotBlank())
-                            ProviderButtons(vm, state)
-                        if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-                        state.error?.let { ErrorNotice(it, vm::clearMessage) }
                     }
-                    Text(
-                        "Les exécutions continuent sur vos installations lorsque l’application est fermée."
-                    )
+                    if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    state.error?.let { ErrorNotice(it, vm::clearMessage) }
                 }
+                Text(
+                    "Les exécutions continuent sur vos installations lorsque l’application est fermée.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                )
             }
         }
     }

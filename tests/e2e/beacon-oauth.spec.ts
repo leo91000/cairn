@@ -259,8 +259,9 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
       expect(Object.fromEntries(new URL(page.url()).searchParams)).toEqual(Object.fromEntries(parameters))
       await page.getByRole('combobox', { name: 'Installation', exact: true }).click()
       await page.getByRole('option', { name: 'OAuth claim machine', exact: true }).click()
-      await page.getByRole('button', { name: 'Allow access', exact: true }).click()
-      await expect(page.getByRole('alert').filter({ hasText: 'Confirm your identity' })).toBeVisible()
+      await expect(page.getByTitle(`Signed in as ${email}`)).toBeVisible()
+      await expect(page.getByText('Local app', { exact: true })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Allow access', exact: true })).toBeDisabled()
       await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
       await page.getByRole('button', { name: 'Confirm with a passkey', exact: true }).click()
       await expect(page.getByRole('heading', { name: 'Connect an assistant', exact: true })).toBeVisible()
@@ -283,8 +284,12 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     await page.goto(`${url}/oauth/authorize?${unverifiedParameters}`)
     await expect(page.getByRole('heading', { name: 'Connect an assistant', exact: true })).toBeVisible()
     await expect(page.getByText('Claude Desktop', { exact: true })).toBeVisible()
-    await expect(page.getByText('evil.example', { exact: true })).toBeVisible()
+    await expect(page.getByText('https://evil.example/cb', { exact: true })).toBeVisible()
     await expect(page.getByRole('alert')).toContainText('Unverified client')
+    await expect(page.getByRole('alert')).toContainText('HTTPS')
+    await expect(page.getByText('Full execution', { exact: true })).toBeVisible()
+    await expect(page.getByText('Elevated access', { exact: true })).toBeVisible()
+    await expect(page.getByText(/edit, and delete installation data/)).toBeVisible()
 
     // A separate initiator receives the URL and polling secret, but opening it
     // in the victim's browser must not silently give that initiator a session.

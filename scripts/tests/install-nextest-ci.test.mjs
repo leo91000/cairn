@@ -17,7 +17,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { installNextest, nextestArtifact } from '../install-nextest-ci.mjs'
+import { installNextest, nextestArtifact } from '../ci/install-nextest-ci.mjs'
 
 function fixture(version = nextestArtifact.version) {
   const directory = mkdtempSync(path.join(tmpdir(), 'cairn-nextest-test-'))
@@ -269,7 +269,7 @@ describe('fixed nextest acquisition', () => {
     try {
       const githubToken = 'fixture-private-token'
       const receipt = path.join(value.directory, 'environment.json')
-      const script = fileURLToPath(new URL('../install-nextest-ci.mjs', import.meta.url))
+      const script = fileURLToPath(new URL('../ci/install-nextest-ci.mjs', import.meta.url))
       const preload = `import { writeFileSync } from 'node:fs';
         const token = process.env.GITHUB_TOKEN;
         globalThis.fetch = async (_url, init) => {
@@ -303,7 +303,7 @@ describe('fixed nextest acquisition', () => {
   })
 
   it('requires a step-scoped GitHub token in the hosted installation CLI', () => {
-    const script = fileURLToPath(new URL('../install-nextest-ci.mjs', import.meta.url))
+    const script = fileURLToPath(new URL('../ci/install-nextest-ci.mjs', import.meta.url))
     const result = spawnSync(process.execPath, [script], {
       encoding: 'utf8',
       env: {
@@ -440,7 +440,7 @@ describe('fixed nextest acquisition', () => {
   })
 
   it('refuses the installation CLI outside disposable Linux x64 CI', () => {
-    const script = fileURLToPath(new URL('../install-nextest-ci.mjs', import.meta.url))
+    const script = fileURLToPath(new URL('../ci/install-nextest-ci.mjs', import.meta.url))
     const result = spawnSync(process.execPath, [script], { encoding: 'utf8', env: { GITHUB_ACTIONS: '' } })
     expect(result.status).toBe(1)
     expect(result.stdout).toBe('')

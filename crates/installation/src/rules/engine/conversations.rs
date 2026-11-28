@@ -79,24 +79,6 @@ CREATE TABLE IF NOT EXISTS hook_rule_conversation_counts(
 ) WITHOUT ROWID;
 ";
 
-/// Version 34 to 35. No conversation is bound to a key before.
-pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if (35..=crate::store::DATABASE_VERSION).contains(&version) {
-        return Ok(());
-    }
-    if version != 34 {
-        return Err(Error::bad(
-            "Unexpected installation database version during upgrade.",
-        ));
-    }
-    tx.execute_batch(SCHEMA)?;
-    tx.pragma_update(None, "user_version", 35)?;
-    tx.commit()?;
-    Ok(())
-}
-
 /// Links Cairn follows in one chain: a rule's conversation action causes a Cairn hook
 /// that triggers a rule, whose conversation action causes another, and so on. A plugin
 /// event starts a chain at zero; a person's input starts a new one.

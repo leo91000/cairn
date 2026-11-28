@@ -1,7 +1,7 @@
 # Agent tool versions
 
 Every application CI run, including tag releases, uses
-`node scripts/cli-updates.mjs build-versions` to resolve the agent tool versions
+`node scripts/release/cli-updates.mjs build-versions` to resolve the agent tool versions
 before deciding whether to reuse an image. It prints JSON and, when
 `GITHUB_OUTPUT` is set, appends the exact `codex`, `gh`, `claude`, `opencode` and
 `antigravity` outputs consumed by `ci.yaml`, plus `antigravity-url` and
@@ -9,8 +9,8 @@ before deciding whether to reuse an image. It prints JSON and, when
 
 | Tool | Official source | Channel | Native check in CI |
 | --- | --- | --- | --- |
-| Codex | npm `@openai/codex` | dist-tag `latest` | plan-turn boundary |
-| Claude Code | npm `@anthropic-ai/claude-code` | exact `2.1.311` | catalog, usage, turn, resumption, plan-turn boundary |
+| Codex | npm `@openai/codex` | dist-tag `latest` | plan-turn boundary, side questions |
+| Claude Code | npm `@anthropic-ai/claude-code` | exact `2.1.311` | catalog, usage, turn, resumption, plan-turn boundary, side questions |
 | OpenCode | npm `opencode-ai` | dist-tag `latest` | catalog, turn, resumption |
 | Antigravity | Google updater manifest `linux_amd64.json` | current release only | `tests/antigravity.rs` |
 | GitHub CLI | GitHub `cli/cli` latest release | not draft or prerelease | none |
@@ -109,14 +109,21 @@ production, the CLIs may still contact their vendors' public endpoints:
   must reach the conversation, and the turn after a plan must write again. The job
   installs bubblewrap and socat, and lifts Ubuntu's restriction on unprivileged user
   namespaces, which both sandboxes need. `publish` depends on this job, so a release
-  whose plan-turn boundary does not hold is not served. The short PR validation does
-  not run it, nor does a `backend-only` dispatch, which resolves no engine release.
+  whose plan-turn boundary does not hold is not served.
+- Claude Code and Codex each answer side questions through their adapter while a turn
+  runs (`tests/native_side_questions.rs`): a side answer that calls a tool must not
+  run it, a withdrawn question settles silently, and no side question reaches the
+  conversation, the reply or the saved session (nor, for Codex, the next turn). Adapters offer side questions from a minimum
+  release onwards, so this check, not a version pin, keeps a release that breaks them
+  from being served ([ADR-0093](adr/0093-engine-side-questions.md)).
+- The short PR validation runs none of these checks, nor does a `backend-only`
+  dispatch, which resolves no engine release.
 
 The `resolve` job reads the served versions from the configuration of the
 installation image production reports at `CAIRN_BEACON_ORIGIN/install/release`
-(`scripts/served-tools.mjs`), and checks registry content against its digest.
+(`scripts/release/served-tools.mjs`), and checks registry content against its digest.
 Images built before an engine was resolved record no version; they shipped its
-`legacy` release in `scripts/cli-updates.mjs` (Claude Code 2.1.280, OpenCode
+`legacy` release in `scripts/release/cli-updates.mjs` (Claude Code 2.1.280, OpenCode
 1.19.0). When production or the registry cannot be read, no version is guessed:
 the rollback checks are skipped with a warning, and the evidence records
 `served: null`. Such evidence is never reused, and a tag fails at once, before
@@ -150,7 +157,7 @@ See [installation updates](INSTALLATION.md#automatic-approved-updates) and the
 A new channel release ships through the normal validated build and its automated
 checks above. A release that fails them blocks validation. There is no hold or
 override setting: the remedy is a reviewed change that adapts the adapter, or that
-sets the engine's `channel` in `scripts/cli-updates.mjs` to the last working
+sets the engine's `channel` in `scripts/release/cli-updates.mjs` to the last working
 version until it does. npm serves an exact version at the same URL as a dist-tag,
 so the same validation applies.
 
@@ -161,7 +168,8 @@ channel between qualifications:
   `get_usage`, token rotation against the endpoint, and subscription inference.
 - The native turn runs with YOLO access and calls no tool. Apart from plan turns,
   how a release applies the sandbox settings of restricted agents (`settings` in
-  `claude_process.rs`), the `--permission-prompt-tool` approval flow, and MCP tool
+  `crates/installation/src/coding_agent/claude_process/protocol.rs`), the
+  `--permission-prompt-tool` approval flow, and MCP tool
   calls under `--strict-mcp-config` has no per-release native check. Production
   runner isolation still applies.
 
@@ -190,4 +198,7 @@ following checks before merge:
   `NATIVE_PROBE_PATH` adds a directory to the engine's `PATH`,
   `NATIVE_PROBE_DROP_CAPS` drops inherited capabilities, and
   A private `/tmp` wraps the entire test runner, with `TMPDIR` outside it; see [the plan-turn decision](adr/0080-plan-turns.md#qualification).
+- Side questions (Claude Code and Codex): CI runs `native_side_questions` for the
+  resolved releases. To run it elsewhere:
+  `CLAUDE_NATIVE_BIN=… CODEX_NATIVE_BIN=… pnpm test:backend -p cairn-installation --test native_side_questions -- --ignored --test-threads 1`.
 - All engines: keep their autoupdaters disabled at runtime.

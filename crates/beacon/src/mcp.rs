@@ -502,6 +502,8 @@ pub(super) async fn preview(
         .into_iter()
         .filter(|installation| installation["role"] == "owner")
         .collect::<Vec<_>>();
+    let session_digest = digest(super::session_token(&headers));
+    let recent_proof = super::account::has_recent_proof(&service.pool, &session_digest).await?;
 
     Ok(Json(json!({
         "client": {
@@ -512,6 +514,7 @@ pub(super) async fn preview(
         "resource": format!("{}/mcp", service.origin),
         "scopes": details.scopes,
         "installations": owned_installations,
+        "confirmationRequired": !recent_proof,
     })))
 }
 

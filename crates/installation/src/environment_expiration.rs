@@ -122,8 +122,6 @@ struct Retirement {
     fenced: bool,
     /// Manager namespaces and recovery/account references are logically detached.
     local: bool,
-    #[serde(default)]
-    publications: crate::nodes::retired_publications::RetiredPublications,
     /// Physical erasure may keep retrying after the new environment is admitted.
     #[serde(default)]
     cleaned: bool,
@@ -929,7 +927,7 @@ impl Service {
                 .await?;
         }
         self.worker.notify();
-        crate::conversation_deletion::legacy_staging::cleanup(self).await
+        Ok(())
     }
 
     /// Explicit purge still waits for every detached namespace to be erased.
@@ -947,7 +945,6 @@ impl Service {
                     &retirement.id,
                     &retirement.workspaces,
                     &retirement.projects,
-                    &retirement.publications,
                 )
                 .await?;
             }
@@ -987,8 +984,17 @@ impl Service {
             *retirement = self
                 .store
                 .transaction(move |db| {
-                    detached.publications =
-                        crate::nodes::retired_publications::detach_environment_in(db, &run)?;
+                    // Match the per-run backup index's partial predicate.
+                    db.0.execute(
+                        "DELETE FROM records WHERE kind='node-backups'
+                         AND json_extract(data,'$.runId')=?",
+                        [&run],
+                    )?;
+                    db.0.execute(
+                        "DELETE FROM records WHERE kind='node-disk-grants'
+                         AND json_extract(data,'$.runId')=?",
+                        [&run],
+                    )?;
                     db.remove_account_lease(&run)?;
                     db.update_run_boundary(&run, &json!({ "storage":null }))?;
                     detached.local = true;
@@ -1043,7 +1049,6 @@ impl Service {
                 &retirement.id,
                 &retirement.workspaces,
                 &retirement.projects,
-                &retirement.publications,
             )
             .await
             {

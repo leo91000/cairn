@@ -15,9 +15,9 @@ import path from 'node:path'
 import process from 'node:process'
 import { it } from 'vitest'
 import { parse } from 'yaml'
-import { instrumentBackend } from '../backend-ci-phase-overlay.mjs'
-import { observeCommand } from '../ci-deadline.mjs'
-import { selectJobClock } from '../ci-diagnostic-source.mjs'
+import { instrumentBackend } from '../ci/backend-ci-phase-overlay.mjs'
+import { observeCommand } from '../ci/ci-deadline.mjs'
+import { selectJobClock } from '../ci/ci-diagnostic-source.mjs'
 
 function temporary(t, parent = os.tmpdir()) {
   const directory = mkdtempSync(path.join(parent, 'cairn-ci-deadline-'))
@@ -141,7 +141,7 @@ it('does not start work after the evidence reserve has begun', async (t) => {
 })
 
 it('backend overlay keeps the exact original launcher and refuses ambiguous sources', () => {
-  const source = readFileSync(new URL('../test-backend.mjs', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../dev/test-backend.mjs', import.meta.url), 'utf8')
   const observed = instrumentBackend(source)
   assert.ok(observed.includes('recordCIPhase(\'worker-fixture-build\')'))
   assert.ok(observed.includes('recordCIPhase(\'code-worker-build\')'))
@@ -317,32 +317,15 @@ it.each(['backend', 'native'])('accepts workflow diagnostic prerequisites withou
     ...process.env,
     BACKEND_ONLY: 'true',
     VALIDATION_ONLY: 'true',
-    PLAN_STORAGE_REFERENCE: '',
     DIAGNOSTIC_CANDIDATE: '358461be03f947ff168950d0a85999e5ad5f9274',
     DIAGNOSTIC_REFERENCE: '06829d1b5f3d7accb9791c09d49522e7e2d2ab25',
     GITHUB_REPOSITORY: 'invalid',
   }
   delete environment.BACKEND_QUALIFICATION
-  const result = spawnSync(process.execPath, [new URL('../ci-diagnostic-source.mjs', import.meta.url).pathname, role], { encoding: 'utf8', env: environment })
+  const result = spawnSync(process.execPath, [new URL('../ci/ci-diagnostic-source.mjs', import.meta.url).pathname, role], { encoding: 'utf8', env: environment })
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /Invalid CI clock identity/)
   assert.doesNotMatch(result.stderr, /Diagnostics require/)
-})
-
-it('rejects an independent Plan storage request before reading CI metadata or fetching sources', () => {
-  const file = new URL('../ci-diagnostic-source.mjs', import.meta.url)
-  const result = spawnSync(process.execPath, [file.pathname, 'backend'], {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      BACKEND_ONLY: 'true',
-      VALIDATION_ONLY: 'true',
-      DIAGNOSTIC_CANDIDATE: '358461be03f947ff168950d0a85999e5ad5f9274',
-      PLAN_STORAGE_REFERENCE: '06829d1b5f3d7accb9791c09d49522e7e2d2ab25',
-    },
-  })
-  assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /Diagnostics require/)
 })
 
 it('executes the actual reference verification after the pair builder created its evidence directory', (t) => {

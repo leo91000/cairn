@@ -243,7 +243,7 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
     relay.close().await;
 }
 
-fn owner_post(relay: &RelayedInstallation, path: &str, value: Value) -> reqwest::RequestBuilder {
+fn owner_post(relay: &RelayedInstallation, path: &str, value: &Value) -> reqwest::RequestBuilder {
     relay
         .app
         .client
@@ -251,7 +251,7 @@ fn owner_post(relay: &RelayedInstallation, path: &str, value: Value) -> reqwest:
         .header("cookie", &relay.cookie)
         .header("origin", &relay.app.url)
         .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
-        .json(&value)
+        .json(value)
 }
 
 #[tokio::test]
@@ -300,7 +300,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         "scope": "read run",
         "state": "client-state",
     });
-    let preview: Value = owner_post(&relay, "/api/mcp/oauth/preview", parameters.clone())
+    let preview: Value = owner_post(&relay, "/api/mcp/oauth/preview", &parameters)
         .send()
         .await
         .unwrap()
@@ -315,11 +315,30 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         preview["installations"][0]["id"],
         relay.session["installations"][0]["id"]
     );
+    assert_eq!(preview["confirmationRequired"], false);
+    sqlx_core::query::query(
+        "UPDATE web_sessions SET last_proof_at = clock_timestamp() - interval '6 minutes'",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    let stale: Value = owner_post(&relay, "/api/mcp/oauth/preview", &parameters)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stale["confirmationRequired"], true);
+    sqlx_core::query::query("UPDATE web_sessions SET last_proof_at = clock_timestamp()")
+        .execute(&app.pool)
+        .await
+        .unwrap();
 
     let consent: Value = owner_post(
         &relay,
         "/api/mcp/oauth/consent",
-        json!({
+        &json!({
             "parameters": parameters,
             "installationId": relay.session["installations"][0]["id"],
             "approved": true,
@@ -554,7 +573,7 @@ async fn detaching_and_reclaiming_an_installation_permanently_revokes_its_mcp_gr
     let minted: Value = owner_post(
         &relay,
         &format!("/api/installations/{id}/tokens"),
-        json!({ "label": "Before detachment", "scopes": ["read"] }),
+        &json!({ "label": "Before detachment", "scopes": ["read"] }),
     )
     .send()
     .await
@@ -576,7 +595,7 @@ async fn detaching_and_reclaiming_an_installation_permanently_revokes_its_mcp_gr
     let detached = owner_post(
         &relay,
         &format!("/api/installations/{id}/detach"),
-        json!({}),
+        &json!({}),
     )
     .send()
     .await
@@ -600,7 +619,7 @@ async fn detaching_and_reclaiming_an_installation_permanently_revokes_its_mcp_gr
     let preview: Value = owner_post(
         &relay,
         "/api/installations/device-claim/preview",
-        json!({ "code": device["userCode"] }),
+        &json!({ "code": device["userCode"] }),
     )
     .send()
     .await
@@ -611,7 +630,7 @@ async fn detaching_and_reclaiming_an_installation_permanently_revokes_its_mcp_gr
     let approved = owner_post(
         &relay,
         "/api/installations/device-claim",
-        json!({
+        &json!({
             "code": device["userCode"], "confirmation": preview["confirmation"],
         }),
     )
@@ -732,7 +751,7 @@ async fn slow_mcp_uploads_have_a_body_deadline_and_release_their_admission() {
     let minted: Value = owner_post(
         &relay,
         &format!("/api/installations/{id}/tokens"),
-        json!({ "label": "Stalled client", "scopes": ["read"] }),
+        &json!({ "label": "Stalled client", "scopes": ["read"] }),
     )
     .send()
     .await
@@ -774,7 +793,7 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
     let minted: Value = owner_post(
         &relay,
         &tokens_path,
-        json!({ "label": "Revoked upload", "scopes": ["read", "manage"] }),
+        &json!({ "label": "Revoked upload", "scopes": ["read", "manage"] }),
     )
     .send()
     .await
@@ -904,7 +923,7 @@ async fn approved_code_request(relay: &RelayedInstallation, parameters: &Value) 
     let response = owner_post(
         relay,
         "/api/mcp/oauth/consent",
-        json!({
+        &json!({
             "parameters": parameters,
             "installationId": relay.session["installations"][0]["id"],
             "approved": true,
@@ -947,7 +966,7 @@ async fn native_loopback_ports_vary_but_other_redirects_and_code_bindings_stay_e
         let mut wrong = parameters.clone();
         wrong["redirect_uri"] = redirect.into();
         assert_eq!(
-            owner_post(&relay, "/api/mcp/oauth/preview", wrong)
+            owner_post(&relay, "/api/mcp/oauth/preview", &wrong)
                 .send()
                 .await
                 .unwrap()
@@ -977,7 +996,7 @@ async fn native_loopback_ports_vary_but_other_redirects_and_code_bindings_stay_e
         let registered = format!("http://{host}:9999/callback");
         let mut parameters = oauth_parameters(&relay, &registered).await;
         parameters["redirect_uri"] = format!("http://{host}:54321/callback").into();
-        let preview = owner_post(&relay, "/api/mcp/oauth/preview", parameters.clone())
+        let preview = owner_post(&relay, "/api/mcp/oauth/preview", &parameters)
             .send()
             .await
             .unwrap();
@@ -993,7 +1012,7 @@ async fn native_loopback_ports_vary_but_other_redirects_and_code_bindings_stay_e
         let mut wrong_path = parameters.clone();
         wrong_path["redirect_uri"] = format!("http://{host}:54321/callback/extra").into();
         assert_eq!(
-            owner_post(&relay, "/api/mcp/oauth/preview", wrong_path)
+            owner_post(&relay, "/api/mcp/oauth/preview", &wrong_path)
                 .send()
                 .await
                 .unwrap()
@@ -1311,7 +1330,7 @@ async fn a_member_cannot_consent_to_mcp_or_create_a_personal_token_for_the_share
     let invitation = owner_post(
         &relay,
         &format!("/api/installations/{id}/sharing/invitations"),
-        json!({
+        &json!({
             "email": "mcp-member@example.test",
         }),
     )
@@ -1412,7 +1431,7 @@ async fn maintenance_forgets_old_unused_clients_but_preserves_recent_registratio
         .await
         .unwrap();
     for (parameters, expected) in [(&old, StatusCode::BAD_REQUEST), (&recent, StatusCode::OK)] {
-        let preview = owner_post(&relay, "/api/mcp/oauth/preview", parameters.clone())
+        let preview = owner_post(&relay, "/api/mcp/oauth/preview", parameters)
             .send()
             .await
             .unwrap();
@@ -1472,7 +1491,7 @@ async fn consent_returns_a_client_error_if_maintenance_forgets_it_while_waiting_
     let request = owner_post(
         &relay,
         "/api/mcp/oauth/consent",
-        json!({
+        &json!({
             "parameters": parameters,
             "installationId": relay.session["installations"][0]["id"],
             "approved": true,
@@ -1547,7 +1566,7 @@ async fn expired_grants_and_unused_codes_release_old_registrations_without_touch
         .unwrap();
     for parameters in [&used, &unused] {
         assert_eq!(
-            owner_post(&relay, "/api/mcp/oauth/preview", parameters.clone())
+            owner_post(&relay, "/api/mcp/oauth/preview", parameters)
                 .send()
                 .await
                 .unwrap()
@@ -1615,7 +1634,7 @@ async fn maintenance_skips_a_busy_old_client_and_retries_after_it_is_released() 
     .expect("a busy registration must not stall maintenance")
     .unwrap();
     assert_eq!(
-        owner_post(&relay, "/api/mcp/oauth/preview", parameters.clone())
+        owner_post(&relay, "/api/mcp/oauth/preview", &parameters)
             .send()
             .await
             .unwrap()
@@ -1628,7 +1647,7 @@ async fn maintenance_skips_a_busy_old_client_and_retries_after_it_is_released() 
         .await
         .unwrap();
     assert_eq!(
-        owner_post(&relay, "/api/mcp/oauth/preview", parameters)
+        owner_post(&relay, "/api/mcp/oauth/preview", &parameters)
             .send()
             .await
             .unwrap()
@@ -1697,7 +1716,7 @@ async fn maintenance_and_concurrent_consent_have_a_consistent_client_lifetime() 
     let request = owner_post(
         &relay,
         "/api/mcp/oauth/consent",
-        json!({
+        &json!({
             "parameters": parameters,
             "installationId": relay.session["installations"][0]["id"],
             "approved": true,
@@ -1766,6 +1785,19 @@ async fn maintenance_and_concurrent_consent_have_a_consistent_client_lifetime() 
     relay.close().await;
 }
 
+async fn read_pending(
+    s: &cairn_installation::service::Service,
+    key: &str,
+) -> cairn_installation::mcps::record::PendingAuthorization {
+    let key = key.to_owned();
+    let vault = s.vault.clone();
+    s.store
+        .read(move |db| db.pending_mcp_oauth(&key, &vault))
+        .await
+        .unwrap()
+        .unwrap()
+}
+
 #[tokio::test]
 async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local_login() {
     use cairn_installation::{auth::hex_digest, config::now};
@@ -1808,18 +1840,6 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
         })
         .await
         .unwrap();
-    async fn read_pending(
-        s: &cairn_installation::service::Service,
-        key: &str,
-    ) -> cairn_installation::mcps::record::PendingAuthorization {
-        let key = key.to_owned();
-        let vault = s.vault.clone();
-        s.store
-            .read(move |db| db.pending_mcp_oauth(&key, &vault))
-            .await
-            .unwrap()
-            .unwrap()
-    }
     let parameters = json!({ "state": nonce, "code": "private-fixture-code" });
     let callback = format!("{}/mcps/oauth/callback", relay.base);
 
@@ -1972,7 +1992,7 @@ async fn public_plugin_upload_rechecks_its_grant_after_compilation() {
         let response = owner_post(
             &relay,
             &tokens,
-            json!({"label":"Plugin uploader","scopes":["manage"]}),
+            &json!({"label":"Plugin uploader","scopes":["manage"]}),
         )
         .send()
         .await
@@ -2100,7 +2120,7 @@ async fn pending_revalidation_distinguishes_scopes_and_rejects_revoked_tokens() 
         let response = owner_post(
             &relay,
             &format!("/api/installations/{installation_id}/tokens"),
-            json!({
+            &json!({
                 "label": "Resource discovery", "scopes": [granted],
             }),
         )

@@ -1,6 +1,6 @@
 import { availableParallelism } from 'node:os'
 import { defineConfig } from 'vitest/config'
-import { isolateTestCredentials } from './scripts/test-environment.mjs'
+import { isolateTestCredentials } from './scripts/dev/test-environment.mjs'
 
 isolateTestCredentials()
 

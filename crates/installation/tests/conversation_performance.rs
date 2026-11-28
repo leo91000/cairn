@@ -1,5 +1,5 @@
 //! Explicit, credential-free benchmarks of the real conversation list interface.
-//! Run alone through scripts/test-backend.mjs with --ignored --nocapture.
+//! Run alone through scripts/dev/test-backend.mjs with --ignored --nocapture.
 mod common;
 
 use axum::body::Body;

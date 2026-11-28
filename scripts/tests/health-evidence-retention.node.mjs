@@ -3,7 +3,7 @@ import filesystem from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import test from 'node:test'
-import { retainAlert } from '../health-evidence-retention.mjs'
+import { retainAlert } from '../ops/health-evidence-retention.mjs'
 
 const oldId = '2026-01-01T00-00-00-000Z'
 const newId = '2026-01-01T01-00-00-000Z'

@@ -123,10 +123,13 @@ removes the manager's conversation data and reachable node disks, but never dele
 remote disk objects, including previously queued deletions. The publication,
 restore and remote collection workers no longer run.
 
-Existing environments that depend on S3, and environments on already revoked
-nodes, expire at the local-disk upgrade. Never-published environments on nodes that
-have not been revoked remain usable. Pending moves, recoveries and backend
-migrations are cancelled. No blocks are downloaded for migration.
+The [historical local-disk upgrade](migrations/0033-local-conversation-disks.md)
+expired S3-dependent environments and environments on already revoked nodes.
+It preserved never-published environments on non-revoked nodes and cancelled
+pending moves, recoveries and backend migrations. To upgrade an installation
+that still uses S3, boot a compatible schema-37 manager to complete that
+transition before installing schema 38. See the
+[data-preserving upgrade procedure](PRODUCTION-CAIRN.md#data-preserving-upgrades).
 
 The upgrade leaves the bucket, credentials, `storage-s3.json`, `STORAGE_S3_*` and
 Garage data untouched. Operators may remove them once no rollback is contemplated.

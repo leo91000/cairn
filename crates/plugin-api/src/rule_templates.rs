@@ -247,7 +247,7 @@ mod tests {
     use crate::Manifest;
     use serde_json::{Value, json};
 
-    fn manifest(templates: Value) -> Result<(), &'static str> {
+    fn manifest(templates: &Value) -> Result<(), &'static str> {
         serde_json::from_value::<Manifest>(json!({
             "id": "chat", "name": "Chat", "version": "1", "apiVersion": 2,
             "capabilities": ["hooks"], "agentAccess": {},
@@ -293,8 +293,8 @@ mod tests {
 
     #[test]
     fn templates_declare_used_parameters_of_known_kinds() {
-        assert!(manifest(json!([template()])).is_ok());
-        assert!(manifest(json!([template(), template()])).is_err());
+        assert!(manifest(&json!([template()])).is_ok());
+        assert!(manifest(&json!([template(), template()])).is_err());
 
         let invalid: [(&str, Value); 11] = [
             ("/name", json!("Not a slug")),
@@ -319,18 +319,18 @@ mod tests {
                 Value::Array(items) => items[key.parse::<usize>().unwrap()] = value,
                 parent => parent[key] = value,
             }
-            assert!(manifest(json!([changed])).is_err(), "{pointer}");
+            assert!(manifest(&json!([changed])).is_err(), "{pointer}");
         }
 
         let mut unused = template();
         unused["parameters"][2]["name"] = "other".into();
-        assert!(manifest(json!([unused])).is_err());
+        assert!(manifest(&json!([unused])).is_err());
         let mut field = template();
         field["rules"][0]["executionAgentId"]["field"] = "id".into();
-        assert!(manifest(json!([field])).is_err());
+        assert!(manifest(&json!([field])).is_err());
         let mut extra = template();
         extra["rules"][0]["executionAgentId"]["other"] = true.into();
-        assert!(manifest(json!([extra])).is_err());
+        assert!(manifest(&json!([extra])).is_err());
     }
 
     #[test]

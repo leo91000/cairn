@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canonicalBrowserUbuntuSources, prepareBrowserBuildDependencies } from '../prepare-browser-build-dependencies.mjs'
+import { canonicalBrowserUbuntuSources, prepareBrowserBuildDependencies } from '../ci/prepare-browser-build-dependencies.mjs'
 
 const sources = `# Preserve the Ubuntu signature configuration.
 Types: deb

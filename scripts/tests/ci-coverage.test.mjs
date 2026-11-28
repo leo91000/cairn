@@ -1,4 +1,6 @@
+import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import process from 'node:process'
 import { runInNewContext } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
@@ -7,15 +9,50 @@ import {
   AVD_USERDATA_BYTES_REQUIRED,
   capacityPlan,
   sdkPackagesToRemove,
-} from '../android-emulator-sdk.mjs'
-import { nextestArtifact } from '../install-nextest-ci.mjs'
+} from '../android/android-emulator-sdk.mjs'
+import { nextestArtifact } from '../ci/install-nextest-ci.mjs'
 
 const quality = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
+const storage = parse(readFileSync(new URL('../../.github/workflows/ci-storage.yaml', import.meta.url), 'utf8'))
 const android = parse(readFileSync(new URL('../../.github/workflows/android.yaml', import.meta.url), 'utf8'))
 const pr = parse(readFileSync(new URL('../../.github/workflows/pr.yaml', import.meta.url), 'utf8'))
+const webkitRegression = parse(readFileSync(new URL('../../.github/workflows/webkit-dependency-regression.yaml', import.meta.url), 'utf8'))
 const chatJourneySource = readFileSync(new URL('../../tests/e2e/chats.spec.ts', import.meta.url), 'utf8')
 
 describe('parallel CI coverage', () => {
+  it('rejects invalid direct storage qualification inputs before setup', () => {
+    const guard = storage.jobs['storage-development'].steps.find(step => step.name === 'Require a non-publishing development dispatch')
+    const runGuard = overrides => spawnSync('bash', ['-eo', 'pipefail', '-c', guard.run], {
+      env: {
+        PATH: process.env.PATH,
+        VALIDATION_ONLY: 'true',
+        BACKEND_ONLY: 'false',
+        DIAGNOSTIC_CANDIDATE: '',
+        DIAGNOSTIC_REFERENCE: '',
+        ...overrides,
+      },
+      encoding: 'utf8',
+    })
+
+    expect(runGuard({}).status).toBe(0)
+    for (const invalid of [
+      { VALIDATION_ONLY: 'false' },
+      { BACKEND_ONLY: 'true' },
+      { DIAGNOSTIC_CANDIDATE: 'a'.repeat(40) },
+      { DIAGNOSTIC_REFERENCE: 'b'.repeat(40) },
+    ]) {
+      const result = runGuard(invalid)
+      expect(result.status, JSON.stringify(invalid)).toBe(1)
+      expect(result.stdout).toBe('')
+    }
+  })
+
+  it('runs the dedicated WebKit regression for edits to its Playwright image check', () => {
+    const imageCheck = './.github/actions/check-playwright-image'
+    expect(webkitRegression.jobs.webkit.steps.some(step => step.uses === imageCheck)).toBe(true)
+    expect(webkitRegression.on.pull_request.paths).toContain(`${imageCheck.slice(2)}/action.yaml`)
+  })
+
   it('keeps opt-in VM qualification in a local Docker store without release effects', () => {
     const image = quality.jobs.image
     expect(image.if).toContain('inputs.vm-storage-qualification == true')
@@ -33,7 +70,7 @@ describe('parallel CI coverage', () => {
     const preflight = steps.find(step => step.name === 'Qualify native controller concurrency before building every test binary')
     const suite = steps.find(step => step.name === 'Run backend tests across binaries with isolated credentials')
 
-    expect(preflight.run).toBe('node scripts/test-backend.mjs --nextest --workspace --lib -E \'package(=cairn-installation) & (test(native::service::tests::) | test(nodes::files::tests::))\' --no-capture')
+    expect(preflight.run).toBe('node scripts/dev/test-backend.mjs --nextest --workspace --lib -E \'package(=cairn-installation) & (test(native::service::tests::) | test(nodes::files::tests::))\' --no-capture')
     expect(preflight.if).toBe(suite.if)
     expect(preflight['continue-on-error']).toBeUndefined()
     expect(steps.indexOf(preflight)).toBeLessThan(steps.indexOf(suite))
@@ -45,13 +82,13 @@ describe('parallel CI coverage', () => {
       ['Measure bounded Native terminal-reason metadata', 'native::service::terminal_tests::terminal_reason_metadata_measurement -- --exact --ignored --nocapture'],
     ]) {
       expect(quality.jobs.backend.steps.find(step => step.name === name).run)
-        .toBe(`node scripts/test-backend.mjs --workspace --lib ${selection}`)
+        .toBe(`node "\${CI_DIAGNOSTIC_BACKEND_LAUNCHER:-scripts/dev/test-backend.mjs}" --workspace --lib ${selection}`)
     }
   })
 
   it('bounds nextest acquisition and refuses an unsupported version instead of installing fallback tools', () => {
     const backend = quality.jobs.backend
-    const installers = backend.steps.filter(step => step.run === 'node scripts/install-nextest-ci.mjs')
+    const installers = backend.steps.filter(step => step.run === 'node scripts/ci/install-nextest-ci.mjs')
     expect(installers).toHaveLength(1)
 
     const installer = installers[0]
@@ -132,6 +169,7 @@ describe('parallel CI coverage', () => {
     expect(backend.steps.some(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')).toBe(false)
     expect(backend.steps.some(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')).toBe(false)
     expect(backend.steps.some(step => step.run?.includes('--test native_plan_turns'))).toBe(false)
+    expect(backend.steps.some(step => step.run?.includes('--test native_side_questions'))).toBe(false)
     expect(backend.steps.some(step => step.name === 'Check all Rust targets for a backend-only qualification')).toBe(false)
     expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'before-build')).toBe(true)
     expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'after-build')).toBe(true)
@@ -203,7 +241,7 @@ describe('parallel CI coverage', () => {
     expect(selected.steps[0].uses).toBe('actions/checkout@v7.0.1')
     expect(selected.steps[1]).toEqual({ uses: './.github/actions/setup-pnpm', with: { cache: true } })
     expect(selected.steps[2].run).toBe('rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1')
-    expect(selected.steps[3].run).toBe('node scripts/install-native-ci-dependencies.mjs')
+    expect(selected.steps[3].run).toBe('node scripts/ci/install-native-ci-dependencies.mjs')
     expect(selected.steps[3]['timeout-minutes']).toBe(10)
     expect(selected.env).toEqual({ CARGO_PROFILE_DEV_DEBUG: '0', CARGO_INCREMENTAL: '0' })
     expect(selected.steps.some(step => step.uses?.startsWith('actions/download-artifact@'))).toBe(false)
@@ -211,7 +249,7 @@ describe('parallel CI coverage', () => {
     expect(step).toBeDefined()
     expect(step.run).toContain('set -o pipefail')
     expect(step.run).not.toContain('moto[server]')
-    expect(step.run).toContain('pnpm test:backend -p cairn-installation --test native_nodes both_backend_change_routes_require_file_loss_confirmation_and_expire_without_conversion -- --exact')
+    expect(step.run).toContain('pnpm test:backend -p cairn-installation --test native_nodes transitions_and_resume::both_backend_change_routes_require_file_loss_confirmation_and_expire_without_conversion -- --exact')
     expect(step.run).toContain('1 passed; 0 failed; 0 ignored;')
     expect(step.run).not.toContain('${{')
     expect(step.run).not.toContain('CAIRN_TEST_REUSED_BUILD')
@@ -227,7 +265,7 @@ describe('parallel CI coverage', () => {
     expect(job.steps[0]).toEqual({ uses: 'actions/checkout@v7.0.1' })
     expect(job.steps[1]).toEqual({ uses: './.github/actions/setup-pnpm', with: { cache: true } })
     expect(job.steps[2].run).toBe('rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1')
-    expect(job.steps[3].run).toBe('node scripts/install-native-ci-dependencies.mjs')
+    expect(job.steps[3].run).toBe('node scripts/ci/install-native-ci-dependencies.mjs')
     expect(job.steps[3]['timeout-minutes']).toBe(10)
     const qualifications = job.steps.filter(step => step.name?.startsWith('Qualify'))
     expect(qualifications.map(step => step.name)).toEqual([
@@ -235,10 +273,11 @@ describe('parallel CI coverage', () => {
       'Qualify the resolved Claude Code release against its native adapter',
       'Qualify the resolved Antigravity release against its native adapter',
       'Qualify plan turns of the resolved Claude Code and Codex releases',
+      'Qualify side questions of the resolved Claude Code and Codex releases',
     ])
     for (const step of qualifications) {
       expect(step.if).toBe('inputs.backend-only != true')
-      expect(step.run).toContain('node scripts/test-backend.mjs -p cairn-installation --test ')
+      expect(step.run).toContain('node scripts/dev/test-backend.mjs -p cairn-installation --test ')
       expect(step.run).toContain('--ignored')
       expect(step.run).not.toContain('CAIRN_TEST_REUSED_BUILD')
     }
@@ -257,12 +296,16 @@ describe('parallel CI coverage', () => {
       ANTIGRAVITY_URL: '${{ needs.resolve.outputs.antigravity-url }}',
       ANTIGRAVITY_SHA512: '${{ needs.resolve.outputs.antigravity-sha512 }}',
     })
-    expect(qualifications[3].env).toEqual({
-      CLAUDE_VERSION: '${{ needs.resolve.outputs.claude }}',
-      CODEX_VERSION: '${{ needs.resolve.outputs.codex }}',
-    })
+    for (const step of qualifications.slice(3)) {
+      expect(step.env).toEqual({
+        CLAUDE_VERSION: '${{ needs.resolve.outputs.claude }}',
+        CODEX_VERSION: '${{ needs.resolve.outputs.codex }}',
+      })
+    }
+
     /* eslint-enable no-template-curly-in-string */
     expect(qualifications[3].run).toContain('--test native_plan_turns -- --ignored --test-threads 1')
+    expect(qualifications[4].run).toContain('--test native_side_questions -- --ignored --test-threads 1')
     expect(quality.jobs.backend.steps.find(step => step.run?.includes('--nextest --test-threads')).run).toContain('--nextest --test-threads 8 --no-fail-fast --color never --status-level all')
   })
 
@@ -470,7 +513,7 @@ describe('parallel CI coverage', () => {
     expect(browser.permissions).toEqual({ contents: 'read' })
     expect(browser['timeout-minutes']).toBe(25)
     const dependencies = browser.steps.find(step => step.name === 'Install the pinned Rust toolchain and build dependencies')
-    expect(dependencies.run).toContain('node scripts/prepare-browser-build-dependencies.mjs')
+    expect(dependencies.run).toContain('node scripts/ci/prepare-browser-build-dependencies.mjs')
     expect(dependencies.run).toContain('--default-toolchain 1.97.1')
     expect(dependencies.run).not.toContain('apt-get')
     expect(browser.services.postgres.image).toBe('postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24')
@@ -541,7 +584,7 @@ describe('parallel CI coverage', () => {
     expect(reference.env.EVENT_REFERENCE_SHA).toContain('inputs.ci-diagnostic == \'native\' && inputs.diagnostic-reference')
     expect(reference.env.EVENT_REFERENCE_SHA).toContain('github.event.pull_request.base.sha')
     expect(reference.env.EVENT_REFERENCE_SHA).toContain('github.event.before')
-    expect(reference.run).toContain('python3 scripts/native_reference.py')
+    expect(reference.run).toContain('python3 scripts/ci/native_reference.py')
   })
 
   it('keeps shared Rust preparation cold and preserves only exact native reference caching', () => {
@@ -584,11 +627,14 @@ describe('parallel CI coverage', () => {
   it('prepares the kernel driver before the native device observation test', () => {
     const steps = quality.jobs.backend.steps
     const driver = steps.findIndex(step => step.name === 'Prepare ublk for native device observation qualification')
-    const probe = steps.findIndex(step => step.run?.includes('node scripts/test-native-namespace.mjs --sudo'))
+    const probe = steps.findIndex(step => step.run?.includes(`node "\${CI_DIAGNOSTIC_BACKEND_NAMESPACE:-scripts/ci/test-native-namespace.mjs}" --sudo`))
     expect(driver).toBeGreaterThan(-1)
     expect(probe).toBeGreaterThan(driver)
-    expect(steps[driver].run).toContain('sudo modprobe ublk_drv')
-    expect(steps[driver].run).toContain('test -c /dev/ublk-control')
+    expect(steps[driver].uses).toBe('./.github/actions/ensure-ublk')
+    const action = parse(readFileSync(new URL('../../.github/actions/ensure-ublk/action.yaml', import.meta.url), 'utf8'))
+    const script = action.runs.steps.map(step => step.run ?? '').join('\n')
+    expect(script).toContain('sudo modprobe ublk_drv')
+    expect(script).toContain('test -c /dev/ublk-control')
   })
 
   it('observes capacity around actual cold builds without introducing a cache or writer mode', () => {
@@ -641,16 +687,16 @@ describe('parallel CI coverage', () => {
     const index = steps.indexOf(consumer)
     expect(host).toBeLessThan(toolchain)
     expect(toolchain).toBeLessThan(pair)
-    expect(steps[pair].run.indexOf('apt-get install -y --no-install-recommends libclang-dev')).toBeLessThan(steps[pair].run.indexOf('scripts/ci-diagnostic-native-build.mjs'))
+    expect(steps[pair].run.indexOf('apt-get install -y --no-install-recommends libclang-dev')).toBeLessThan(steps[pair].run.indexOf('scripts/ci/ci-diagnostic-native-build.mjs'))
     expect(pair).toBeLessThan(verify)
     expect(verify).toBeLessThan(index)
     expect(index).toBeLessThan(steps.findIndex(step => step.name === 'Qualify the exact reference on the current disposable host'))
     expect(steps[host].run).not.toContain('test_native_local_runtime.py')
     expect(consumer.if).toBeUndefined()
 
-    expect(consumer.run).toContain('scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- python3 -m unittest discover -s scripts/tests -p test_native_local_runtime.py -v')
+    expect(consumer.run).toContain('scripts/ci/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- python3 -m unittest discover -s scripts/tests -p test_native_local_runtime.py -v')
     expect(consumer.run).not.toMatch(/(?:--filter|--ignore|\s-k\s)/)
-    expect(steps.filter(step => step.run?.includes('node scripts/ci-diagnostic-native-build.mjs'))).toHaveLength(1)
+    expect(steps.filter(step => step.run?.includes('node scripts/ci/ci-diagnostic-native-build.mjs'))).toHaveLength(1)
     const memoryTests = readFileSync(new URL('./test_native_local_runtime.py', import.meta.url), 'utf8')
     expect(memoryTests.match(/^\s+def test_/gm)).toHaveLength(2)
   })
@@ -692,7 +738,6 @@ describe('parallel CI coverage', () => {
       'backend-only': true,
       'validation-only': true,
       'backend-qualification': 'none',
-      'plan-storage-reference': '06829d1b5f3d7accb9791c09d49522e7e2d2ab25',
       'exclusive-android': true,
       'browser-workers': '2',
     }
@@ -701,7 +746,7 @@ describe('parallel CI coverage', () => {
     }
 
     for (const mode of ['', 'none']) {
-      expect(runsWith({ ...legacy, 'ci-diagnostic': mode })).toEqual(['backend', 'plan-storage', 'rust-check'])
+      expect(runsWith({ ...legacy, 'ci-diagnostic': mode })).toEqual(['backend', 'rust-check'])
     }
 
     expect(quality.on.pull_request).toBeUndefined()
@@ -729,7 +774,7 @@ describe('parallel CI coverage', () => {
   it('runs the actual missing-only network preparer before every unchanged topology suite', () => {
     for (const name of ['network-bench', 'android-direct']) {
       const steps = quality.jobs[name].steps
-      expect(steps.some(step => step.run === `node scripts/prepare-network-tools.mjs ${name}`)).toBe(true)
+      expect(steps.some(step => step.run === `node scripts/ci/prepare-network-tools.mjs ${name}`)).toBe(true)
       expect(steps.some(step => step.run?.startsWith('sudo apt-get update'))).toBe(false)
     }
 
@@ -742,9 +787,9 @@ describe('parallel CI coverage', () => {
   it('reclaims only unused Android SDK packages and checks userdata headroom before emulator boot', () => {
     const job = quality.jobs['android-direct']
     const steps = job.steps
-    const prune = steps.findIndex(step => step.run === 'node scripts/android-emulator-sdk.mjs prune')
+    const prune = steps.findIndex(step => step.run === 'node scripts/android/android-emulator-sdk.mjs prune')
     const install = steps.findIndex(step => step.uses === './.github/actions/setup-android-emulator')
-    const preflight = steps.findIndex(step => step.run === 'node scripts/android-emulator-sdk.mjs preflight')
+    const preflight = steps.findIndex(step => step.run === 'node scripts/android/android-emulator-sdk.mjs preflight')
     const emulatorIndex = steps.findIndex(step => step.uses?.startsWith('reactivecircus/android-emulator-runner@'))
 
     expect(prune).toBeGreaterThan(-1)
@@ -764,7 +809,7 @@ describe('parallel CI coverage', () => {
       'profile': 'pixel_6',
     })
     expect(emulator.with['disk-size']).toBeUndefined()
-    expect(emulator.with['pre-emulator-launch-script']).toBe('node scripts/android-emulator-sdk.mjs preflight')
+    expect(emulator.with['pre-emulator-launch-script']).toBe('node scripts/android/android-emulator-sdk.mjs preflight')
     expect(emulator.with['working-directory']).toBeUndefined()
     expect(emulator.with['emulator-boot-timeout']).toBeUndefined()
     expect(emulator.with.script).toContain('python3 tests/network-bench.py')
@@ -800,7 +845,7 @@ describe('parallel CI coverage', () => {
 
   it('delivers the pinned local package closure from this build before network preparation', () => {
     const build = quality.jobs.build.steps
-    const acquire = build.findIndex(step => step.run === 'node scripts/ci-network-package-closure.mjs acquire target/ci-network-tools')
+    const acquire = build.findIndex(step => step.run === 'node scripts/ci/ci-network-package-closure.mjs acquire target/ci-network-tools')
     const upload = build.findIndex(step => step.with?.name === 'network-tools-noble-amd64-v1')
     expect(acquire).toBeGreaterThan(-1)
     expect(upload).toBeGreaterThan(acquire)
@@ -808,7 +853,7 @@ describe('parallel CI coverage', () => {
     const consumer = quality.jobs['network-bench']
     expect(consumer.needs).toContain('build')
     const download = consumer.steps.findIndex(step => step.with?.name === 'network-tools-noble-amd64-v1')
-    const prepare = consumer.steps.findIndex(step => step.run === 'node scripts/prepare-network-tools.mjs network-bench')
+    const prepare = consumer.steps.findIndex(step => step.run === 'node scripts/ci/prepare-network-tools.mjs network-bench')
     expect(download).toBeGreaterThan(-1)
     expect(download).toBeLessThan(prepare)
     expect(consumer.steps[download].with).toEqual({ name: 'network-tools-noble-amd64-v1', path: 'target/ci-network-tools/' })
@@ -844,14 +889,20 @@ describe('parallel CI coverage', () => {
     const build = quality.jobs.build.steps
     expect(build.find(step => step.name === 'Build the browser-test backend and frontend').run).toContain('--example beacon_sql_fixture')
     expect(build.find(step => step.with?.name === 'browser-backend').with.path).toContain('target/debug/examples/beacon_sql_fixture')
+    const downloadAction = parse(readFileSync(new URL('../../.github/actions/download-browser-artifacts/action.yaml', import.meta.url), 'utf8'))
+    const defaultBinaries = downloadAction.inputs.binaries.default
+    expect(defaultBinaries).toContain('target/debug/examples/beacon_sql_fixture')
+    expect(downloadAction.runs.steps.some(step => step.run?.includes('chmod +x'))).toBe(true)
     for (const name of ['browser', 'network-bench', 'android-direct']) {
       const steps = quality.jobs[name].steps
-      expect(steps.some(step => step.run?.includes('chmod +x') && step.run.includes('target/debug/examples/beacon_sql_fixture'))).toBe(true)
+      const download = steps.find(step => step.uses === './.github/actions/download-browser-artifacts')
+      expect(download).toBeDefined()
+      expect(download.with?.binaries ?? defaultBinaries).toContain('target/debug/examples/beacon_sql_fixture')
     }
 
     const steps = quality.jobs.browser.steps
     expect(steps.some(step => step.run?.includes('postgresql-client'))).toBe(false)
-    const sql = steps.findIndex(step => step.run === 'pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts')
+    const sql = steps.findIndex(step => step.run === 'pnpm exec tsx scripts/ci/qualify-beacon-sql-fixture.ts')
     const journeys = steps.findIndex(step => step.run?.includes('pnpm test:e2e'))
     expect(sql).toBeGreaterThan(-1)
     expect(sql).toBeLessThan(journeys)

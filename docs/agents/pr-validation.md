@@ -62,7 +62,7 @@ affected code and the full qualification workflows for specialist coverage:
   against an offline loopback master and observes its heartbeat; the immutable
   reference keeps its original controller entry point. This exercises pre-runtime
   legacy IO initialization during conversion without a production connection.
-- Firecracker changes require `scripts/test-firecracker-discard.sh` where
+- Firecracker changes require `scripts/ci/test-firecracker-discard.sh` where
   relevant. Container/release changes require the corresponding image smoke
   tests. Use disposable infrastructure with the required KVM/ublk capabilities.
 
@@ -107,8 +107,8 @@ credentials or running images.
 
 Full qualifications run the resolved OpenCode, Claude Code and Antigravity native
 adapters (Antigravity's release is downloaded from Google's manifest and checked
-against its SHA-512), plus the Plan boundary checks for the resolved Claude Code
-and Codex releases,
+against its SHA-512), plus the Plan boundary and side-question checks for the
+resolved Claude Code and Codex releases,
 in one separate 30-minute `cli-qualification` job after the normal backend suite.
 It checks out the same commit, builds its test binaries on its own runner and
 preserves the native adapter, supported-release resume and rollback checks.
@@ -120,6 +120,8 @@ namespace test compilation keep `--workspace --lib`, retaining the dependency
 features used by the workspace suite. The preflight keeps its installation package
 filter and native service/files test filters, so it executes the same cases before
 building every test binary.
+See the [close drain](../NATIVE-CLOSE-DRAIN-MEASUREMENTS.md) and
+[terminal metadata](../NATIVE-TERMINAL-REASONS.md) measurement procedures.
 Package-only selection changes Cargo's unified dependency graph and rebuilds the
 installation test library. Exact case filters and the namespace executable check
 still select the intended installation tests.
@@ -127,7 +129,7 @@ Image publication requires both jobs to succeed. When physical migration is
 selected for a full run, it waits for both jobs; a backend-only migration run
 continues to require only the backend suite.
 
-The backend installs nextest with `scripts/install-nextest-ci.mjs`. Its official
+The backend installs nextest with `scripts/ci/install-nextest-ci.mjs`. Its official
 GitHub release asset ID, size and SHA256 are pinned; acquisition uses the release
 asset API because the public download URL has returned persistent 504s. The
 digest also matches the immutable install-action manifest cited in the helper.
@@ -182,7 +184,7 @@ publish, promotion and deployment jobs are skipped.
 
 The five native test-dependency callers (`rust-check`, `backend`,
 `cli-qualification`, `backend-migration-qualification` and `node-checks`) use
-`scripts/install-native-ci-dependencies.mjs`. Its closed native profile preserves
+`scripts/ci/install-native-ci-dependencies.mjs`. Its closed native profile preserves
 `libclang-dev age e2fsprogs fakeroot`; update/install have 120/360-second work
 budgets, noninteractive sudo and bounded acquisition/lock waits. Phase markers
 contain fixed status fields, and owned process groups are cleaned before returning
@@ -239,7 +241,7 @@ The fixed wrapper runs `cargo build --locked -p cairn-installation --bin cairn`
 from the immutable candidate, then exactly once:
 
 ```sh
-node scripts/test-backend.mjs --nextest -p cairn-installation --lib --test-threads 8 --no-fail-fast --color never --status-level all -E 'test(agent_avatars::tests::) | test(authorization::tests::) | test(authorization::jobs::tests::)'
+node scripts/dev/test-backend.mjs --nextest -p cairn-installation --lib --test-threads 8 --no-fail-fast --color never --status-level all -E 'test(agent_avatars::tests::) | test(authorization::tests::) | test(authorization::jobs::tests::)'
 ```
 
 Both commands stay inside the existing owned-command supervisor and actual
@@ -274,17 +276,21 @@ skip or weaken it because the diagnostic passed.
 
 The observer remains at the workflow commit while isolated worktrees hold the
 pinned sources. Backend phases are insertion-only additions to that source's
-isolated launcher. Native diagnostics build both exact sources, checksum their
-binaries and keep each archived private fixture paired with its own binaries.
+isolated launcher. The script paths are selected from the candidate's Git tree,
+including candidates before the script reorganization. Native diagnostics
+build both exact sources, checksum their binaries and keep each archived
+private fixture paired with its own binaries.
 Both fixtures receive the same insertion-only phase/stack observer; artifact
 manifests preserve the original and observed hashes. The comparison does not
 silently move to the observer commit's first parent.
 
 Backend-only diagnostics provision the candidate's Node resolution context
 after setup-pnpm has installed the observer's dependencies. The bridge requires
-identical package/lock/workspace bytes in both pinned Git sources and working
-trees, a physical complete pnpm12.3.4 installation, its exact application lock
-document and the declared versions of every direct provider, official-client,
+the exact bytes of both pinned Git sources in their working trees. Lock and
+workspace files must also match between the two sources. Their package manifests
+may differ only by the known script path moves in this reorganization. The
+bridge checks a physical complete pnpm12.3.4 installation, its exact application
+lock document and the declared versions of every direct provider, official-client,
 stdio and tsx dependency. Root importer identities (including peer versions)
 determine the canonical virtual-store package paths. The receipt binds those
 paths, manifest bytes, and each required ESM entrypoint's canonical path and

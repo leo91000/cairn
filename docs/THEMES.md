@@ -84,7 +84,7 @@ logo; attention, warning and success retain their existing semantic colors.
 WCAG AA contrast ratios: white on Prussian blue **12.32:1**; Prussian blue on
 paper `#F4F2EC` **11.00:1**; dark ink on `#8DB8E8` **9.24:1**. The dark icon
 outline `#346AA3` distinguishes the mark from the dark canvas. Sources live in
-`apps/web/public/brand`; `uv run scripts/generate-brand-icons.py` regenerates
+`apps/web/public/brand`; `uv run scripts/dev/generate-brand-icons.py` regenerates
 PNG icons and social/email images. Icons at 16/32 px use the optical mark without
 arcs. Android uses the same geometry within the adaptive-icon safe zone.
 

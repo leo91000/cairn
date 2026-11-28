@@ -1,5 +1,9 @@
 # 0017 — Conversation attachment quota reservations
 
+This historical migration and its tests remain available at commit
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 Version 16 upgrades to 17 automatically in `Store::open`, before the SQL actors
 start. The v16 fixture was produced by the real Store and Service at `b9cd3c2a`,
 starting with the synthetic v15 questions/waits fixture. Its 22 uploads include
@@ -18,8 +22,9 @@ foreign keys. No reservation is invented for a previously committed upload.
 Invalid identities, metadata, references or quotas fail the transaction: schema,
 KV entries, counters and version remain intact at 16. The old manager must be
 stopped and a consistent DB/WAL backup retained before upgrading. A successful
-upgrade has no downgrade path; it never resets the installation. Intermediate
-11 → 16 migrations remain supported and retain their own transaction boundaries.
+upgrade has no downgrade path; it never resets the installation. The historical
+manager applies each intermediate migration from schemas 11 → 16 in its own
+transaction.
 
 Runtime reservations have unique tokens and a five-minute deadline. File bytes
 are written and synced privately before SQL publication; the authorized commit

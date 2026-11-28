@@ -10,7 +10,6 @@ use reducer::{Card, Cards, Event, State};
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
-pub(crate) mod migration;
 pub(crate) mod reducer;
 #[cfg(test)]
 mod tests;
@@ -733,6 +732,7 @@ pub(crate) fn page(
 }
 
 /// Replays a run's events from the start with the same reducer as the writer.
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Replay {
     pub state: State,
@@ -741,6 +741,7 @@ pub(crate) struct Replay {
     reasons: std::collections::BTreeMap<i64, String>,
 }
 
+#[cfg(test)]
 impl Replay {
     pub fn apply(&mut self, stored: &StoredEvent) -> Result<()> {
         let payload = stored
@@ -784,11 +785,13 @@ impl Replay {
     }
 }
 
+#[cfg(test)]
 struct ReplayCards<'a> {
     cards: &'a mut std::collections::BTreeMap<String, Card>,
     reasons: &'a std::collections::BTreeMap<i64, String>,
 }
 
+#[cfg(test)]
 impl Cards for ReplayCards<'_> {
     fn card(&mut self, id: &str) -> Result<Option<Card>> {
         Ok(self.cards.get(id).cloned())

@@ -11,6 +11,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import build.cairn.app.data.*
 import build.cairn.contracts.*
@@ -31,7 +32,7 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
     var removing by remember { mutableStateOf<Mcp?>(null) }
     var disconnecting by remember { mutableStateOf(false) }
     var oauth by rememberSaveable { mutableStateOf<String?>(null) }
-    var oauthNotice by remember { mutableStateOf("") }
+    var oauthNotice by remember { mutableStateOf<Pair<String, NoticeTone>?>(null) }
     val context = LocalContext.current
     LaunchedEffect(state.mcps) { items = state.mcps }
     Poll("mcps", 3000) {
@@ -42,9 +43,11 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
                     oauth = null
                     oauthNotice =
                         when (result.result) {
-                            "connected" -> "Connexion OAuth terminée."
-                            "denied" -> "Autorisation annulée."
-                            else -> "Autorisation expirée ou échouée. Réessayez la connexion."
+                            "connected" -> "Connexion OAuth terminée." to NoticeTone.SUCCESS
+                            "denied" -> "Autorisation annulée." to NoticeTone.WARNING
+                            else ->
+                                "Autorisation expirée ou échouée. Réessayez la connexion." to
+                                    NoticeTone.ERROR
                         }
                 }
             }
@@ -64,18 +67,52 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
             Text("Ajouter un MCP")
         }
         SearchField("Rechercher", query, { query = it })
-        if (oauthNotice.isNotBlank()) Text(oauthNotice)
+        oauthNotice?.let { (message, tone) ->
+            Notice(message, tone = tone) {
+                IconButton(onClick = { oauthNotice = null }) {
+                    Icon(
+                        CairnIcons.Close,
+                        "Fermer",
+                        Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
         if (oauth != null) {
-            Text("Terminez l’autorisation dans le navigateur, puis revenez dans Cairn.")
-            TextButton(
-                onClick = {
-                    vm.perform {
-                        oauth?.let { api.cancelMcpConnection(McpIdInput(it)) }
-                        oauth = null
+            AuthCard(padding = PaddingValues(16.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    CircularProgressIndicator(
+                        Modifier.size(22.dp),
+                        strokeWidth = 2.5.dp,
+                    )
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Autorisation OAuth en cours",
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        Text(
+                            "Terminez l’autorisation dans le navigateur, puis revenez dans Cairn.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
-            ) {
-                Text("Annuler cette connexion")
+                OutlinedButton(
+                    onClick = {
+                        vm.perform {
+                            oauth?.let { api.cancelMcpConnection(McpIdInput(it)) }
+                            oauth = null
+                        }
+                    },
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+                ) {
+                    Text("Annuler cette connexion")
+                }
             }
         }
         items
@@ -139,7 +176,7 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
                                             BeginMcpInput(id = mcp.id, native = true)
                                         )
                                     oauth = mcp.id
-                                    oauthNotice = ""
+                                    oauthNotice = null
                                     browse(context, result.url)
                                 }
                             },

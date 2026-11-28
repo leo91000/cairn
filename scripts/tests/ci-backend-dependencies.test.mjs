@@ -16,7 +16,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { it, onTestFinished } from 'vitest'
 import { parse } from 'yaml'
-import { prepareBackendDependencies, verifyBackendDependencies } from '../ci-backend-dependencies.mjs'
+import { prepareBackendDependencies, verifyBackendDependencies } from '../ci/ci-backend-dependencies.mjs'
 
 function fixtureImports() {
   const sources = ['../../tests/fixtures/mcp-provider.ts', '../../tests/fixtures/mcp.mjs', '../../crates/installation/tests/mcps.rs']
@@ -139,6 +139,27 @@ it('goes red/green through the actual Node ESM resolver in the separate candidat
   const proof = prepareBackendDependencies(f.options)
   assert.equal(node(f.candidate, args).status, 0)
   assert.deepEqual(verifyBackendDependencies(f.options, proof), proof)
+})
+
+it.each([false, true])('checks pinned manifests across script-only relocation, altered dependency: %s', (changedDependency) => {
+  const f = fixture()
+  const manifest = f.meta['package.json']
+  let historical = manifest.replace('scripts/ci/validate-pr.mjs', 'scripts/validate-pr.mjs')
+    .replaceAll(/scripts\/dev\/(rust-format|test-backend|generate-contracts)\.mjs/g, 'scripts/$1.mjs')
+  if (changedDependency)
+    historical = historical.replace(/("tsx": ")[^"]+/, (_match, prefix) => `${prefix}0.0.0`)
+
+  writeFileSync(path.join(f.candidate, 'package.json'), historical)
+  f.options.readTracked = (directory, _revision, file) => Buffer.from(
+    directory === f.candidate && file === 'package.json' ? historical : f.meta[file],
+  )
+  if (changedDependency) {
+    assert.throws(() => prepareBackendDependencies(f.options), /dependency metadata differ/)
+  }
+  else {
+    const proof = prepareBackendDependencies(f.options)
+    assert.deepEqual(verifyBackendDependencies(f.options, proof), proof)
+  }
 })
 
 it('covers every real provider/official-client/stdio import and records canonical ESM entrypoints', () => {
@@ -339,7 +360,7 @@ it('keeps provisioning backend-only after setup and before the durable action/he
   const workflow = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
   const steps = workflow.jobs.backend.steps
   const setup = steps.findIndex(step => step.uses === './.github/actions/setup-pnpm')
-  const provision = steps.findIndex(step => step.run === 'node scripts/ci-backend-dependencies.mjs')
+  const provision = steps.findIndex(step => step.run === 'node scripts/ci/ci-backend-dependencies.mjs')
   const action = steps.findIndex(step => step.uses === './.github/actions/backend-durable-evidence')
   assert.ok(setup < provision && provision < action)
   assert.equal(steps[provision].if, 'inputs.ci-diagnostic == \'backend\'')

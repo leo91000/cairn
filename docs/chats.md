@@ -1,6 +1,6 @@
 # Agent and project chats
 
-The composer lets you choose **Codex** or **Claude Code** per message. Changing providers preserves the same chat and files, and starts a fresh native session with the visible conversation context. Queued messages retain their provider; the current turn finishes before a switch. See [Claude Code](CLAUDE-CODE.md) for context limits and recovery behavior.
+The composer lets you choose **Codex**, **Claude Code**, **OpenCode** or **Antigravity** per message. Changing coding agents preserves the same chat and files, and starts a fresh native session with the visible conversation context. Queued messages retain their coding agent; the current turn finishes before a switch. See [Claude Code](CLAUDE-CODE.md) for context limits and recovery behavior.
 
 Agents can now publish [persistent deliverables](DELIVERABLES.md): screenshots, videos, audio, PDFs, Markdown, code and downloadable files. Open a card beside a response, or **Files** for the complete gallery. Versions, image comparison and a mobile fullscreen reader remain available after the VM stops.
 
@@ -74,6 +74,8 @@ proposes an approach without changing anything. Each such message shows a **Plan
 badge. The proposal appears as a **Proposed plan** card; **Implement** on the latest
 one queues an ordinary message in the same conversation, which runs with the agent's
 usual permissions. Turning **Plan** off and writing a message does the same.
+Historical proposals without an authored request ID remain visible. Ask for a
+fresh Plan proposal before approving one.
 
 A selected or saved Plan choice is never silently converted to an ordinary request. If the current engine cannot run Plan (OpenCode), sending is blocked until you choose Codex, Claude Code or Antigravity, or explicitly turn Plan off. The same rule applies after restoring a draft or switching engines.
 
@@ -100,13 +102,13 @@ qualification of each engine release.
 
 Type `$` in the composer to list the skills this chat can use: global skills and those of the chat's project that the agent is allowed to access (all accessible projects when the chat has no project). The list filters as you type, matching the name first, then word starts, substrings, letters in order and the description. Each suggestion shows the name, description and Global/project scope. On the web, ↑/↓ move, Enter or Tab inserts and Escape dismisses; clicking works too. On Android, tap a suggestion; Back dismisses the list. The chosen skill is inserted as `$name ` and highlighted in the draft and in sent messages.
 
-The message is stored and displayed exactly as typed. When a reply starts, or a message steers the current turn, the server finds `$name` tokens that match a skill in the run (outside inline and fenced code, not after a letter, `$` or backslash) and appends an `<invoked_skills>` block. That block tells Codex or Claude Code to follow those skills' `SKILL.md` for the request. Tokens like `$HOME`, `$5` or unknown names are left unchanged. The same rules are implemented in `crates/installation/src/skills.rs`, `apps/web/src/skill-mentions.ts` and `SkillMentions.kt`.
+The message is stored and displayed exactly as typed. When a reply starts, or a message steers the current turn, the server finds `$name` tokens that match a skill in the run (outside inline and fenced code, not after a letter, `$` or backslash) and appends an `<invoked_skills>` block. That block tells Codex or Claude Code to follow those skills' `SKILL.md` for the request. Tokens like `$HOME`, `$5` or unknown names are left unchanged. The same rules are implemented in `crates/installation/src/skills/mod.rs`, `apps/web/src/skill-mentions.ts` and `SkillMentions.kt`.
 
 ## Execution and recovery
 
 All executions, including missions, use the chat protocol. Codex uses app-server `thread/start`, `thread/resume`, `turn/start` and `turn/steer`, tested against Codex 0.154.0. Steering includes the active `expectedTurnId`. If that turn has already finished, the message remains pending for the next turn.
 
-`Chats` owns durable user messages and dispatch. `Worker` owns account selection, project locks, timeout budgets, restart fencing and execution. `chat-process.ts` adapts app-server notifications to the shared Activity artifact format. Each active reply has a supervised process; idle chats hold no account or worker slot. Restricted agents run the same adapter inside the isolated container, with a read-only inbox containing only that run's steering messages.
+`Chats` owns durable user messages and dispatch. `Worker` owns account selection, project locks, timeout budgets, restart fencing and execution. The Rust coding-agent adapters map engine notifications to the shared Activity format. Each active reply has a supervised process; idle chats hold no account or worker slot. Restricted agents run the same adapter inside the isolated environment, with a read-only inbox containing only that run's steering messages.
 
 Messages use client-generated IDs. Requests can be retried without duplicating submissions. On recovery, Codex's persisted user-message client IDs reconcile accepted messages, using paginated turn history when required. A completed saved reply is recovered without another model turn. Interrupted replies continue with the existing workspace and conversation. After a failed or stopped turn, the messages a person wrote that the agent never received come back to their composer; the next message starts a new turn in the same workspace. Messages from rules and agents stay queued behind a pause, as before, and after a failure rules wait until a person starts the next turn. Usage exhaustion follows the existing account failover path.
 
@@ -145,7 +147,7 @@ contract and examples](USER-QUESTIONS.md) and [ADR-0074](adr/0074-common-agent-q
 
 ## Side questions
 
-While Claude Code works on a reply, you can ask a quick explanatory question
+While Claude Code, Codex or Antigravity works on a reply, you can ask a quick explanatory question
 without steering it. On the web, use the quote icon in an agent reply's header
 (**Ask about this reply**) or select a passage in the reply and choose **Ask about
 selection**. On Android, use the **Poser une question à côté** icon or **Demander à côté**
@@ -165,12 +167,14 @@ withdrawn; cancellation is best effort and cannot undo effects already performed
 | Coding agent | Side questions |
 | --- | --- |
 | Claude Code | The streaming CLI's `side_question` control request (the same one as `/btw`), with best-effort withdrawal using `control_cancel_request`. Claude Code denies every tool before it could run, answers in one response from the live conversation (an unfinished tool call is marked as still in progress) and skips its transcript. It still runs `PreToolUse` hooks before that denial; Cairn configures none and ignores user and project settings, so only an operator's managed-policy hooks could run. |
-| Codex | Unavailable. Its side conversations (`thread/fork`) keep tools Cairn cannot remove before the model runs, such as code-mode shell commands and subagents, and stopping a fork once a tool starts does not undo its effect ([ADR-0081](adr/0081-native-side-questions.md)). |
+| Codex | The app-server's `thread/sample` (Codex 0.172.0 or later): one response sampled from a copy of the running turn once Codex has recorded its request, withdrawn with `thread/sample/cancel`. A tool call the model attempts there never runs: the question fails instead. A web search enabled for the agent can still run, read-only, on OpenAI's servers within that response. The sample is not written to the thread. Its `/side` conversations (`thread/fork`) keep their tools and stay unused ([ADR-0093](adr/0093-engine-side-questions.md)). |
+| Antigravity | A private copy of the saved conversation resumed with every tool refused, then deleted. It answers from the conversation recorded up to the last finished step. |
 | OpenCode | Unavailable: it has no side mechanism. |
 
-Codex and OpenCode conversations never offer the action, nor does a Claude reply
-that is starting, stopping or compacting, one run by a Claude Code release other than
-2.1.308, or a conversation between replies. The
+OpenCode conversations never offer the action, nor does a reply that is starting,
+stopping or compacting, one run by a Claude Code release before 2.1.308 or a Codex
+release before 0.172.0, or a conversation between replies. CI qualifies the Claude Code
+and Codex releases each build ships ([ADR-0093](adr/0093-engine-side-questions.md)). The
 side-question panel, when its earlier questions open it, and the API and tools
 (`sideQuestionReason`) say why. No second coding agent with write access is started,
 and the conversation's own transcript never contains the side question.

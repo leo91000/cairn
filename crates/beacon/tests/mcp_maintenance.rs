@@ -6,7 +6,12 @@ use serde_json::json;
 
 #[tokio::test]
 async fn rotating_ipv6_addresses_in_one_prefix_cannot_bypass_client_registration_limits() {
-    let app = Fixture::with_network(Default::default(), 5, "127.0.0.1".parse().unwrap()).await;
+    let app = Fixture::with_network(
+        cairn_beacon::OAuthProviders::default(),
+        5,
+        "127.0.0.1".parse().unwrap(),
+    )
+    .await;
 
     for attempt in 0..11 {
         let response = app
@@ -47,7 +52,12 @@ async fn rotating_ipv6_addresses_in_one_prefix_cannot_bypass_client_registration
 
 #[tokio::test]
 async fn beacon_login_claim_and_token_quotas_share_each_ipv6_prefix() {
-    let app = Fixture::with_network(Default::default(), 5, "127.0.0.1".parse().unwrap()).await;
+    let app = Fixture::with_network(
+        cairn_beacon::OAuthProviders::default(),
+        5,
+        "127.0.0.1".parse().unwrap(),
+    )
+    .await;
     let cases = [
         (
             "/api/account/email-code",
@@ -118,10 +128,10 @@ async fn ipv4_mapped_addresses_and_untrusted_headers_cannot_select_fresh_buckets
         let proxies = if trusted_proxy {
             "127.0.0.1".parse().unwrap()
         } else {
-            Default::default()
+            cairn_beacon::TrustedProxies::default()
         };
 
-        let app = Fixture::with_network(Default::default(), 5, proxies).await;
+        let app = Fixture::with_network(cairn_beacon::OAuthProviders::default(), 5, proxies).await;
 
         for attempt in 0..11 {
             let forwarded = if trusted_proxy {

@@ -7,7 +7,7 @@ import {
   vi,
 } from 'vitest'
 import { parse } from 'yaml'
-import { verifyInstallation } from '../production-release.mjs'
+import { verifyInstallation } from '../release/production-release.mjs'
 
 const image = `ghcr.io/owner/cairn@sha256:${'b'.repeat(64)}`
 const now = 1000000
@@ -43,8 +43,8 @@ describe('production release', () => {
     const workflow = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
     const steps = workflow.jobs.deploy.steps
     const upload = steps.findIndex(step => step.uses?.startsWith('actions/upload-artifact@'))
-    const deploy = steps.findIndex(step => step.run === 'node scripts/deploy-coolify.mjs')
-    const verify = steps.findIndex(step => step.run === 'node scripts/production-release.mjs verify')
+    const deploy = steps.findIndex(step => step.run === 'node scripts/release/deploy-coolify.mjs')
+    const verify = steps.findIndex(step => step.run === 'node scripts/release/production-release.mjs verify')
     expect(upload).toBe(-1)
     expect(deploy).toBeGreaterThan(-1)
     expect(verify).toBeGreaterThan(deploy)
@@ -53,6 +53,6 @@ describe('production release', () => {
     expect(workflow.jobs.deploy.concurrency['cancel-in-progress']).toBe(false)
     const quality = workflow.jobs.backend.steps.map(step => step.run ?? '').join('\n')
     expect(quality).toContain('set -o pipefail')
-    expect(quality).toContain('node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level all 2>&1 | tee backend-tests.log')
+    expect(quality).toContain('node scripts/dev/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level all 2>&1 | tee backend-tests.log')
   })
 })

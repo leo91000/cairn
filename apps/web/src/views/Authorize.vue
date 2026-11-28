@@ -1,42 +1,136 @@
 <script setup lang="ts">
+import type { IconName } from '../icons'
 import type { SelectOption } from '../select'
-import { computed, onMounted, ref } from 'vue'
+import {
+  computed,
+  onMounted,
+  ref,
+} from 'vue'
 import { api, redirect } from '../api'
 import AccountConfirmation from '../components/AccountConfirmation.vue'
+import AuthStage from '../components/AuthStage.vue'
+import BrandWordmark from '../components/BrandWordmark.vue'
 import Icon from '../components/Icon.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
-import { ShieldCheck } from '../icons'
+import {
+  Eye,
+  Link,
+  Lock,
+  Monitor,
+  Pencil,
+  ShieldCheck,
+  Terminal,
+  TriangleAlert,
+} from '../icons'
+
+const props = defineProps<{ email?: string, currentInstallationId?: string }>()
+const email = computed(() => props.email || '')
 
 const parameters = Object.fromEntries(new URLSearchParams(location.search))
-const details = ref<any>()
-const redirectHost = computed(() => details.value?.client.redirect_uri ? new URL(details.value.client.redirect_uri).host : '')
+const details = ref<{
+  client: { client_id: string, client_name: string, redirect_uri: string }
+  scopes: string[]
+  installations: Array<{ id: string, name: string, online: boolean }>
+  confirmationRequired?: boolean
+}>()
+const redirectUrl = computed(() => {
+  try {
+    return details.value?.client.redirect_uri ? new URL(details.value.client.redirect_uri) : null
+  }
+  catch {
+    return null
+  }
+})
+const isLocalRedirect = computed(() => {
+  const host = redirectUrl.value?.hostname ?? ''
+  return redirectUrl.value?.protocol === 'http:'
+    && ['localhost', '127.0.0.1', '[::1]'].includes(host)
+})
+const clientInitial = computed(() => {
+  const match = (details.value?.client.client_name ?? '').trim().match(/[\p{L}\p{N}]/u)
+  return (match?.[0] ?? 'M').toUpperCase()
+})
+const accountInitial = computed(() => {
+  const local = email.value.split('@')[0] ?? ''
+  const match = local.match(/[\p{L}\p{N}]/u)
+  return (match?.[0] ?? 'C').toUpperCase()
+})
+const loading = ref(true)
 const error = ref('')
 const busy = ref(false)
 const installationId = ref('')
-const installationOptions = computed<SelectOption[]>(() => (details.value?.installations ?? []).map((item: { id: string, name: string, online: boolean }) => ({
+
+// Default to the installation the account last used, as Android defaults to its current one.
+function defaultInstallation() {
+  const choices = details.value?.installations ?? []
+  return choices.find(item => item.id === props.currentInstallationId)?.id || choices[0]?.id || ''
+}
+
+const installationOptions = computed<SelectOption[]>(() => (details.value?.installations ?? []).map(item => ({
   value: item.id,
   label: item.name,
   status: { label: item.online ? 'Online' : 'Offline', tone: item.online ? 'success' : 'muted' },
 })))
 const confirmingIdentity = ref(false)
+const confirmationRequired = ref(false)
 const endpoint = '/mcp/oauth'
+
+interface ScopePresentation {
+  title: string
+  description: string
+  icon: IconName
+  elevated: boolean
+}
+
+function presentScope(scope: string): ScopePresentation {
+  if (scope === 'read') {
+    return {
+      title: 'Read',
+      description: 'Read tasks, profiles, skills, and run results',
+      icon: Eye,
+      elevated: false,
+    }
+  }
+
+  if (scope === 'run') {
+    return {
+      title: 'Full execution',
+      description: 'Start and cancel tasks in YOLO mode with full access on the worker',
+      icon: Terminal,
+      elevated: true,
+    }
+  }
+
+  return {
+    title: 'Manage',
+    description: 'Create, edit, and delete installation data, and configure agent access and integrations',
+    icon: Pencil,
+    elevated: false,
+  }
+}
+
 onMounted(async () => {
   try {
     details.value = await api(`${endpoint}/preview`, {
       method: 'POST',
       body: JSON.stringify(parameters),
     })
-    installationId.value = details.value.installations?.[0]?.id || ''
+    installationId.value = defaultInstallation()
+    confirmationRequired.value = Boolean(details.value?.confirmationRequired)
   }
   catch (e) {
     error.value = (e as Error).message
+  }
+  finally {
+    loading.value = false
   }
 })
 
 async function consent(approved: boolean) {
   busy.value = true
+  error.value = ''
   try {
     const result = await api(`${endpoint}/consent`, {
       method: 'POST',
@@ -45,71 +139,218 @@ async function consent(approved: boolean) {
     redirect(result.redirect)
   }
   catch (e) {
-    error.value = (e as Error).message
+    const message = (e as Error).message
+    error.value = message
+    if (/confirm your identity/i.test(message))
+      confirmationRequired.value = true
     busy.value = false
   }
+}
+
+function handleConfirmed() {
+  confirmingIdentity.value = false
+  confirmationRequired.value = false
+  error.value = ''
 }
 </script>
 
 <template>
-  <section class="panel bg-surface border border-line rounded-card overflow-hidden consent-card max-w-147.5 p-10 mx-auto my-[35px] phone:p-[25px] phone:mx-auto phone:my-2.5">
-    <AccountConfirmation
-      v-if="confirmingIdentity"
-      title="Confirm identity before granting access to this assistant"
-      return-label="Back to consent"
-      @close="confirmingIdentity = false"
-      @confirmed="confirmingIdentity = false; error = ''"
-    />
-    <div v-show="!confirmingIdentity">
-      <span class="empty-icon grid place-items-center w-16 h-16 rounded-[19px] bg-surface text-muted mb-5.5 border border-line"><Icon :name="ShieldCheck" :size="30" /></span>
-      <h1>Connect an assistant</h1>
-      <UiAlert v-if="error">
+  <AuthStage
+    max-width="md"
+    label="Connect an assistant"
+    :busy="busy || loading"
+  >
+    <template #header>
+      <BrandWordmark class="origin-left scale-[0.88]" />
+      <span
+        v-if="email"
+        :title="`Signed in as ${email}`"
+        class="inline-flex max-w-[60%] items-center gap-2 rounded-full border border-line bg-surface py-1 pr-3 pl-1.5 text-xs font-medium text-muted"
+      >
+        <span class="grid size-5.5 shrink-0 place-items-center rounded-full bg-soft text-[11px] font-bold text-accent" aria-hidden="true">{{ accountInitial }}</span>
+        <span class="truncate">{{ email }}</span>
+      </span>
+    </template>
+
+    <div class="grid gap-5">
+      <div class="flex flex-col items-center text-center">
+        <div class="mb-4 flex items-center justify-center gap-3.5" aria-hidden="true">
+          <span
+            class="grid size-13 place-items-center rounded-[15px] border border-line bg-inset font-heading text-xl font-bold text-ink shadow-sm"
+          >
+            {{ details ? clientInitial : 'M' }}
+          </span>
+          <span class="flex items-center gap-1.5 text-muted">
+            <span class="size-1 rounded-full bg-control" />
+            <span class="size-1 rounded-full bg-control" />
+            <span class="grid size-7 place-items-center rounded-full border border-line bg-inset">
+              <Icon :name="Link" :size="14" />
+            </span>
+            <span class="size-1 rounded-full bg-control" />
+            <span class="size-1 rounded-full bg-control" />
+          </span>
+          <span class="grid size-13 place-items-center rounded-[15px] border border-line bg-inset">
+            <img class="cairn-mark-light size-7" src="/brand/cairn-symbol.svg" alt="">
+            <img class="cairn-mark-dark size-7" src="/brand/cairn-symbol-dark.svg" alt="">
+          </span>
+        </div>
+
+        <h1 class="font-heading text-[22px] font-bold tracking-tight">
+          Connect an assistant
+        </h1>
+        <p v-if="details" class="mt-1.5 text-sm text-muted">
+          <strong class="font-semibold text-ink">{{ details.client.client_name }}</strong>
+          is requesting MCP access to one Cairn installation.
+        </p>
+        <p v-else-if="loading" role="status" class="mt-1.5 text-sm text-muted">
+          Loading authorization request…
+        </p>
+      </div>
+
+      <UiAlert v-if="error" class="my-0!">
         {{ error }}
       </UiAlert>
+
       <template v-if="details">
-        <p>
-          <strong>{{ details.client.client_name }}</strong> is requesting access
-          to one Cairn installation.
-        </p>
-        <p>Redirect destination: <strong class="break-all">{{ redirectHost }}</strong></p>
-        <UiAlert>
-          Unverified client. Its name is supplied by the client and has not been checked by Cairn.
-          Continue only if you trust this redirect destination.
-        </UiAlert>
-        <VirtualSelect
-          v-model="installationId"
-          label="Installation"
-          :options="installationOptions"
-          :disabled="busy"
+        <div
+          role="alert"
+          class="rounded-[13px] border border-warning/35 bg-warning-surface/70 p-3.5"
+        >
+          <div class="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+            <span class="inline-flex items-center gap-1.5 text-xs font-bold text-warning">
+              <Icon :name="TriangleAlert" :size="14" />
+              Unverified client
+            </span>
+            <span class="text-[11px] font-medium text-warning/90">
+              Self-declared name · verify destination
+            </span>
+          </div>
+          <div class="min-w-0 rounded-[9px] border border-line bg-surface px-3 py-2">
+            <div class="mb-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
+              <Icon
+                :name="isLocalRedirect ? Monitor : Lock"
+                :size="13"
+                :class="isLocalRedirect ? 'text-accent' : 'text-success'"
+              />
+              <span>Redirect destination</span>
+              <span class="rounded-full border border-line bg-inset px-2 py-0.5 text-[10.5px] font-semibold text-muted">
+                {{ isLocalRedirect ? 'Local app' : 'HTTPS' }}
+              </span>
+            </div>
+            <bdi dir="ltr" class="block font-mono text-xs font-semibold text-ink wrap-anywhere">{{ details.client.redirect_uri }}</bdi>
+          </div>
+          <p class="mt-2 text-2xs leading-relaxed text-warning">
+            Its name is supplied by the client and has not been checked by Cairn. Continue only if you trust this redirect destination.
+          </p>
+        </div>
+
+        <div class="grid gap-1.5">
+          <VirtualSelect
+            v-model="installationId"
+            label="Installation"
+            :options="installationOptions"
+            :disabled="busy"
+          />
+          <p v-if="!details.installations.length" class="text-xs text-muted">
+            Add an installation before granting access.
+          </p>
+        </div>
+
+        <div class="grid gap-2">
+          <span class="text-xs font-semibold text-ink">Requested permissions</span>
+          <ul class="divide-y divide-line overflow-hidden rounded-[13px] border border-line bg-inset">
+            <li
+              v-for="scope in details.scopes"
+              :key="scope"
+              class="flex items-start gap-3 px-3.5 py-3"
+              :class="presentScope(scope).elevated ? 'bg-linear-to-r from-coral-soft/75 to-transparent' : ''"
+            >
+              <span
+                class="mt-0.5 grid size-7.5 shrink-0 place-items-center rounded-[9px] border"
+                :class="presentScope(scope).elevated
+                  ? 'border-coral/30 bg-coral-soft text-coral'
+                  : 'border-line bg-surface text-accent'"
+                aria-hidden="true"
+              >
+                <Icon :name="presentScope(scope).icon" :size="15" />
+              </span>
+              <div class="min-w-0 flex-1">
+                <div class="flex flex-wrap items-center gap-2 text-sm font-semibold text-ink">
+                  <span>{{ presentScope(scope).title }}</span>
+                  <span
+                    v-if="presentScope(scope).elevated"
+                    class="rounded-full border border-coral/30 bg-coral-soft px-2 py-0.5 text-[10.5px] font-bold text-coral"
+                  >
+                    Elevated access
+                  </span>
+                </div>
+                <p class="mt-0.5 text-xs leading-relaxed text-muted">
+                  {{ presentScope(scope).description }}
+                </p>
+              </div>
+            </li>
+          </ul>
+        </div>
+
+        <AccountConfirmation
+          v-if="confirmingIdentity"
+          title="Confirm identity before granting access to this assistant"
+          return-label="Cancel confirmation"
+          @close="confirmingIdentity = false"
+          @confirmed="handleConfirmed"
         />
-        <p v-if="!details.installations.length">
-          Add an installation before granting access.
-        </p>
-        <ul class="consent-permissions pr-5 pl-[33px] leading-[2] bg-surface rounded-[9px] text-sm text-muted py-5 mx-0 my-6">
-          <li v-for="scope in details.scopes" :key="scope">
-            {{
-              scope === "read"
-                ? "Read tasks, profiles, skills, and run results"
-                : scope === "run"
-                  ? "Start and cancel tasks in YOLO mode with full access inside a private VM"
-                  : "Create and modify tasks, projects, agents, and skills"
-            }}
-          </li>
-        </ul>
-        <p class="muted text-muted">
-          You can revoke this connection at any time in Settings.
-        </p>
-        <div class="consent-actions flex flex-wrap justify-end gap-3 mt-[25px]">
-          <UiButton :disabled="busy" @click="confirmingIdentity = true">
+        <div
+          v-else-if="confirmationRequired"
+          class="flex flex-wrap items-center justify-between gap-3 rounded-[13px] border border-line bg-inset px-3.5 py-3"
+        >
+          <div class="flex min-w-0 items-start gap-2.5">
+            <Icon :name="ShieldCheck" :size="16" class="mt-0.5 shrink-0 text-accent" />
+            <div class="min-w-0">
+              <p class="text-sm font-semibold text-ink">
+                Identity confirmation required
+              </p>
+              <p class="text-xs text-muted">
+                Verify your session with a passkey or email code before allowing access.
+              </p>
+            </div>
+          </div>
+          <UiButton
+            size="small"
+            class="border-transparent bg-soft text-accent enabled:hover:bg-soft/80"
+            :disabled="busy"
+            @click="confirmingIdentity = true"
+          >
             Confirm identity
           </UiButton>
-          <UiButton :disabled="busy" @click="consent(false)">
-            Deny
-          </UiButton><UiButton variant="primary" :disabled="busy || !installationId" @click="consent(true)">
-            Allow access
-          </UiButton>
+        </div>
+
+        <div
+          v-else
+          class="flex items-center gap-2 rounded-[11px] border border-success/25 bg-success/10 px-3 py-2 text-xs font-semibold text-success"
+        >
+          <Icon :name="ShieldCheck" :size="15" class="shrink-0" />
+          <span>Identity confirmed</span>
+        </div>
+
+        <div class="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
+          <p class="text-xs text-muted">
+            You can revoke this connection at any time in Settings.
+          </p>
+          <div class="flex flex-wrap justify-end gap-2.5 phone:w-full">
+            <UiButton class="phone:flex-1" :disabled="busy || confirmingIdentity" @click="consent(false)">
+              Deny
+            </UiButton>
+            <UiButton
+              variant="primary"
+              class="phone:flex-1"
+              :disabled="busy || confirmationRequired || !installationId"
+              @click="consent(true)"
+            >
+              Allow access
+            </UiButton>
+          </div>
         </div>
       </template>
     </div>
-  </section>
+  </AuthStage>
 </template>

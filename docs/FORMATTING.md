@@ -11,8 +11,8 @@ Install the repository's pinned Node/pnpm and stable Rust toolchain, then run:
 pnpm install --frozen-lockfile
 ```
 
-`scripts/rust-format.mjs` runs the stable rustfmt pinned in `rust-toolchain.toml`,
-then `scripts/rust-spacing.mjs` separates declarations using the Rust syntax tree.
+`scripts/dev/rust-format.mjs` runs the stable rustfmt pinned in `rust-toolchain.toml`,
+then `scripts/dev/rust-spacing.mjs` separates declarations using the Rust syntax tree.
 Comments and attributes stay attached to their declarations, and compact groups
 of imports, module declarations, and single-line constants stay together. It
 does not edit function statements or macro bodies. The parser dependencies are
@@ -24,7 +24,7 @@ it also adds spacing inside blocks and between attributes and their declarations
 | Scope | Apply fixes | Check only |
 | --- | --- | --- |
 | Rust + web + scripts/tests | `pnpm lint:fix` | `pnpm lint` |
-| Rust only | `pnpm format:rust` | `node scripts/rust-format.mjs --check` |
+| Rust only | `pnpm format:rust` | `node scripts/dev/rust-format.mjs --check` |
 | Kotlin + Gradle Kotlin scripts | `pnpm format:android` | `pnpm lint:android` |
 
 Android formatting uses Spotless and ktfmt, pinned in `apps/android/build.gradle.kts`.

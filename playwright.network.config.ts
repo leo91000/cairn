@@ -1,6 +1,6 @@
 import process from 'node:process'
 import { defineConfig } from '@playwright/test'
-import { isolateTestCredentials } from './scripts/test-environment.mjs'
+import { isolateTestCredentials } from './scripts/dev/test-environment.mjs'
 
 isolateTestCredentials()
 

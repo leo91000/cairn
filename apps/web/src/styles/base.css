@@ -132,6 +132,43 @@ input:disabled {
   background: light-dark(#f1f0f7, var(--dark-inset));
   color: light-dark(#9391aa, var(--dark-subtle));
 }
+.auth-stage label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+.auth-stage label small {
+  color: var(--color-muted);
+}
+.auth-stage input,
+.auth-stage textarea,
+.auth-stage select {
+  border-color: var(--color-control);
+  border-radius: 10px;
+  padding: 11px 13px;
+  background: var(--color-inset);
+  color: var(--color-ink);
+  font-size: 13.5px;
+  transition:
+    border-color 0.15s,
+    background-color 0.15s,
+    box-shadow 0.15s;
+}
+.auth-stage input:focus,
+.auth-stage textarea:focus,
+.auth-stage select:focus {
+  border-color: var(--color-accent);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-focus);
+}
+.auth-stage input::placeholder,
+.auth-stage textarea::placeholder {
+  color: var(--color-subtle);
+}
+.auth-stage input:disabled {
+  background: var(--color-variant);
+  color: var(--color-subtle);
+}
 textarea {
   resize: vertical;
   min-height: 70px;

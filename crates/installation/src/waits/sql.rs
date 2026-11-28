@@ -458,14 +458,3 @@ impl Db<'_> {
         Ok(())
     }
 }
-
-/// Preserve all existing condition positions and observations when adding
-/// environment-owned job conditions; no existing wakeup is reinterpreted.
-pub(crate) fn upgrade_jobs(tx: &rusqlite::Transaction<'_>) -> Result<()> {
-    tx.execute_batch("ALTER TABLE wait_conditions RENAME TO wait_conditions_before_jobs;")?;
-    let start = SCHEMA.find("CREATE TABLE wait_conditions(").unwrap();
-    let end = SCHEMA[start..].find(") WITHOUT ROWID;").unwrap() + start + ") WITHOUT ROWID;".len();
-    tx.execute_batch(&SCHEMA[start..end])?;
-    tx.execute_batch("INSERT INTO wait_conditions SELECT * FROM wait_conditions_before_jobs; DROP TABLE wait_conditions_before_jobs;")?;
-    Ok(())
-}

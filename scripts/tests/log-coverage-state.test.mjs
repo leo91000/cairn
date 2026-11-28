@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { applyLogCoverage, validateLogCoverage } from '../log-coverage.mjs'
+import { applyLogCoverage, validateLogCoverage } from '../ops/log-coverage.mjs'
 
 const since = '2026-10-31T10:24:19.000Z'
 const until = '2026-10-31T10:25:29.000Z'

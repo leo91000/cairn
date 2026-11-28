@@ -1,7 +1,5 @@
 # Native terminal reasons outside the ordinary output journal
 
-Date: 2026-11-03.
-
 ## Contract
 
 Native output keeps its cumulative 64 MiB encoded-log limit and controller exit
@@ -51,36 +49,21 @@ the private directory/file modes, malformed and oversized records, symlinks,
 forged child output, metadata-write failure, and idempotent reading after opening
 another controller handle.
 
-The regular backend job runs the ignored metadata measurement below as a separate
-step, after the bootstrap observer. The source tests, hosted exact-head validation,
-native physical-finalization qualification and current-head measurement remain
-pending until their respective checks complete. Do not treat formatting or static
-inspection as a substitute for those checks.
-
-### Historical regression evidence
-
-On the earlier implementation branch, hosted run
-[41266578064](https://github.com/leo91000/cairn/actions/runs/41266578064) ran the
-actual output guard, completion-error helper, authenticated wait/client and Store
-reconciliation. It failed because the saved error was empty after the status-70
-assertion passed. The historical RED test was authored against baseline
-`93b0ab0012a5947e2a2197219111bf8029c3b5dd`; it establishes the original failure
-only. It does not validate this port on current base
-`4e5667a6a9b238095db1f8d13752c3cef4855018`.
+The backend job runs the metadata measurement after the bootstrap observer.
 
 ### Reproducible metadata measurement
 
-The reference base has no terminal metadata channel, so its metadata byte count
-is zero by definition and its metadata read/write latency is **inapplicable**,
-not a measured zero. The implementation encodes the fixed metadata record as 32
-bytes. A healthy finalized status-70 result grows from 42 to 81 encoded bytes
-when it carries the reason. The ordinary journal bytes remain unchanged.
+The original status-70 result encoded 42 bytes before the metadata channel was
+introduced. The channel encodes a 32-byte on-disk reason and an 81-byte
+finalized status-70 result. Measure the channel on each revision that includes
+it. Revisions before the channel have zero reason-record bytes and no
+applicable latency or CPU measurement for that record.
 
 The backend job runs this measurement alone with the credential-isolating
 launcher. The same command can be used to reproduce it on an exact candidate:
 
 ```sh
-node scripts/test-backend.mjs -p cairn-installation --lib \
+pnpm test:backend --workspace --lib \
   native::service::terminal_tests::terminal_reason_metadata_measurement \
   -- --exact --ignored --nocapture
 ```
@@ -89,9 +72,8 @@ It records 16 new terminal metadata writes, one first read and 64 repeated reads
 per record. Writes use the production atomic metadata helper, including file and
 parent-directory sync. The output includes per-operation wall times, process CPU,
 OS, architecture, kernel, CPU model, logical CPU count, workload and cache
-conditions. The first read follows the syncing write and is not an OS-cold read;
-filesystem and provider caches are uncontrolled. Record the candidate SHA, CI
-runner and build profile with the emitted JSON. No current-base timing or CPU
-result is claimed until that hosted command runs. These task-owned temporary-file
-measurements are separate from production network latency and native workload
-finalization.
+conditions. The first read follows the syncing write, so the filesystem may
+already have the page cached. Record the measured SHA, CI runner and build
+profile with the emitted JSON.
+These temporary-file measurements describe local IO. Network latency and
+native workload finalization require separate qualification.

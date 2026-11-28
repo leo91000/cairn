@@ -12,7 +12,7 @@ import {
 // The fixture's first reply of a turn, which side questions refer to.
 const reply = 'I’ll trace the component boundaries and keyboard handling'
 
-// Only Claude Code answers side questions. The account belongs to this worker's workspace.
+// Claude Code answers most of these side questions. The account belongs to this worker's workspace.
 test.beforeAll(async ({ workspace }) => {
   const { accounts } = await workspace.api('/api/accounts')
   if (!accounts.some((account: { provider: string }) => account.provider === 'claude'))
@@ -113,9 +113,10 @@ test('asks side questions about a running reply without steering, queuing or rec
   await page.screenshot({ path: test.info().outputPath('side-question-answer-desktop-dark.png'), animations: 'disabled' })
   await page.emulateMedia({ colorScheme: 'light' })
 
-  // Following the answer back to its reply closes the panel; the reply counts it.
+  // Following the answer back to its reply closes the panel and focuses the reply.
   await panel.getByRole('button', { name: 'Show reply' }).click()
   await expect(panel).not.toBeVisible()
+  await expect(message).toBeFocused()
   await expect(message.getByRole('button', { name: 'Show 1 side question about this reply' })).toBeVisible()
 
   // A passage selected in the reply can be asked about too.
@@ -314,20 +315,124 @@ test('links reused native item IDs to the selected reply', async ({ page, worksp
 
 test('retained questions without a reply stay accessible after reopening', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
-  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review. fixture:chat-hang', provider: 'claude' })
+  const messageId = randomUUID()
+  const text = 'Review. fixture:chat-hang'
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: messageId, text, provider: 'claude' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).canAskSideQuestion).toBe(true)
   await workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', { id: randomUUID(), text: 'General question' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).sideQuestions[0]?.status).toBe('answered')
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  await page.getByRole('button', { name: /Side question · Saved/ }).click()
+  const headerButton = page.locator('.chat-header').getByTestId('side-question-button')
+  await expect(headerButton).toHaveAccessibleName('Side question · Saved (1)')
+  await headerButton.focus()
+
+  // The hanging CLI fixture omits the user-message echo. Record the acknowledgement
+  // explicitly so the working row can replace the header button.
+  const { run } = await workspace.api(`/api/chats/${chat.id}`)
+  workspace.service.store.event(run.id, 'chat.user', text, { messageId, text })
+  const workingButton = page.locator('.activity-working').getByTestId('side-question-button')
+  await expect(workingButton).toHaveAccessibleName('Side question · Saved (1)')
+  await expect(workingButton).toBeFocused()
+  await page.screenshot({ path: test.info().outputPath('side-question-working-row.png'), animations: 'disabled' })
+  await workingButton.press('Enter')
   const panel = page.getByRole('dialog', { name: 'Side questions' })
   await expect(panel.getByText('General question', { exact: true })).toBeVisible()
-  await panel.getByRole('button', { name: 'Close dialog' }).click()
-  await page.reload()
-  await page.getByRole('button', { name: /Side question · Saved/ }).click()
-  await expect(panel.getByText('General question', { exact: true })).toBeVisible()
+
+  // When the turn stops with the drawer open, the trigger moves to the header.
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+  await expect(workingButton).toHaveCount(0)
+  await expect(headerButton).toHaveCount(1)
+  await page.keyboard.press('Escape')
+  await expect(panel).toBeHidden()
+  await expect(headerButton).toBeFocused()
+  await page.screenshot({ path: test.info().outputPath('side-question-conversation-header.png'), animations: 'disabled' })
+
+  await page.reload()
+  await headerButton.click()
+  await expect(panel.getByText('General question', { exact: true })).toBeVisible()
+  await panel.getByRole('button', { name: 'Close dialog' }).click()
+
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Open activity fullscreen', exact: true }).click()
+  const fullscreen = page.getByRole('dialog', { name: 'Fullscreen activity' })
+  await expect(fullscreen.getByRole('status').and(page.getByTestId('side-question-status'))).toHaveCount(1)
+  const fullscreenButton = fullscreen.getByTestId('side-question-button')
+  await fullscreenButton.click()
+  await expect(panel.getByText('General question', { exact: true })).toBeVisible()
+  await panel.getByRole('button', { name: 'Close dialog' }).click()
+  await fullscreen.getByRole('button', { name: 'Exit fullscreen', exact: true }).click()
+})
+
+test('keyboard focus returns to the chat menu when the ask icon disappears', async ({ page, workspace }) => {
+  for (const openDrawer of [false, true]) {
+    const chat = await workspace.api('/api/chats', 'POST', {})
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review. fixture:chat-hang', provider: 'claude' })
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const trigger = page.getByTestId('side-question-button')
+    const panel = page.getByRole('dialog', { name: 'Side questions' })
+    await expect(trigger).toHaveAccessibleName('Ask a side question')
+    if (openDrawer) {
+      await trigger.press('Enter')
+      await expect(panel).toBeVisible()
+    }
+    else {
+      await trigger.focus()
+    }
+
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+    await expect(trigger).toHaveCount(0)
+    if (openDrawer) {
+      await page.keyboard.press('Escape')
+      await expect(panel).toBeHidden()
+    }
+
+    await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
+  }
+})
+
+test('moving the side-question icon respects whether the reader follows the latest message', async ({ page, workspace }) => {
+  for (const follow of [false, true]) {
+    const chat = await workspace.api('/api/chats', 'POST', {})
+    const messageId = randomUUID()
+    const text = 'Review. fixture:chat-hang'
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: messageId, text, provider: 'claude' })
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).canAskSideQuestion).toBe(true)
+    try {
+      const { run } = await workspace.api(`/api/chats/${chat.id}`)
+      workspace.service.store.event(run.id, 'item.completed', '', {
+        item: { id: 'long-reply', type: 'agent_message', text: 'A line of earlier history.\n\n'.repeat(85) },
+      })
+      await page.goto(workspacePath(`/chats/${chat.id}`))
+      await authenticateWorkspace(page)
+
+      const scroller = page.getByRole('region', { name: 'Activity output' })
+      await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBeGreaterThan(500)
+      if (!follow) {
+        await scroller.evaluate((element) => {
+          element.scrollTop = 0
+        })
+        await expect(page.getByRole('button', { name: 'Latest messages' })).toBeVisible()
+      }
+
+      await page.locator('.chat-header').getByTestId('side-question-button').focus()
+
+      workspace.service.store.event(run.id, 'chat.user', text, { messageId, text })
+      const workingButton = page.locator('.activity-working').getByTestId('side-question-button')
+      await expect(workingButton).toHaveCount(1)
+      if (follow) {
+        await expect(workingButton).toBeFocused()
+      }
+      else {
+        await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
+        expect(await scroller.evaluate(element => element.scrollTop)).toBe(0)
+      }
+    }
+    finally {
+      await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+    }
+  }
 })
 
 test('a filtered panel leaves hidden answers unread', async ({ page, workspace }) => {
@@ -374,7 +479,7 @@ test('a pending side question can be withdrawn while the reply continues', async
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  // The card's button is named by its visible text.
+  // The icon-only trigger carries its status as its accessible name.
   await page.getByRole('button', { name: /^Side question · Claude Code is answering/ }).click()
   const panel = page.getByRole('dialog', { name: 'Side questions' })
   await expect(panel.getByText('Answering…')).toBeVisible()
@@ -387,18 +492,25 @@ test('a pending side question can be withdrawn while the reply continues', async
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
 })
 
-test('a Codex reply explains that it cannot take side questions', async ({ page, workspace }) => {
+test('a Codex reply answers side questions from its running turn', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review the layout. fixture:chat-hang', provider: 'codex' })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
   const message = page.locator('.activity-message').filter({ hasText: reply })
   await expect(message).toBeVisible()
-  await expect(message.getByRole('button', { name: 'Ask about this reply' })).toHaveCount(0)
+  await message.getByRole('button', { name: 'Ask about this reply' }).click()
+  const panel = page.getByRole('dialog', { name: 'Side questions' })
+  await expect(panel.getByText('Codex answers in a single reply. If it tries to run a tool')).toBeVisible()
+  await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Why trace the boundaries first?')
+  await panel.getByRole('button', { name: 'Ask', exact: true }).click()
+  await expect(panel.getByText('Side answer: Why trace the boundaries first?')).toBeVisible()
+  // The question neither steered nor joined the running turn.
   const detail = await workspace.api(`/api/chats/${chat.id}`)
   expect(detail.run.status).toBe('running')
-  expect(detail.canAskSideQuestion).toBe(false)
-  expect(detail.sideQuestionReason).toContain('Codex cannot answer side questions')
-  await expect(workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', { id: randomUUID(), text: 'Why?' })).rejects.toThrow(/Codex cannot answer/)
+  expect(detail.sideQuestions.map((question: { status: string }) => question.status)).toEqual(['answered'])
+  const events = JSON.stringify(workspace.service.store.events(detail.run.id, 0, 200))
+  for (const side of ['Why trace the boundaries first?', 'Side answer'])
+    expect(events).not.toContain(side)
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
 })

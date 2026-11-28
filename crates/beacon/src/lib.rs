@@ -169,7 +169,7 @@ pub async fn router_with_installation_hosts(
         .max_connections(4)
         .acquire_timeout(std::time::Duration::from_secs(1))
         .connect_lazy_with((*pool.connect_options()).clone());
-    let installer = installer::router(origin.clone());
+    let installer = installer::router(&origin);
     let service = Service {
         pool: pool.clone(),
         sender,

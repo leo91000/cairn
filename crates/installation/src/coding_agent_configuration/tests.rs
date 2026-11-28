@@ -1291,40 +1291,10 @@ async fn next_message_preferences_match_launch_and_opencode_can_inherit_a_qualif
 }
 
 #[tokio::test]
-async fn version_twenty_four_upgrade_preserves_profiles_and_reopens_with_native_documents() {
+async fn store_reopens_with_native_documents_and_plan_defaults() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(root.path()).unwrap();
     let id = store.transaction(|db| agent(db, "codex")).await.unwrap();
-    drop(store);
-    let connection = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
-    connection
-        .execute_batch(
-            "ALTER TABLE chat_messages DROP COLUMN plan;
-             ALTER TABLE chat_questions DROP COLUMN plan;
-             DROP TABLE skill_source_refs;
-             DROP TABLE skill_sources;
-             DROP TABLE artifact_visibility;
-             DROP TABLE artifact_versions;
-             DROP TABLE artifacts;
-             DROP TABLE coding_agent_configurations;
-             DROP TABLE agent_account_access;
-             DROP TABLE background_jobs;
-             PRAGMA user_version=24;",
-        )
-        .unwrap();
-    // A genuine v24 database predates both Plan flags as well as A16 tables.
-    assert!(
-        connection
-            .prepare("SELECT plan FROM chat_messages")
-            .is_err()
-    );
-    assert!(
-        connection
-            .prepare("SELECT plan FROM chat_questions")
-            .is_err()
-    );
-    drop(connection);
-    let store = Store::open(root.path()).unwrap();
     store
         .transaction(move |db| {
             assert!(db.agent(&id.to_string())?.is_some());
@@ -1334,7 +1304,7 @@ async fn version_twenty_four_upgrade_preserves_profiles_and_reopens_with_native_
                     [table],
                     |row| row.get(0),
                 )?;
-                assert_eq!(default, "0", "new Plan flag in {table}");
+                assert_eq!(default, "0", "Plan flag default in {table}");
             }
             change(
                 db,
@@ -1348,10 +1318,17 @@ async fn version_twenty_four_upgrade_preserves_profiles_and_reopens_with_native_
         .unwrap();
     drop(store);
     let store = Store::open(root.path()).unwrap();
-    store.read(move |db| {
-        assert_eq!(parse(Provider::Codex, &view(db, target(Some(id)))?.document)?["model_context_window"], 1000000);
-        Ok(())
-    }).await.unwrap();
+    store
+        .read(move |db| {
+            assert_eq!(
+                parse(Provider::Codex, &view(db, target(Some(id)))?.document)?
+                    ["model_context_window"],
+                1000000
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 /// Local SQLite costs only; cold means a reopened connection with the OS cache warm.

@@ -519,7 +519,7 @@ async fn active_background_build_releases_its_temporary_files_before_foreground_
 }
 
 #[tokio::test]
-#[ignore = "requires the disposable project-quota pool; scripts/qualify-native-quota.mjs"]
+#[ignore = "requires the disposable project-quota pool; scripts/ci/qualify-native-quota.mjs"]
 async fn measure_prepared_native_bases() {
     use rand::{RngCore, SeedableRng};
     use std::{
@@ -781,7 +781,7 @@ async fn measure_prepared_native_bases() {
 
 /// Uses the real quota pool supplied by the disposable qualification launcher.
 #[tokio::test]
-#[ignore = "requires scripts/qualify-native-quota.mjs on its dedicated disposable filesystem"]
+#[ignore = "requires scripts/ci/qualify-native-quota.mjs on its dedicated disposable filesystem"]
 async fn kernel_prepared_base_admission_and_recovery() {
     assert_eq!(
         std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref(),

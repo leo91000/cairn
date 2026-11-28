@@ -1,5 +1,5 @@
 //! Credential-free benchmark of the node inventory used by HTTP, MCP and agents.
-//! Run through scripts/test-backend.mjs with --ignored --nocapture --test-threads=1.
+//! Run through scripts/dev/test-backend.mjs with --ignored --nocapture --test-threads=1.
 mod common;
 
 use cairn_installation::{

@@ -1,13 +1,26 @@
 package build.cairn.app.ui
 
 import android.app.Application
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.input.InputModeManager
+import androidx.compose.ui.platform.LocalInputModeManager
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
@@ -293,18 +306,30 @@ abstract class SideQuestionCases {
                         "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
                     )
                     .assertExists()
+                compose
+                    .onNodeWithText(
+                        "Codex répond en un seul message. S’il tente d’exécuter un outil, comme une commande, l’outil ne s’exécute pas et la question échoue. Une recherche web activée pour l’agent peut quand même s’exécuter sur les serveurs d’OpenAI pendant ce message ; elle est en lecture seule."
+                    )
+                    .assertExists()
                 compose.onNodeWithText("Demander").assertDoesNotExist()
                 // Focused on one reply, only its question shows until the user asks for all.
                 compose.onNodeWithText("Et les tests ?").assertExists()
                 compose.onNodeWithText("Pourquoi cet ordre ?").assertDoesNotExist()
                 compose.onNodeWithText("Tout afficher").performClick()
                 compose.onNodeWithText("Pourquoi cet ordre ?").assertExists()
-                // A Claude Code release too old for side questions says so.
+                // A Codex release too old for side questions says so.
+                unavailable = "codex-release"
+                compose
+                    .onNodeWithText(
+                        "Cette version de Codex ne peut pas répondre aux questions à côté dans Cairn : il faut une version stable, 0.172.0 ou plus récente. Posez-la dans la conversation."
+                    )
+                    .assertExists()
+                // So does a Claude Code release.
                 provider = "claude"
                 unavailable = "claude-release"
                 compose
                     .onNodeWithText(
-                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : seule la version 2.1.308 a été qualifiée. Posez-la dans la conversation."
+                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : il faut une version stable, 2.1.308 ou plus récente. Posez-la dans la conversation."
                     )
                     .assertExists()
                 // A reply that has not offered them yet says so too.
@@ -386,7 +411,7 @@ abstract class SideQuestionCases {
     }
 
     @Test
-    fun theCardSaysWhenAQuestionWasNotAnswered() {
+    fun theButtonAnnouncesUnansweredAndReadyStates() {
         val failed =
             answered.copy(
                 id = "a1b2c3d4-0000-4000-8000-000000000009",
@@ -396,30 +421,121 @@ abstract class SideQuestionCases {
             )
         val side = SideQuestionState().apply { observe(emptyList()) }
         var questions by mutableStateOf(listOf(failed))
+        var rowVisible by mutableStateOf(true)
         compose.setContent {
             CairnTheme {
-                SideQuestionCard(
-                    chat(canAsk = true).copy(status = "idle", sideQuestions = questions),
-                    side,
-                )
+                val chat = chat(canAsk = true).copy(status = "idle", sideQuestions = questions)
+                val status = SideQuestionStatus(chat, side)
+                Box {
+                    SideQuestionAnnouncement(status)
+                    if (rowVisible) SideQuestionButton(chat, side, status = status)
+                }
             }
         }
-        compose.onNodeWithText("Question à côté · Sans réponse").assertExists()
+        val button = compose.onNodeWithTag("side-question-button")
+        val liveRegion = compose.onNodeWithTag("side-question-status")
+        val failure = "Question à côté · Sans réponse (1)"
+        button.assertContentDescriptionEquals(failure)
+        liveRegion.assertContentDescriptionEquals(failure)
+        rowVisible = false
         questions = listOf(failed, answered)
-        compose.onNodeWithText("Question à côté · Réponse prête").assertExists()
+        button.assertDoesNotExist()
+        assertEquals(
+            LiveRegionMode.Polite,
+            liveRegion.fetchSemanticsNode().config[SemanticsProperties.LiveRegion],
+        )
+        liveRegion.assertContentDescriptionEquals(
+            "Question à côté · Réponse prête (1) · Sans réponse (1)"
+        )
     }
 
     @Test
-    fun theCardOffersAGeneralQuestionBeforeAnyReplyOrQuestion() {
+    fun theButtonOffersAGeneralQuestionOnTheWorkingRowBeforeAnyReply() {
         val side = SideQuestionState()
+        var showAction by mutableStateOf(false)
+        val action: @Composable () -> Unit = {
+            SideQuestionButton(
+                chat(canAsk = true).copy(sideQuestions = emptyList()),
+                side,
+            )
+        }
         compose.setContent {
             CairnTheme {
-                SideQuestionCard(chat(canAsk = true).copy(sideQuestions = emptyList()), side)
+                WorkingIndicator(
+                    WorkingStep("Omni travaille", "Dernière étape : Exécuter une commande", 1000L),
+                    modifier = Modifier.testTag("working-row"),
+                    action = if (showAction) action else null,
+                )
             }
         }
-        compose.onNodeWithText("Poser une question à côté").performClick()
+        val workingRow = compose.onNodeWithTag("working-row")
+        val before = workingRow.getBoundsInRoot()
+        showAction = true
+        val after = workingRow.getBoundsInRoot()
+        assertEquals(before.bottom - before.top, after.bottom - after.top)
+        compose.onNodeWithContentDescription("Poser une question à côté").performTouchInput {
+            click()
+        }
         assertTrue(side.open)
         assertEquals("", side.itemId)
+    }
+
+    @Test
+    fun keyboardFocusFollowsTheSideQuestionButtonBetweenPlacements() {
+        val side = SideQuestionState()
+        val working = WorkingStep("Omni travaille", "", null)
+        var placement by mutableStateOf(SideQuestionPlacement.Working)
+        var workingRowVisible by mutableStateOf(true)
+        val fallback = FocusRequester()
+        lateinit var inputMode: InputModeManager
+        compose.setContent {
+            CairnTheme {
+                inputMode = LocalInputModeManager.current
+                val focus = rememberSideQuestionButtonFocus(placement, fallback)
+                val currentChat = chat(canAsk = true)
+                Column {
+                    Box(Modifier.focusRequester(fallback)) {
+                        ActionIcon("Options de la conversation", CairnIcons.More) {}
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    if (placement == SideQuestionPlacement.Header) {
+                        SideQuestionButton(currentChat, side, focus, size = 40.dp)
+                    } else if (workingRowVisible) {
+                        val step =
+                            if (placement == SideQuestionPlacement.Waiting)
+                                working.copy(waiting = listOf("Compilation"))
+                            else working
+                        WorkingIndicator(
+                            step,
+                            action = {
+                                SideQuestionButton(currentChat, side, focus)
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        val button = compose.onNodeWithTag("side-question-button")
+        compose.runOnIdle { assertTrue(inputMode.requestInputMode(InputMode.Keyboard)) }
+        button.performSemanticsAction(SemanticsActions.RequestFocus)
+        button.assertIsFocused()
+        placement = SideQuestionPlacement.Header
+        button.assertIsFocused()
+        placement = SideQuestionPlacement.Working
+        button.assertIsFocused()
+        placement = SideQuestionPlacement.Waiting
+        button.assertIsFocused()
+        placement = SideQuestionPlacement.Working
+        button.assertIsFocused()
+
+        placement = SideQuestionPlacement.Header
+        button.assertIsFocused()
+        compose.runOnIdle {
+            workingRowVisible = false
+            placement = SideQuestionPlacement.Working
+        }
+        button.assertDoesNotExist()
+        compose.onNodeWithContentDescription("Options de la conversation").assertIsFocused()
     }
 
     @Test
@@ -428,11 +544,15 @@ abstract class SideQuestionCases {
         val side = SideQuestionState().apply { observe(listOf(general)) }
         compose.setContent {
             CairnTheme {
-                SideQuestionCard(chat(canAsk = true).copy(sideQuestions = listOf(general)), side)
+                SideQuestionButton(
+                    chat(canAsk = false).copy(sideQuestions = listOf(general)),
+                    side,
+                    size = 40.dp,
+                )
             }
         }
-        compose.onNodeWithText("Questions à côté · Enregistrées").assertExists()
-        compose.onNodeWithTag("side-question-card").performClick()
+        compose.onNodeWithContentDescription("Questions à côté · Enregistrées (1)").assertExists()
+        compose.onNodeWithTag("side-question-button").performClick()
         assertTrue(side.open)
     }
 

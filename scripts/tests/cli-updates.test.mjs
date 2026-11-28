@@ -10,7 +10,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
-import { buildVersions, engines } from '../cli-updates.mjs'
+import { buildVersions, engines } from '../release/cli-updates.mjs'
 
 const claudeVersion = '2.1.311'
 const claudeRelease = `https://registry.npmjs.org/@anthropic-ai/claude-code/${claudeVersion}`
@@ -70,7 +70,7 @@ describe('application image tool versions', () => {
   })
 
   it('shares the oldest Antigravity release its adapter supports', () => {
-    const adapter = readFileSync(new URL('../../crates/installation/src/antigravity/mod.rs', import.meta.url), 'utf8')
+    const adapter = readFileSync(new URL('../../crates/installation/src/coding_agent/antigravity_runtime/mod.rs', import.meta.url), 'utf8')
     expect(adapter).toContain(`pub const MINIMUM: &str = "${engines.antigravity.minimum}";`)
   })
 
@@ -80,7 +80,7 @@ describe('application image tool versions', () => {
   })
 
   it('shares the oldest OpenCode release its adapter supports', () => {
-    const adapter = readFileSync(new URL('../../crates/installation/src/opencode/mod.rs', import.meta.url), 'utf8')
+    const adapter = readFileSync(new URL('../../crates/installation/src/coding_agent/opencode_runtime/mod.rs', import.meta.url), 'utf8')
     expect(adapter).toContain(`pub const MINIMUM: &str = "${engines.opencode.minimum}";`)
   })
 
@@ -89,9 +89,11 @@ describe('application image tool versions', () => {
     const resolve = jobs.resolve.steps.find(step => step.id === 'tools')
     const release = jobs.resolve.steps.find(step => step.id === 'resolve')
     const record = jobs.publish.steps.find(step => step.name === 'Record the validated image')
+    const recordScript = readFileSync(new URL('../ci/record-release-evidence.mjs', import.meta.url), 'utf8')
     const builds = [jobs.image.steps.find(step => step.id === 'build'), jobs['image-cache'].steps.find(step => step.with?.['build-args']?.includes('CODEX_VERSION'))]
-    expect(resolve.run).toBe('node scripts/cli-updates.mjs build-versions')
+    expect(resolve.run).toBe('node scripts/release/cli-updates.mjs build-versions')
     expect(jobs.resolve.steps.indexOf(resolve)).toBeLessThan(jobs.resolve.steps.indexOf(release))
+    expect(record.run).toBe('node scripts/ci/record-release-evidence.mjs')
     for (const [tool, name] of Object.entries({
       codex: 'CODEX_VERSION',
       gh: 'GH_VERSION',
@@ -105,7 +107,7 @@ describe('application image tool versions', () => {
       for (const build of builds)
         expect(build.with['build-args']).toContain(`${name}=${output}\n`)
       expect(record.env[name]).toBe(output)
-      expect(record.run).toContain(`${tool}: process.env.${name}`)
+      expect(recordScript).toContain(`${tool}: process.env.${name}`)
     }
 
     // The image downloads exactly the archive and digest the resolve job read.
@@ -120,12 +122,15 @@ describe('application image tool versions', () => {
     const jobs = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8')).jobs
     const expression = value => `\${{ ${value} }}`
     const served = jobs.resolve.steps.find(step => step.id === 'served')
-    expect(served.run).toBe('node scripts/served-tools.mjs')
+    expect(served.run).toBe('node scripts/release/served-tools.mjs')
     expect(served.env.CAIRN_BEACON_ORIGIN).toBe(expression('vars.CAIRN_BEACON_ORIGIN'))
     // Evidence records the served releases the rollback checks used, or null when
     // production was unknown, which prevents its reuse.
     const record = jobs.publish.steps.find(step => step.name === 'Record the validated image')
-    expect(record.run).toContain(`served: process.env.SERVED_FOUND === 'true' ? { claude: process.env.SERVED_CLAUDE, opencode: process.env.SERVED_OPENCODE } : null`)
+    const recordScript = readFileSync(new URL('../ci/record-release-evidence.mjs', import.meta.url), 'utf8')
+    expect(record.run).toBe('node scripts/ci/record-release-evidence.mjs')
+    expect(recordScript).toContain('process.env.SERVED_FOUND === \'true\'')
+    expect(recordScript).toContain('{ claude: process.env.SERVED_CLAUDE, opencode: process.env.SERVED_OPENCODE }')
     // Reuse compares recorded rollback targets with the release served now.
     const reuse = jobs.resolve.steps.find(step => step.id === 'resolve')
     expect(jobs.resolve.steps.indexOf(served)).toBeLessThan(jobs.resolve.steps.indexOf(reuse))
@@ -145,7 +150,7 @@ describe('application image tool versions', () => {
 
     for (const step of ['OpenCode', 'Claude Code']) {
       const run = qualification.steps.find(candidate => candidate.name === `Qualify the resolved ${step} release against its native adapter`).run
-      expect(run).toMatch(/served=\$\(node scripts\/served-tools\.mjs rollback-target (opencode|claude) /)
+      expect(run).toMatch(/served=\$\(node scripts\/release\/served-tools\.mjs rollback-target (opencode|claude) /)
     }
 
     const opencode = qualification.steps.find(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')
@@ -170,7 +175,7 @@ describe('application image tool versions', () => {
       ANTIGRAVITY_SHA512: expression('needs.resolve.outputs.antigravity-sha512'),
     })
     expect(antigravity.run).toContain('sha512sum --check -')
-    expect(antigravity.run).toContain('node scripts/test-backend.mjs -p cairn-installation --test antigravity -- --ignored')
+    expect(antigravity.run).toContain('node scripts/dev/test-backend.mjs -p cairn-installation --test antigravity -- --ignored')
     expect(antigravity.run).toContain('ANTIGRAVITY_NATIVE_BIN="$directory/bin/agy"')
     // Images require both the backend workload and its separate CLI qualifications.
     for (const name of ['backend', 'cli-qualification']) {
@@ -196,7 +201,7 @@ describe('application image tool versions', () => {
 
   it('deploys a release only while production serves what its rollback checks used', () => {
     const jobs = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8')).jobs
-    const guard = jobs.deploy.steps.findIndex(step => step.run === 'node scripts/served-tools.mjs verify-served')
+    const guard = jobs.deploy.steps.findIndex(step => step.run === 'node scripts/release/served-tools.mjs verify-served')
     const deploy = jobs.deploy.steps.findIndex(step => step.name === 'Deploy the published image and verify the running commit')
     expect(guard).toBeGreaterThan(0)
     expect(guard).toBeLessThan(deploy)
@@ -297,7 +302,7 @@ describe('build-versions command', () => {
   const run = (args, env = {}, setup = preload) => spawnSync(process.execPath, [
     '--import',
     `data:text/javascript,${encodeURIComponent(setup)}`,
-    'scripts/cli-updates.mjs',
+    'scripts/release/cli-updates.mjs',
     ...args,
   ], { encoding: 'utf8', env: { ...process.env, ...env }, timeout: 10000 })
 

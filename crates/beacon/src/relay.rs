@@ -536,7 +536,7 @@ async fn serve_socket(
                 }
                 break;
             },
-            _ = async {
+            () = async {
                 match expiry {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
                     None => futures_util::future::pending::<()>().await,
@@ -588,7 +588,7 @@ async fn serve_socket(
                     break;
                 }
             }
-            _ = tunnel.access_changed.notified() => {
+            () = tunnel.access_changed.notified() => {
                 let revocations: Vec<_> = tunnel.access.lock().unwrap()
                     .direct_revocations.drain(..).collect();
                 for scope in revocations {
@@ -694,9 +694,8 @@ async fn serve_socket(
                 }
             }
             Some(frame) = controls.recv() => {
-                let id = match &frame {
-                    Frame::Cancel { id } | Frame::StreamCredit { id } => id,
-                    _ => continue,
+                let (Frame::Cancel { id } | Frame::StreamCredit { id }) = &frame else {
+                    continue;
                 };
                 if !pending.contains_key(id) {
                     continue;

@@ -27,7 +27,7 @@ import {
   parseProcStat,
   SAMPLE_OFFSETS_MS,
   startObservation,
-} from '../android-action-observer.mjs'
+} from '../android/android-action-observer.mjs'
 
 const repositoryRoot = fileURLToPath(new URL('../..', import.meta.url))
 const workflow = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))

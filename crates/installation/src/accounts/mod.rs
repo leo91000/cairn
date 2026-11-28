@@ -9,7 +9,6 @@ pub mod broker;
 pub mod claude;
 pub mod codex;
 pub(crate) mod lenient;
-pub(crate) mod migration;
 pub mod opencode;
 pub(crate) mod output_redactions;
 mod record;

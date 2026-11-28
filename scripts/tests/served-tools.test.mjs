@@ -15,7 +15,7 @@ import {
   rollbackTargets,
   servedTools,
   verifyServed,
-} from '../served-tools.mjs'
+} from '../release/served-tools.mjs'
 
 const digestOf = body => `sha256:${createHash('sha256').update(body).digest('hex')}`
 
@@ -117,7 +117,7 @@ describe('served-tools command', () => {
       for (const [refType, status] of [['branch', 0], ['tag', 1]]) {
         writeFileSync(output, '')
         const { CAIRN_BEACON_ORIGIN: _, ...env } = process.env
-        const result = spawnSync(process.execPath, ['scripts/served-tools.mjs'], { encoding: 'utf8', env: { ...env, GITHUB_OUTPUT: output, GITHUB_REF_TYPE: refType }, timeout: 10000 })
+        const result = spawnSync(process.execPath, ['scripts/release/served-tools.mjs'], { encoding: 'utf8', env: { ...env, GITHUB_OUTPUT: output, GITHUB_REF_TYPE: refType }, timeout: 10000 })
         expect(result.status).toBe(status)
         expect(readFileSync(output, 'utf8')).toBe('found=false\nclaude=\nopencode=\n')
       }

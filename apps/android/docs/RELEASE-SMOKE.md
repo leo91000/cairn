@@ -32,8 +32,8 @@ From the repository root:
 
 ```sh
 (cd apps/android && mise exec -- ./gradlew :app:assembleRelease :release-smoke:assembleDebug --no-daemon)
-node scripts/android-release-smoke.mjs guard apps/android/app/build/outputs/apk/release/app-release-unsigned.apk
-ANDROID_SERIAL=emulator-5580 node scripts/android-release-smoke.mjs run \
+node scripts/android/android-release-smoke.mjs guard apps/android/app/build/outputs/apk/release/app-release-unsigned.apk
+ANDROID_SERIAL=emulator-5580 node scripts/android/android-release-smoke.mjs run \
   apps/android/app/build/outputs/apk/release/app-release-unsigned.apk \
   apps/android/release-smoke/build/outputs/apk/debug/release-smoke-debug.apk \
   /tmp/cairn-release-smoke-fixed
@@ -44,7 +44,7 @@ The published faulty APK is also a stable negative control:
 ```sh
 gh release download v0.53.0 --repo leo91000/cairn --pattern cairn-android.apk --dir /tmp/cairn-r8-negative
 # SHA-256: 5702c4bde7738248726d58e09ad4deaa094654cfd2dcc9913189fe2e6bc85a02
-ANDROID_SERIAL=emulator-5580 node scripts/android-release-smoke.mjs run \
+ANDROID_SERIAL=emulator-5580 node scripts/android/android-release-smoke.mjs run \
   /tmp/cairn-r8-negative/cairn-android.apk \
   apps/android/release-smoke/build/outputs/apk/debug/release-smoke-debug.apk \
   /tmp/cairn-release-smoke-broken

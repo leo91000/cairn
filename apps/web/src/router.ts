@@ -7,6 +7,7 @@ import {
 } from './api'
 import {
   accountSettingsUrl,
+  beaconOrigin,
   centralAccount,
   installationSubdomains,
   installationUrl,
@@ -21,7 +22,7 @@ export function workspaceRouter(base = '/') {
       { path: '/atelier', component: () => import('./views/Atelier.vue') },
       { path: '/chats/:id?', component: () => import('./views/Chats.vue') },
       { path: '/plugins', component: () => import('./views/Plugins.vue') },
-      { path: '/plugins/oauth/callback', component: () => import('./views/PluginOAuthCallback.vue') },
+      { path: '/plugins/oauth/callback', component: () => import('./views/PluginOAuthCallback.vue'), props: { embedded: true } },
       { path: '/plugins/:id', component: () => import('./views/PluginGeneric.vue') },
       { path: '/mcps', component: () => import('./views/Mcps.vue') },
       { path: '/mcps/callback', component: () => import('./views/McpCallback.vue') },
@@ -51,7 +52,20 @@ export function workspaceRouter(base = '/') {
       { path: '/nodes', component: () => import('./views/Nodes.vue') },
       { path: '/settings/:section(account|installation|sensitive)?', component: () => import('./views/Settings.vue') },
       { path: '/settings/coding-agents/:provider(codex|claude|opencode|antigravity)', component: () => import('./views/CodingAgentConfiguration.vue') },
-      { path: '/authorize', component: () => import('./views/Authorize.vue') },
+      // Consent belongs to the account, not an installation: Beacon's page shows the signed-in
+      // account and the installation it last used.
+      {
+        path: '/authorize',
+        component: { render: () => null },
+        beforeEnter: (to) => {
+          const target = new URL(to.fullPath, beaconOrigin)
+          // Beacon's own page renders consent itself; only leave an installation's copy.
+          if (target.origin === window.location.origin && target.pathname === window.location.pathname)
+            return true
+          redirect(target.href)
+          return false
+        },
+      },
       { path: '/:pathMatch(.*)*', redirect: '/' },
     ],
   })

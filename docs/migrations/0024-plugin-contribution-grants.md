@@ -1,5 +1,9 @@
 # Installation database 23 → 24
 
+This guide describes a historical migration in the schema-37 manager at
+`a0109b792fa43d2e076073f34901d57eae2e3615`. See the current
+[upgrade procedure](../PRODUCTION-CAIRN.md#data-preserving-upgrades) for schema 38.
+
 `Store::open` adds explicit plugin contribution grants and credential suppliers
 after the version-22 → 23 typed placement migration. Versions 11–21 first use
 their existing sequential conversions to reach version 22. The entire grants

@@ -7,7 +7,7 @@ import {
   observeRunProgress,
   prepareRunProgress,
   progressOccurrence,
-} from '../run-progress.mjs'
+} from '../dev/run-progress.mjs'
 
 const now = 4_000_000
 const old = now - 2_000_000

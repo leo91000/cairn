@@ -1,6 +1,6 @@
 # Health monitor evidence retention
 
-`scripts/health-evidence-retention.mjs` is the archive engine used by the external
+`scripts/ops/health-evidence-retention.mjs` is the archive engine used by the external
 installation health monitor. It does not run inside Cairn or change an installation.
 The monitor copies this exact versioned file next to its private adapter:
 

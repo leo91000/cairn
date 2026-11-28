@@ -19,8 +19,8 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { it, onTestFinished } from 'vitest'
 
-const durable = fileURLToPath(new URL('../ci-backend-durable.mjs', import.meta.url))
-const foreground = fileURLToPath(new URL('../ci-backend-trace.mjs', import.meta.url))
+const durable = fileURLToPath(new URL('../ci/ci-backend-durable.mjs', import.meta.url))
+const foreground = fileURLToPath(new URL('../ci/ci-backend-trace.mjs', import.meta.url))
 const admission = fileURLToPath(new URL('./fixtures/admitted-uploader.mjs', import.meta.url))
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const fixtureSetupMs = 5000

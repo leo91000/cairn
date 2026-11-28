@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { SelectOption } from './select'
+import type { AccountSession, BeaconInstallation, DeviceReview } from './beacon-session'
 import {
   computed,
   defineAsyncComponent,
@@ -28,24 +28,37 @@ import {
   sharedPreference,
   workspaceReturn,
 } from './beacon-location'
-import { clientPerformance } from './client-performance'
+import {
+  beaconAccountRequest,
+  beaconInstallationRequest,
+  buildInstallationOptions,
+  formatInstallationCommand,
+  INSTALLATION_INSTRUCTIONS as installationInstructions,
+  installationStatus,
+} from './beacon-session'
 import { startClientPerformance } from './client-performance-runtime'
 import AccountMenu from './components/AccountMenu.vue'
 import AccountMethods from './components/AccountMethods.vue'
 import AccountSecurity from './components/AccountSecurity.vue'
-import BrandWordmark from './components/BrandWordmark.vue'
+import AuthStage from './components/AuthStage.vue'
 import Icon from './components/Icon.vue'
 import InstallationSharing from './components/InstallationSharing.vue'
 import Modal from './components/Modal.vue'
 import NotificationSettings from './components/NotificationSettings.vue'
+import OtpCodeInput from './components/OtpCodeInput.vue'
 import PendingInvitations from './components/PendingInvitations.vue'
-import ThemeControl from './components/ThemeControl.vue'
+import SocialBrandIcon from './components/SocialBrandIcon.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
 import VirtualSelect from './components/VirtualSelect.vue'
 import WebUpdateNotice from './components/WebUpdateNotice.vue'
 import { restoreInstallationDrafts, transferInstallationDrafts } from './draft-transfer'
-import { Settings } from './icons'
+import {
+  KeyRound,
+  Mail,
+  Pencil,
+  Settings,
+} from './icons'
 import { installationKey } from './installation-context'
 import Authorize from './views/Authorize.vue'
 
@@ -54,20 +67,6 @@ const PluginOAuthCallback = defineAsyncComponent(() => import('./views/PluginOAu
 const PerformanceSettings = defineAsyncComponent(() => import('./components/PerformanceSettings.vue'))
 const performanceDiagnostics = startClientPerformance(useRouter())
 onScopeDispose(() => performanceDiagnostics.stop())
-
-interface AccountSession {
-  authenticated: boolean
-  account: { id: string, email: string } | null
-  csrf: string | null
-  installations: Array<{
-    id: string
-    slug?: string
-    name: string
-    role: 'owner' | 'member'
-    online: boolean
-    updateRequired: boolean
-  }>
-}
 
 const session = ref<AccountSession | null>(null)
 const options = ref({ google: false, github: false, passkeys: false })
@@ -82,15 +81,43 @@ const navigationPending = ref(false)
 const email = ref('')
 const code = ref('')
 const challenge = ref('')
+const resendCooldown = ref(0)
+let resendTimer: ReturnType<typeof setTimeout> | undefined
+let resendAvailableAt = 0
+
+function stopResendTimer() {
+  clearTimeout(resendTimer)
+  resendTimer = undefined
+  resendAvailableAt = 0
+  resendCooldown.value = 0
+}
+
+function tickResendCooldown() {
+  const remaining = resendAvailableAt - Date.now()
+  if (remaining <= 0) {
+    stopResendTimer()
+    return
+  }
+
+  resendCooldown.value = Math.ceil(remaining / 1000)
+  resendTimer = setTimeout(tickResendCooldown, Math.min(remaining, 1000))
+}
+
+function startResendCooldown() {
+  stopResendTimer()
+  resendAvailableAt = Date.now() + 30_000
+  tickResendCooldown()
+}
+
+onScopeDispose(stopResendTimer)
+
+const hasAlternativeSignIn = computed(() => options.value.passkeys || options.value.google || options.value.github)
+const hasBothOAuthProviders = computed(() => options.value.google && options.value.github)
 const busy = ref(false)
 const methodBusy = ref(false)
 const error = ref('')
 const claimCode = ref('')
-const installationCommand = computed(() => {
-  const quote = (value: string) => `'${value.replaceAll('\'', '\'"\'"\'')}'`
-  return `curl -fsSL ${quote(`${beaconOrigin}/install.sh`)} | sudo bash -s -- --claim-code ${quote(claimCode.value)}`
-})
-const installationInstructions = 'This code expires in 10 minutes. Run this command on your Linux x86-64 machine. No domain, certificate, incoming port or S3 setup is needed.'
+const installationCommand = computed(() => formatInstallationCommand(claimCode.value))
 const showSharing = ref(false)
 const showInvitations = ref(false)
 const confirmLeave = ref(false)
@@ -98,34 +125,13 @@ const invitationsPage = new URLSearchParams(window.location.search).has('invitat
 const editingName = ref(false)
 const installationName = ref('')
 const deviceCode = ref('')
-const deviceReview = ref<{
-  code: string
-  name: string
-  fingerprint: string
-  confirmation: string
-} | null>(null)
+const deviceReview = ref<DeviceReview | null>(null)
 const claimStatus = ref('')
 const confirmDetach = ref(false)
 const confirmForget = ref(false)
-const installation = ref<{
-  id: string
-  slug?: string
-  name: string
-  online: boolean
-  updateRequired: boolean
-  role: 'owner' | 'member'
-} | null>(null)
+const installation = ref<BeaconInstallation | null>(null)
 const router = useRouter()
-const installationOptions = computed<SelectOption[]>(() => (session.value?.installations ?? []).map(item => ({
-  value: item.id,
-  label: item.name,
-  description: item.role === 'owner' ? 'Owner' : 'Member',
-  keywords: [installationStatus(item)],
-  status: {
-    label: installationStatus(item),
-    tone: item.updateRequired ? 'warning' : item.online ? 'success' : 'muted',
-  },
-})))
+const installationOptions = computed(() => buildInstallationOptions(session.value?.installations ?? []))
 const beaconReturnKey = 'cairn-installation-return'
 const authorizePage = window.location.pathname === '/authorize'
 const claimPage = window.location.pathname === '/claim'
@@ -212,11 +218,7 @@ watch(session, (value) => {
   }
 
   if (!requested && value.installations.length && !claimPage && !invitationsPage && !authorizePage && !pluginCallbackPage) {
-    let remembered = ''
-    try {
-      remembered = sharedPreference(`cairn_installation_${value.account?.id}`) || localStorage.getItem(`cairn-current-installation:${value.account?.id}`) || ''
-    }
-    catch {}
+    const remembered = rememberedInstallation(value.account?.id)
 
     openInstallation(value.installations.find(item => item.id === remembered) || value.installations[0]!)
   }
@@ -232,35 +234,15 @@ watch(() => state.authenticated, (authenticated) => {
   }
 })
 
-async function accountRequest(route: string, body?: unknown) {
-  const scope = clientPerformance.capture()
-  const finish = clientPerformance.begin(body === undefined ? 'API_READ' : 'API_WRITE', scope)
-  try {
-    const value = await accountRequestOnce(route, body, scope)
-    finish?.('ok')
-    return value
-  }
-  catch (error) {
-    finish?.('error')
-    throw error
-  }
-}
+const accountRequest = (route: string, body?: unknown) => beaconAccountRequest(route, session.value?.csrf || '', body)
 
-async function accountRequestOnce(route: string, body: unknown, scope: ReturnType<typeof clientPerformance.capture>) {
-  const response = await fetch(`/api/account/${route}`, {
-    method: body === undefined ? 'GET' : 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.value?.csrf || '' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
-  if (response.status === 204)
-    return
-  const text = await response.text()
-  clientPerformance.probe('API')
-  const value = text ? clientPerformance.measure('JSON_DECODE', () => JSON.parse(text), scope) : undefined
-  if (!response.ok)
-    throw new Error(value?.error || 'Unable to reach Cairn. Please try again.')
-  return value
+function rememberedInstallation(accountId?: string) {
+  try {
+    return sharedPreference(`cairn_installation_${accountId}`) || localStorage.getItem(`cairn-current-installation:${accountId}`) || ''
+  }
+  catch {
+    return ''
+  }
 }
 
 async function loadSession() {
@@ -292,6 +274,9 @@ async function loadSession() {
 }
 
 async function submit() {
+  if (busy.value || (challenge.value && !/^\d{8}$/.test(code.value)))
+    return
+
   busy.value = true
   error.value = ''
   try {
@@ -299,11 +284,31 @@ async function submit() {
       session.value = await accountRequest('verify', { challenge: challenge.value, code: code.value })
       code.value = ''
       challenge.value = ''
+      stopResendTimer()
     }
     else {
       const value = await accountRequest('email-code', { email: email.value })
       challenge.value = value.challenge
+      startResendCooldown()
     }
+  }
+  catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Unable to reach Cairn. Please try again.'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
+async function resendCode() {
+  if (busy.value || resendCooldown.value > 0 || !email.value)
+    return
+  busy.value = true
+  error.value = ''
+  try {
+    const value = await accountRequest('email-code', { email: email.value })
+    challenge.value = value.challenge
+    startResendCooldown()
   }
   catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unable to reach Cairn. Please try again.'
@@ -394,20 +399,7 @@ async function passkey() {
   }
 }
 
-async function installationRequest(route: string, body?: unknown, method: 'POST' | 'DELETE' = 'POST') {
-  const response = await fetch(`/api/installations/${route}`, {
-    method,
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.value?.csrf || '' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
-  if (response.status === 204)
-    return
-  const value = await response.json()
-  if (!response.ok)
-    throw new Error(value.error || 'Unable to update the installation.')
-  return value
-}
+const installationRequest = (route: string, body?: unknown, method: 'POST' | 'DELETE' = 'POST') => beaconInstallationRequest(route, session.value?.csrf || '', body, method)
 
 async function leaveInstallation() {
   if (!installation.value)
@@ -696,12 +688,6 @@ onScopeDispose(() => {
   document.removeEventListener('visibilitychange', visibleAvailability)
 })
 
-function installationStatus(value: { online: boolean, updateRequired: boolean }) {
-  if (value.updateRequired)
-    return 'Mise à jour nécessaire'
-  return value.online ? 'Online' : 'Offline'
-}
-
 function selectInstallation(id: string) {
   const selected = session.value?.installations.find(item => item.id === id)
   if (selected)
@@ -733,6 +719,7 @@ function changeEmail() {
   challenge.value = ''
   code.value = ''
   error.value = ''
+  stopResendTimer()
 }
 
 onMounted(async () => {
@@ -785,12 +772,12 @@ onMounted(async () => {
 <template>
   <WebUpdateNotice />
   <PrivacyPolicy v-if="privacyPage" />
-  <main v-else-if="session?.authenticated && pluginCallbackPage" class="min-h-dvh bg-canvas text-ink px-6 py-10">
-    <PluginOAuthCallback :parameters="pluginCallbackParameters" />
-  </main>
-  <main v-else-if="session?.authenticated && authorizePage" class="min-h-dvh bg-canvas text-ink px-6 py-10">
-    <Authorize />
-  </main>
+  <PluginOAuthCallback v-else-if="session?.authenticated && pluginCallbackPage" :parameters="pluginCallbackParameters" />
+  <Authorize
+    v-else-if="session?.authenticated && authorizePage"
+    :email="session.account?.email || ''"
+    :current-installation-id="rememberedInstallation(session.account?.id)"
+  />
   <div v-else-if="session?.authenticated && installation" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
     <!-- While an update is required the workspace is unavailable, so phones keep this bar. -->
     <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm phone:gap-2 phone:px-3" :class="{ 'phone:hidden': !installation.updateRequired && !state.protocolError }" aria-label="Current installation">
@@ -1063,198 +1050,309 @@ onMounted(async () => {
       </div>
     </Modal>
   </div>
-  <main v-else class="min-h-dvh bg-canvas text-ink px-6 py-10 grid place-items-center">
-    <div class="absolute top-5 right-5">
-      <ThemeControl compact />
-    </div>
-    <section class="w-full max-w-sm" aria-label="Cairn account" :aria-busy="busy">
-      <BrandWordmark class="mb-10" />
-      <template v-if="!ready">
-        <p v-if="busy" role="status">
+  <AuthStage v-else label="Cairn account" :busy="busy">
+    <template v-if="!ready">
+      <div class="flex flex-col items-center py-4 text-center">
+        <div v-if="busy" class="souffle-halo mb-4 size-14" aria-hidden="true">
+          <span class="souffle-core grid size-9 place-items-center rounded-xl border border-line bg-surface">
+            <img class="cairn-mark-light size-5.5" src="/brand/cairn-symbol.svg" alt="">
+            <img class="cairn-mark-dark size-5.5" src="/brand/cairn-symbol-dark.svg" alt="">
+          </span>
+        </div>
+        <p v-if="busy" role="status" class="text-sm font-medium text-muted">
           Loading…
         </p>
-        <UiAlert v-if="error">
+        <UiAlert v-if="error" class="w-full text-left">
           {{ error }}
         </UiAlert>
-        <UiButton v-if="!busy" @click="loadSession">
+        <UiButton v-if="!busy" class="mt-3 w-full" @click="loadSession">
           Try again
         </UiButton>
-      </template>
-      <AccountSecurity
-        v-else-if="session?.authenticated && (showSecurity || showIdentityConfirmation)"
-        :email="session.account?.email || ''"
-        :passkeys="options.passkeys"
-        :confirmation-only="showIdentityConfirmation"
-        :confirmation-title="confirmationTitle"
-        :return-label="showSecurity ? 'Back to account security' : 'Back to installation'"
-        @close="showIdentityConfirmation ? showIdentityConfirmation = false : showSecurity = false"
-        @confirm-identity="openIdentityConfirmation('Confirm identity before revoking other devices')"
-        @confirmed="identityConfirmed"
-        @signed-out="redirect('/')"
-      />
-      <AccountMethods
-        v-else-if="session?.authenticated && showMethods"
-        :external-error="error"
-        :email="session.account?.email || ''"
-        :options="options"
-        :request="accountRequest"
-        :busy="busy"
-        @busy="methodBusy = $event"
-        @clear-error="error = ''"
-        @oauth="oauth"
-        @session-updated="session = $event"
-        @signed-out="redirect('/')"
-        @close="showMethods = false; changeEmail()"
-      />
-      <template v-else-if="session?.authenticated">
-        <h1 class="font-heading text-2xl mb-4">
-          {{ installation?.name || (session.installations.length ? 'Your installations' : 'No installations yet') }}
-        </h1>
-        <p class="text-muted mb-4">
-          You’re signed in as {{ session.account?.email }}.
+      </div>
+    </template>
+    <AccountSecurity
+      v-else-if="session?.authenticated && (showSecurity || showIdentityConfirmation)"
+      :email="session.account?.email || ''"
+      :passkeys="options.passkeys"
+      :confirmation-only="showIdentityConfirmation"
+      :confirmation-title="confirmationTitle"
+      :return-label="showSecurity ? 'Back to account security' : 'Back to installation'"
+      @close="showIdentityConfirmation ? showIdentityConfirmation = false : showSecurity = false"
+      @confirm-identity="openIdentityConfirmation('Confirm identity before revoking other devices')"
+      @confirmed="identityConfirmed"
+      @signed-out="redirect('/')"
+    />
+    <AccountMethods
+      v-else-if="session?.authenticated && showMethods"
+      :external-error="error"
+      :email="session.account?.email || ''"
+      :options="options"
+      :request="accountRequest"
+      :busy="busy"
+      @busy="methodBusy = $event"
+      @clear-error="error = ''"
+      @oauth="oauth"
+      @session-updated="session = $event"
+      @signed-out="redirect('/')"
+      @close="showMethods = false; changeEmail()"
+    />
+    <template v-else-if="session?.authenticated">
+      <h1 class="font-heading text-2xl mb-3">
+        {{ installation?.name || (session.installations.length ? 'Your installations' : 'No installations yet') }}
+      </h1>
+      <p class="text-muted mb-5">
+        You’re signed in as {{ session.account?.email }}.
+      </p>
+      <PendingInvitations @accepted="id => openInstallation({ id, name: '' })" />
+      <div>
+        <p v-if="!session.installations.length" class="text-muted mb-6 text-sm">
+          Your Cairn account is ready. Choose Add an installation to get a command,
+          then run it on your Linux x86-64 machine. The installation
+          will appear here; choose Refresh installations once it is connected.
         </p>
-        <PendingInvitations @accepted="id => openInstallation({ id, name: '' })" />
-        <div>
-          <p v-if="!session.installations.length" class="text-muted mb-8">
-            Your Cairn account is ready. Choose Add an installation to get a command,
-            then run it on your Linux x86-64 machine. The installation
-            will appear here; choose Refresh installations once it is connected.
-          </p>
-          <div class="grid gap-3 mb-6">
-            <UiButton v-for="item in session.installations" :key="item.id" @click="openInstallation(item)">
-              {{ item.name }} · {{ installationStatus(item) }}
-            </UiButton>
-            <UiButton :disabled="busy" @click="addInstallation">
-              Add an installation
-            </UiButton>
-            <UiButton :disabled="busy" @click="loadSession">
-              Refresh installations
-            </UiButton>
-          </div>
-          <form class="grid gap-3 mb-6" @submit.prevent="reviewDevice">
-            <label>Device claim code<input
-              v-model="deviceCode"
-              required
-              maxlength="30"
-              autocomplete="off"
-              :disabled="busy"
-            ></label>
-            <p class="text-muted">
-              Only approve a code displayed by a machine you control.
-            </p>
-            <UiButton type="submit" :disabled="busy">
-              Review installation
-            </UiButton>
-            <div
-              v-if="deviceReview"
-              role="dialog"
-              aria-label="Confirm installation claim"
-              class="grid gap-3 rounded-xl border border-line p-4"
-            >
-              <p>Claim {{ deviceReview.name }}?</p>
-              <label>Installation fingerprint<input :value="deviceReview.fingerprint" readonly></label>
-              <p class="text-muted">
-                Compare this fingerprint with cairn claim in the terminal on a machine you control.
-                This machine will store your conversations, coding-agent accounts and secrets.
-                Do not approve a code sent by someone else, even if they ask you to sign in.
-              </p>
-              <UiButton :disabled="busy" @click="approveDevice">
-                Claim this installation
-              </UiButton>
-              <UiButton :disabled="busy" @click="deviceReview = null">
-                Cancel claim
-              </UiButton>
-            </div>
-            <p v-if="claimStatus" role="status">
-              {{ claimStatus }}
-            </p>
-          </form>
-          <div v-if="claimCode" class="grid gap-3 mb-6">
-            <label>Installation command<textarea
-              :value="installationCommand"
-              readonly
-              autocomplete="off"
-              rows="4"
-              spellcheck="false"
-              class="w-full font-mono text-xs"
-            /></label>
-            <label>Installation claim code<input :value="claimCode" readonly autocomplete="off"></label>
-            <p class="text-muted">
-              {{ installationInstructions }}
-            </p>
-          </div>
+        <div class="grid gap-2.5 mb-6">
+          <UiButton
+            v-for="item in session.installations"
+            :key="item.id"
+            class="w-full"
+            @click="openInstallation(item)"
+          >
+            {{ item.name }} · {{ installationStatus(item) }}
+          </UiButton>
+          <UiButton
+            variant="primary"
+            class="w-full"
+            :disabled="busy"
+            @click="addInstallation"
+          >
+            Add an installation
+          </UiButton>
+          <UiButton class="w-full" :disabled="busy" @click="loadSession">
+            Refresh installations
+          </UiButton>
         </div>
-        <UiAlert v-if="error">
-          {{ error }}
-        </UiAlert>
-        <UiButton class="mb-3" :disabled="busy" @click="showNotifications = true">
+        <form class="grid gap-3 mb-6 border-t border-line pt-5" @submit.prevent="reviewDevice">
+          <label>Device claim code<input
+            v-model="deviceCode"
+            required
+            maxlength="30"
+            autocomplete="off"
+            :disabled="busy"
+          ></label>
+          <p class="text-xs text-muted">
+            Only approve a code displayed by a machine you control.
+          </p>
+          <UiButton type="submit" class="w-full" :disabled="busy">
+            Review installation
+          </UiButton>
+          <div
+            v-if="deviceReview"
+            role="dialog"
+            aria-label="Confirm installation claim"
+            class="grid gap-3 rounded-xl border border-line bg-inset p-4"
+          >
+            <p class="font-semibold">
+              Claim {{ deviceReview.name }}?
+            </p>
+            <label>Installation fingerprint<input :value="deviceReview.fingerprint" readonly></label>
+            <p class="text-xs text-muted">
+              Compare this fingerprint with cairn claim in the terminal on a machine you control.
+              This machine will store your conversations, coding-agent accounts and secrets.
+              Do not approve a code sent by someone else, even if they ask you to sign in.
+            </p>
+            <UiButton variant="primary" :disabled="busy" @click="approveDevice">
+              Claim this installation
+            </UiButton>
+            <UiButton :disabled="busy" @click="deviceReview = null">
+              Cancel claim
+            </UiButton>
+          </div>
+          <p v-if="claimStatus" role="status" class="text-sm text-success">
+            {{ claimStatus }}
+          </p>
+        </form>
+        <div v-if="claimCode" class="grid gap-3 mb-6 rounded-xl border border-line bg-inset p-4">
+          <label>Installation command<textarea
+            :value="installationCommand"
+            readonly
+            autocomplete="off"
+            rows="4"
+            spellcheck="false"
+            class="w-full font-mono text-xs"
+          /></label>
+          <label>Installation claim code<input :value="claimCode" readonly autocomplete="off"></label>
+          <p class="text-xs text-muted">
+            {{ installationInstructions }}
+          </p>
+        </div>
+      </div>
+      <UiAlert v-if="error">
+        {{ error }}
+      </UiAlert>
+      <div class="grid gap-2 border-t border-line pt-4">
+        <UiButton class="w-full" :disabled="busy" @click="showNotifications = true">
           Notifications
         </UiButton>
-        <UiButton class="mb-3" :disabled="busy" @click="showPerformance = true">
+        <UiButton class="w-full" :disabled="busy" @click="showPerformance = true">
           Performance diagnostics
         </UiButton>
-        <UiButton class="mb-3" :disabled="busy" @click="openMethods">
+        <UiButton class="w-full" :disabled="busy" @click="openMethods">
           Sign-in methods
         </UiButton>
-        <UiButton class="mb-3" :disabled="busy" @click="showSecurity = true">
+        <UiButton class="w-full" :disabled="busy" @click="showSecurity = true">
           Account security
         </UiButton>
-        <UiButton :disabled="busy" @click="signOut">
+        <UiButton class="w-full" :disabled="busy" @click="signOut">
           Sign out
         </UiButton>
-      </template>
-      <template v-else>
-        <h1 class="font-heading text-2xl mb-4">
-          {{ challenge ? 'Check your email' : 'Sign in to Cairn' }}
-        </h1>
-        <p class="text-muted mb-8">
-          {{ challenge ? `Enter the code sent to ${email}. It expires in 10 minutes.` : 'Create your Cairn account or sign in with an email code.' }}
-        </p>
-        <div v-if="!challenge" class="grid gap-3 mb-6">
-          <UiButton v-if="options.google" :disabled="busy" @click="oauth('google')">
-            Continue with Google
+      </div>
+    </template>
+    <template v-else-if="!challenge">
+      <h1 class="font-heading text-[23px] font-bold tracking-tight mb-1.5">
+        Sign in to Cairn
+      </h1>
+      <p class="text-sm text-muted mb-6">
+        Create your Cairn account or sign in to reach your installations and agents.
+      </p>
+
+      <div v-if="hasAlternativeSignIn" class="grid gap-2.5 mb-5">
+        <UiButton
+          v-if="options.passkeys"
+          class="h-11 w-full rounded-[11px] border-transparent bg-soft text-accent enabled:hover:bg-soft/80"
+          :disabled="busy"
+          @click="passkey()"
+        >
+          <Icon :name="KeyRound" :size="16" />
+          Sign in with a passkey
+        </UiButton>
+        <div
+          v-if="options.google || options.github"
+          class="grid gap-2.5"
+          :class="hasBothOAuthProviders ? 'grid-cols-2 phone:grid-cols-1' : 'grid-cols-1'"
+        >
+          <UiButton
+            v-if="options.google"
+            class="h-11 w-full rounded-[11px] bg-surface"
+            :disabled="busy"
+            @click="oauth('google')"
+          >
+            <SocialBrandIcon provider="google" />
+            <span><span v-if="hasBothOAuthProviders" class="sr-only">Continue with </span>{{ hasBothOAuthProviders ? 'Google' : 'Continue with Google' }}</span>
           </UiButton>
-          <UiButton v-if="options.github" :disabled="busy" @click="oauth('github')">
-            Continue with GitHub
+          <UiButton
+            v-if="options.github"
+            class="h-11 w-full rounded-[11px] bg-surface"
+            :disabled="busy"
+            @click="oauth('github')"
+          >
+            <SocialBrandIcon provider="github" />
+            <span><span v-if="hasBothOAuthProviders" class="sr-only">Continue with </span>{{ hasBothOAuthProviders ? 'GitHub' : 'Continue with GitHub' }}</span>
           </UiButton>
         </div>
-        <form class="grid gap-5" @submit.prevent="submit">
-          <label v-if="!challenge">Email address<input
+      </div>
+
+      <div v-if="hasAlternativeSignIn" class="auth-divider mb-5" aria-hidden="true">
+        or by email
+      </div>
+
+      <form class="grid gap-4" @submit.prevent="submit">
+        <label>
+          Email address
+          <input
             v-model="email"
             type="email"
             autocomplete="email"
+            placeholder="you@example.com"
             required
             maxlength="254"
             :disabled="busy"
-          ></label>
-          <label v-else>Email code<input
-            v-model="code"
-            type="text"
-            inputmode="numeric"
-            autocomplete="one-time-code"
-            required
-            maxlength="8"
-            :disabled="busy"
-          ></label>
-          <UiAlert v-if="error">
-            {{ error }}
-          </UiAlert>
-          <UiButton type="submit" variant="primary" :disabled="busy">
-            {{ busy ? 'Please wait…' : challenge ? 'Sign in' : 'Send code' }}
-          </UiButton>
-          <UiButton v-if="!challenge && options.passkeys" :disabled="busy" @click="passkey()">
-            Sign in with a passkey
-          </UiButton>
-          <UiButton v-if="challenge" :disabled="busy" @click="changeEmail">
-            Use another email or request a new code
-          </UiButton>
-        </form>
-        <p class="mt-8 text-sm text-muted">
-          <a class="underline underline-offset-2 hover:text-ink" href="/privacy">Privacy Policy</a>
+          >
+        </label>
+        <UiAlert v-if="error" class="my-0!">
+          {{ error }}
+        </UiAlert>
+        <UiButton
+          type="submit"
+          variant="primary"
+          class="h-11 w-full rounded-[11px]"
+          :disabled="busy"
+        >
+          {{ busy ? 'Please wait…' : 'Send code' }}
+        </UiButton>
+      </form>
+    </template>
+    <template v-else>
+      <span class="mb-4 grid size-10.5 place-items-center rounded-xl bg-soft text-accent" aria-hidden="true">
+        <Icon :name="Mail" :size="18" />
+      </span>
+      <h1 class="font-heading text-[23px] font-bold tracking-tight mb-1.5">
+        Check your email
+      </h1>
+      <p class="text-sm text-muted mb-3">
+        Enter the 8-digit code sent to:
+      </p>
+      <button
+        type="button"
+        class="mb-5 inline-flex max-w-full items-center gap-2 rounded-full border border-line bg-inset px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-hover disabled:opacity-50"
+        :aria-label="`Change email address (${email})`"
+        :disabled="busy"
+        @click="changeEmail"
+      >
+        <span class="truncate">{{ email }}</span>
+        <Icon :name="Pencil" :size="12" class="shrink-0 text-muted" />
+      </button>
+
+      <form class="grid gap-4" @submit.prevent="submit">
+        <OtpCodeInput
+          v-model="code"
+          label="Email code"
+          :length="8"
+          :disabled="busy"
+        />
+        <p class="-mt-2 text-xs text-subtle">
+          Codes are valid for up to 10 minutes after sending. Cairn sends a new code after the previous one expires.
         </p>
-      </template>
-    </section>
-  </main>
+        <UiAlert v-if="error" class="my-0!">
+          {{ error }}
+        </UiAlert>
+        <UiButton
+          type="submit"
+          variant="primary"
+          class="h-11 w-full rounded-[11px]"
+          :disabled="busy || !/^\d{8}$/.test(code)"
+        >
+          {{ busy ? 'Please wait…' : 'Sign in' }}
+        </UiButton>
+      </form>
+
+      <div class="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+        <button
+          type="button"
+          class="font-medium transition-colors enabled:text-ink enabled:hover:text-accent disabled:opacity-60"
+          :disabled="busy || resendCooldown > 0"
+          @click="resendCode"
+        >
+          {{ resendCooldown > 0 ? `Try again in ${resendCooldown}s` : 'Request a code' }}
+        </button>
+        <button
+          type="button"
+          class="font-semibold text-accent hover:underline"
+          :disabled="busy"
+          @click="changeEmail"
+        >
+          Use another email
+        </button>
+      </div>
+    </template>
+
+    <template v-if="ready && !session?.authenticated" #footer>
+      <div class="flex flex-wrap items-center justify-center gap-x-2.5 gap-y-1">
+        <a class="underline underline-offset-3 hover:text-ink" href="/privacy">Privacy Policy</a>
+        <span aria-hidden="true">·</span>
+        <span>Your agents keep running on your installations.</span>
+      </div>
+    </template>
+  </AuthStage>
   <Modal v-if="session?.authenticated && showNotifications" title="Notifications" @close="showNotifications = false">
     <div class="p-6 phone:p-4">
       <NotificationSettings />

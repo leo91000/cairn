@@ -1299,12 +1299,12 @@ impl std::fmt::Display for FairnessPhaseDiagnostics {
 
 impl Drop for FairnessPhaseDiagnostics {
     fn drop(&mut self) {
+        use std::io::Write as _;
         if !std::thread::panicking() {
             return;
         }
         // No output or allocation while the real async phases are progressing.
         // Dump once on failure, without a second panic if the sink is closed.
-        use std::io::Write as _;
         let _ = write!(std::io::stderr().lock(), "{self}");
     }
 }
@@ -1673,7 +1673,7 @@ async fn concurrent_large_uploads_share_account_capacity_without_closing_either_
 
     let second_upload = async {
         let frame = upload("second-upload");
-        let (_, reply) = tokio::time::timeout(cairn_protocol::REQUEST_TIMEOUT, async {
+        let ((), reply) = tokio::time::timeout(cairn_protocol::REQUEST_TIMEOUT, async {
             tokio::join!(
                 send_frame(second_channel.as_ref(), 1, &frame),
                 receive_frame(second_channel.as_ref()),
@@ -1700,7 +1700,7 @@ async fn concurrent_large_uploads_share_account_capacity_without_closing_either_
                     .unwrap();
             }
         };
-        let (_, reply) = tokio::time::timeout(cairn_protocol::REQUEST_TIMEOUT, async {
+        let ((), reply) = tokio::time::timeout(cairn_protocol::REQUEST_TIMEOUT, async {
             tokio::join!(send_remaining, receive_frame(first_channel.as_ref()))
         })
         .await
@@ -1794,7 +1794,7 @@ async fn interleaved_uploads_on_one_peer_reject_only_the_excess_transfer() {
                 .unwrap();
         }
     };
-    let (_, reply) = tokio::time::timeout(cairn_protocol::REQUEST_TIMEOUT, async {
+    let ((), reply) = tokio::time::timeout(cairn_protocol::REQUEST_TIMEOUT, async {
         tokio::join!(send_remaining, receive_frame(channel.as_ref()))
     })
     .await

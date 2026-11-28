@@ -26,7 +26,7 @@ impl Drop for Subscription {
     }
 }
 
-fn fast_subscription(polls: Arc<AtomicUsize>, dropped: Arc<AtomicBool>) -> Router {
+fn fast_subscription(polls: &Arc<AtomicUsize>, dropped: &Arc<AtomicBool>) -> Router {
     Router::new().route(
         "/api/fixture/fast/stream",
         get({
@@ -85,7 +85,7 @@ async fn wait_for_backpressure(polls: &AtomicUsize) {
 async fn a_slow_reader_backpressures_only_its_subscription_and_drop_cancels_it() {
     let polls = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicBool::new(false));
-    let routes = fast_subscription(polls.clone(), dropped.clone());
+    let routes = fast_subscription(&polls, &dropped);
     let relay = RelayedInstallation::new(routes).await;
     let response = relay
         .get("/fixture/fast/stream")
@@ -244,7 +244,7 @@ async fn finite_response_headers_do_not_extend_the_request_deadline_or_hold_its_
 async fn revocation_cancels_a_backpressured_subscription_without_waiting_for_the_browser() {
     let polls = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicBool::new(false));
-    let relay = RelayedInstallation::new(fast_subscription(polls.clone(), dropped.clone())).await;
+    let relay = RelayedInstallation::new(fast_subscription(&polls, &dropped)).await;
     let stalled = relay.get("/fixture/fast/stream").send().await.unwrap();
     assert_eq!(stalled.status(), StatusCode::OK);
     wait_for_backpressure(&polls).await;

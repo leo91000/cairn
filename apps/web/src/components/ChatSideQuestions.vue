@@ -13,6 +13,7 @@ import { askChatSideQuestion } from '../../../../packages/contracts/generated/as
 import { cancelChatSideQuestion } from '../../../../packages/contracts/generated/cancelChatSideQuestion'
 import { api } from '../api'
 import { MessageSquareQuote, Send, X } from '../icons'
+import { sideQuestionIndicator } from '../side-questions'
 import Icon from './Icon.vue'
 import Markdown from './Markdown.vue'
 import Modal from './Modal.vue'
@@ -29,6 +30,7 @@ const props = defineProps<{
   /** Why a side question cannot be asked now, from the server. */
   reason?: string | null
   provider?: Provider | null
+  defaultTrigger?: () => HTMLElement | undefined
 }>()
 const emit = defineEmits<{
   /** Follow a side question back to the reply it is about. */
@@ -36,6 +38,7 @@ const emit = defineEmits<{
 }>()
 
 const open = ref(false)
+const openedFromDefault = ref(false)
 const text = ref('')
 const quote = ref('')
 const itemId = ref('')
@@ -65,7 +68,7 @@ watch([text, quote, itemId, replyEventId, focus], () => {
   draftRevision++
 }, { flush: 'sync' })
 
-// Answers that arrived while the panel was closed show above the composer until read.
+// Answers that arrived while the panel was closed are highlighted until read.
 const seen = ref(new Set<string>())
 let known = ''
 watch(() => [props.chatId, props.questions, focusEvents.value] as const, ([chatId, questions]) => {
@@ -88,8 +91,6 @@ watch(() => [props.chatId, props.questions, focusEvents.value] as const, ([chatI
     markSeen()
 }, { immediate: true })
 
-const pending = computed(() => props.questions.filter(question => question.status === 'pending'))
-const unread = computed(() => props.questions.filter(question => question.status !== 'pending' && question.status !== 'cancelled' && !seen.value.has(question.id)))
 const shown = computed(() => props.questions.filter((question) => {
   if (!focus.value)
     return true
@@ -107,16 +108,25 @@ function markSeen() {
 }
 
 const engine = computed(() => props.provider ? providers[props.provider].label : 'The agent')
-const status = computed(() => {
-  if (pending.value.length)
-    return `${engine.value} is answering`
-  if (!unread.value.length)
-    return 'Saved'
-  return unread.value.some(question => question.status === 'answered') ? 'Answer ready' : 'Not answered'
-})
+const indicator = computed(() => sideQuestionIndicator({
+  questions: props.questions,
+  seen: seen.value,
+  canAsk: props.canAsk,
+  provider: props.provider,
+}))
+
+function openDefault() {
+  if (props.questions.length)
+    show()
+  else
+    ask({ itemId: '', replyEventId: null, quote: '' })
+  openedFromDefault.value = true
+}
 
 function ask(about: { itemId: string, replyEventId: number | null, quote: string }) {
   draftRevision++
+  if (!open.value)
+    openedFromDefault.value = false
   itemId.value = about.itemId
   replyEventId.value = about.replyEventId
   quote.value = about.quote
@@ -130,6 +140,8 @@ function ask(about: { itemId: string, replyEventId: number | null, quote: string
 /** Opens the panel, on the side questions about one reply when `item` is given. */
 function show(reply?: { itemId: string, replyEventId: number | null, replyEventIds: number[] }) {
   draftRevision++
+  if (!open.value)
+    openedFromDefault.value = false
   const item = reply?.itemId ?? ''
   // Questions asked from a reply's panel are about that reply.
   if (item && (item !== itemId.value || reply?.replyEventId !== replyEventId.value)) {
@@ -225,26 +237,20 @@ function reveal(question: ChatSideQuestion) {
   emit('reveal', { itemId: question.itemId, replyEventId: Number(question.replyEventId) || null })
 }
 
-defineExpose({ ask, show, unreachable })
+defineExpose({
+  ask,
+  show,
+  unreachable,
+  indicator,
+  openDefault,
+})
 </script>
 
 <template>
-  <p class="sr-only" role="status">
-    {{ pending.length || unread.length ? `Side ${pending.length + unread.length > 1 ? 'questions' : 'question'} · ${status}` : '' }}
-  </p>
-  <div v-if="questions.length || canAsk" class="mb-3 flex items-center gap-3 rounded-xl border border-line bg-surface px-3 py-2.5">
-    <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-accent/10 text-accent"><Icon :name="MessageSquareQuote" :size="16" /></span>
-    <button class="min-w-0 flex-1 text-left" @click="questions.length ? show() : ask({ itemId: '', replyEventId: null, quote: '' })">
-      <span class="mb-0.5 block text-[10px] font-semibold text-accent">{{ questions.length ? `Side ${questions.length > 1 ? 'questions' : 'question'} · ${status}` : 'Ask a side question' }}</span>
-      <span v-if="questions.length" class="block truncate text-xs font-medium">{{ (pending[0] ?? unread[0] ?? questions.at(-1))!.text }}</span>
-    </button>
-    <UiButton size="small" @click="questions.length ? show() : ask({ itemId: '', replyEventId: null, quote: '' })">
-      {{ questions.length ? 'Open' : 'Ask' }}
-    </UiButton>
-  </div>
   <Modal
     v-if="open"
     title="Side questions"
+    :return-focus="openedFromDefault ? defaultTrigger : undefined"
     drawer
     @close="open = false"
   >
@@ -257,6 +263,9 @@ defineExpose({ ask, show, unreachable })
       </p>
       <p v-else-if="provider === 'antigravity'" class="text-xs leading-relaxed text-muted">
         Antigravity answers from the conversation recorded up to its last finished step, not the step in progress.
+      </p>
+      <p v-else-if="provider === 'codex'" class="text-xs leading-relaxed text-muted">
+        Codex answers in a single reply. If it tries to run a tool, such as a command, the tool does not run and the question fails. A web search enabled for the agent can still run on OpenAI’s servers within that reply; it is read-only.
       </p>
       <form v-if="canAsk" class="space-y-3" @submit.prevent="send">
         <button
@@ -297,7 +306,7 @@ defineExpose({ ask, show, unreachable })
         </div>
       </form>
       <UiNotice v-else :icon="MessageSquareQuote">
-        {{ reason || 'Side questions are answered while Claude Code works on a reply.' }}
+        {{ reason || `Side questions are answered while ${engine} works on a reply.` }}
       </UiNotice>
       <UiAlert v-if="error">
         {{ error }}

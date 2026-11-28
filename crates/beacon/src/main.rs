@@ -263,7 +263,7 @@ async fn run() -> Result<(), String> {
             .filter(|value| !value.is_empty()),
     ) {
         (None, None) => None,
-        (Some(private), Some(subject)) => Some(WebPushSender::new(private, subject)?),
+        (Some(private), Some(subject)) => Some(WebPushSender::new(&private, subject)?),
         _ => {
             return Err(
                 "Set both CAIRN_BEACON_VAPID_PRIVATE_KEY and CAIRN_BEACON_VAPID_SUBJECT".into(),

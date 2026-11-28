@@ -699,10 +699,12 @@ async fn the_first_authoritative_snapshot_includes_current_and_reinvited_members
         agent(&s, "Existing").await
     };
 
-    // Reconstruct a version-24 database without account access.
+    // Simulate a pending rollout state before the first authoritative membership snapshot.
     let db = rusqlite::Connection::open(root.path().join("data/manager.db")).unwrap();
-    db.execute_batch(
-        "DROP TABLE background_jobs; DROP TABLE agent_account_access; PRAGMA user_version=29;",
+    db.execute("DELETE FROM agent_account_access", []).unwrap();
+    db.execute(
+        "INSERT OR REPLACE INTO kv(key,data) VALUES('agent-access-rollout',?)",
+        [json!({ "agentIds": [existing, MAIN_AGENT_ID] }).to_string()],
     )
     .unwrap();
     drop(db);
@@ -761,8 +763,10 @@ async fn direct_write_completes_delayed_rollout_without_overriding_owner_revocat
         agent(&s, "Existing").await
     };
     let db = rusqlite::Connection::open(root.path().join("data/manager.db")).unwrap();
-    db.execute_batch(
-        "DROP TABLE background_jobs; DROP TABLE agent_account_access; PRAGMA user_version=29;",
+    db.execute("DELETE FROM agent_account_access", []).unwrap();
+    db.execute(
+        "INSERT OR REPLACE INTO kv(key,data) VALUES('agent-access-rollout',?)",
+        [json!({ "agentIds": [existing, MAIN_AGENT_ID] }).to_string()],
     )
     .unwrap();
     drop(db);
@@ -833,7 +837,7 @@ async fn a_pending_rollout_ignores_legacy_timestamp_cutoffs() {
 #[tokio::test]
 async fn a_members_scheduled_task_keeps_running_after_the_rollout() {
     let root = tempfile::tempdir().unwrap();
-    let task = {
+    let (task, existing) = {
         let s = service(root.path()).await;
         let existing = agent(&s, "Existing").await;
         relay_fixture::allow_member(&s, MEMBER, &existing).await;
@@ -847,13 +851,15 @@ async fn a_members_scheduled_task_keeps_running_after_the_rollout() {
             member(&s, "POST", "/api/tasks", json!({ "settings": settings })).await;
         assert_eq!(status, StatusCode::OK, "{task}");
         relay_fixture::add_member(&s, MEMBER, &format!("membership-{MEMBER}")).await;
-        task["id"].as_str().unwrap().to_owned()
+        (task["id"].as_str().unwrap().to_owned(), existing)
     };
 
-    // The same membership, on a version-24 database without account access.
+    // Simulate a pending rollout state for the existing agents.
     let db = rusqlite::Connection::open(root.path().join("data/manager.db")).unwrap();
-    db.execute_batch(
-        "DROP TABLE background_jobs; DROP TABLE agent_account_access; PRAGMA user_version=29;",
+    db.execute("DELETE FROM agent_account_access", []).unwrap();
+    db.execute(
+        "INSERT OR REPLACE INTO kv(key,data) VALUES('agent-access-rollout',?)",
+        [json!({ "agentIds": [existing, MAIN_AGENT_ID] }).to_string()],
     )
     .unwrap();
     drop(db);

@@ -57,6 +57,8 @@ pub struct Rpc {
 
 pub struct Session {
     pub auth: Option<crate::accounts::codex::Client>,
+    /// The Codex release, as its app-server reported it at initialization.
+    pub(crate) release: String,
     pub rpc: Rpc,
     pub incoming: mpsc::Receiver<Incoming>,
     stop: CancellationToken,
@@ -362,7 +364,13 @@ impl Session {
         loop {
             tokio::select! {
                 result = &mut initialize => {
-                    result?;
+                    // `{originator}/{version} ({platform})…`
+                    let agent = result?["userAgent"].as_str().unwrap_or_default().to_owned();
+                    self.release = agent
+                        .split_once('/')
+                        .and_then(|(_, rest)| rest.split_whitespace().next())
+                        .unwrap_or_default()
+                        .to_owned();
                     break;
                 }
                 incoming = self.incoming.recv() => {
@@ -470,6 +478,7 @@ impl Session {
         });
         Ok(Self {
             auth: None,
+            release: String::new(),
             rpc,
             incoming: receiver,
             stop,
@@ -548,8 +557,24 @@ impl Rpc {
         } else {
             Duration::from_secs(20)
         };
+        self.request_as(self.next_id(), method, params, timeout)
+            .await
+    }
+
+    /// Identifies a request that may later need cancelling by its ID.
+    pub(crate) fn next_id(&self) -> u64 {
+        self.sequence.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// A request under an ID from `next_id`, bounded by `timeout` instead of the default.
+    pub(crate) async fn request_as(
+        &self,
+        id: u64,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
         let started = Instant::now();
-        let id = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let diagnostic_request = self
             .diagnostics
             .as_ref()

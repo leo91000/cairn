@@ -103,9 +103,15 @@ typealias Occurrences = build.cairn.contracts.SchedulePreviewOutput
 
 @Serializable data class TokenResult(val token: String)
 
-@Serializable data class OAuthClient(val client_name: String = "")
+@Serializable data class OAuthClient(val client_name: String = "", val redirect_uri: String = "")
 
-@Serializable data class ConsentPreview(val client: OAuthClient, val scopes: List<String>)
+@Serializable
+data class ConsentPreview(
+    val client: OAuthClient,
+    val scopes: List<String>,
+    val installations: List<Installation> = emptyList(),
+    val confirmationRequired: Boolean = false,
+)
 
 @Serializable data class ConsentResult(val redirect: String)
 
