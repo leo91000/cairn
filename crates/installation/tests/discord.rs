@@ -168,6 +168,17 @@ async fn rest_with_gateway() -> (String, tokio::task::JoinHandle<()>, GatewayBot
             }),
         )
         .route(
+            "/api/v10/channels/{id}",
+            get(|Path(id): Path<String>| async move {
+                match id.as_str() {
+                    "200" => Json(json!({ "id": "200", "type": 0, "guild_id": "100", "name": "support" })).into_response(),
+                    "700" => Json(json!({ "id": "700", "type": 11, "guild_id": "100", "parent_id": "200", "name": "Question" })).into_response(),
+                    "900" => Json(json!({ "id": "900", "type": 0, "guild_id": "999", "name": "elsewhere" })).into_response(),
+                    _ => StatusCode::NOT_FOUND.into_response(),
+                }
+            }),
+        )
+        .route(
             "/api/v10/guilds/100/threads/active",
             get(|| async {
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -509,7 +520,8 @@ async fn gateway_identifies_heartbeats_admits_mentions_and_resumes_in_luau() {
         .await;
         let identify = receive_op(&mut socket, 2).await;
         assert_eq!(identify["op"], 2);
-        assert_eq!(identify["d"]["intents"], 513);
+        // Guilds, guild messages and reactions; no privileged intent by default.
+        assert_eq!(identify["d"]["intents"], 1 + 512 + 1024);
         // The host put the token where the script wrote {{secret}}.
         assert_eq!(identify["d"]["token"], "synthetic_discord_token");
         send(
@@ -1593,4 +1605,255 @@ async fn plugin_grants_keep_a_bot_anyone_can_reach_answering() {
     )
     .unwrap();
     assert_eq!(stored.revision, text(&saved, "revision"));
+}
+
+fn dispatch(sequence: u64, name: &str, mut data: Value) -> Value {
+    json!({ "op": 0, "s": sequence, "t": name, "d": data.take() })
+}
+
+#[tokio::test]
+async fn server_activity_becomes_hooks_rules_listen_to() {
+    let (_root, s, agent) = service().await;
+    let saved = save(
+        &s,
+        &agent,
+        json!({ "guildId": "100", "channelId": "200", "memberEvents": true }),
+    )
+    .await
+    .unwrap();
+    let connection: Connection = serde_json::from_value(saved).unwrap();
+    for hook in [
+        "message",
+        "message-edited",
+        "message-deleted",
+        "reaction-added",
+        "thread-created",
+        "channel-created",
+        "member-joined",
+    ] {
+        common::listen(&s.store, &connection.id, hook).await;
+    }
+    let (origin, server, _gateway) = rest_with_gateway().await;
+    s.plugins.route_http_to(Some(origin));
+    // Resources name the server, its channels and threads, checked against Discord.
+    let resolve = |resource_type: &str, id: &str| {
+        let input = serde_json::from_value(json!({
+            "pluginId": "discord", "instanceId": connection.id, "resourceType": resource_type, "id": id,
+        }))
+        .unwrap();
+        let s = s.clone();
+        async move {
+            cairn_installation::plugins::resources::resolve(&s, input, None)
+                .await
+                .map(|resolved| serde_json::to_value(resolved).unwrap())
+        }
+    };
+    let thread = resolve("thread", "700").await.unwrap();
+    assert_eq!(thread["resource"]["name"], "Question");
+    assert_eq!(thread["ancestors"][0]["name"], "#support");
+    assert_eq!(thread["ancestors"][1]["id"], "100");
+    assert!(
+        resolve("channel", "700").await.is_err(),
+        "a thread is not a channel"
+    );
+    assert!(
+        resolve("channel", "900").await.is_err(),
+        "another server's channel"
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    s.plugins
+        .route_sockets_to(Some(format!("ws://{}", listener.local_addr().unwrap())));
+    let upstream = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        send(
+            &mut socket,
+            json!({ "op": 10, "d": { "heartbeat_interval": 300 } }),
+        )
+        .await;
+        let identify = receive_op(&mut socket, 2).await;
+        // Members joining and leaving add Server Members, a privileged intent.
+        assert_eq!(identify["d"]["intents"], 1 + 2 + 512 + 1024);
+        let author = json!({ "id": "301", "username": "ada", "global_name": "Ada" });
+        let dispatches = [
+            dispatch(
+                1,
+                "READY",
+                json!({
+                    "session_id": "hooks_session",
+                    "user": { "id": "400", "username": "Cairn", "bot": true },
+                }),
+            ),
+            dispatch(
+                2,
+                "GUILD_CREATE",
+                json!({ "id": "100", "threads": [
+                { "id": "700", "parent_id": "200", "thread_metadata": { "archived": false } },
+            ] }),
+            ),
+            // A message in a thread names the thread and its channel.
+            dispatch(
+                3,
+                "MESSAGE_CREATE",
+                json!({
+                    "id": "510", "guild_id": "100", "channel_id": "700", "content": "",
+                    "author": author, "mentions": [], "timestamp": "2026-11-28T10:00:00Z",
+                    "message_reference": { "message_id": "509" },
+                    "attachments": [{ "filename": "log.txt", "url": "https://cdn.discordapp.com/log.txt", "size": 12 }],
+                }),
+            ),
+            // The bot's own messages and other servers are not hooks.
+            dispatch(
+                4,
+                "MESSAGE_CREATE",
+                json!({
+                    "id": "511", "guild_id": "100", "channel_id": "200", "content": "Done",
+                    "author": { "id": "400", "username": "Cairn", "bot": true }, "mentions": [],
+                }),
+            ),
+            dispatch(
+                5,
+                "MESSAGE_CREATE",
+                json!({
+                    "id": "512", "guild_id": "999", "channel_id": "900", "content": "",
+                    "author": author, "mentions": [],
+                }),
+            ),
+            dispatch(
+                6,
+                "MESSAGE_REACTION_ADD",
+                json!({
+                    "user_id": "301", "guild_id": "100", "channel_id": "200", "message_id": "510",
+                    "emoji": { "name": "👍", "id": null }, "member": { "user": author },
+                }),
+            ),
+            // A replayed dispatch keeps its session and sequence.
+            dispatch(
+                6,
+                "MESSAGE_REACTION_ADD",
+                json!({
+                    "user_id": "301", "guild_id": "100", "channel_id": "200", "message_id": "510",
+                    "emoji": { "name": "👍", "id": null },
+                }),
+            ),
+            dispatch(
+                7,
+                "MESSAGE_REACTION_ADD",
+                json!({
+                    "user_id": "301", "guild_id": "100", "channel_id": "200", "message_id": "510",
+                    "emoji": { "name": "party", "id": "800" },
+                }),
+            ),
+            // Link previews update messages without an edit.
+            dispatch(
+                8,
+                "MESSAGE_UPDATE",
+                json!({ "id": "510", "guild_id": "100", "channel_id": "700" }),
+            ),
+            dispatch(
+                9,
+                "MESSAGE_UPDATE",
+                json!({
+                    "id": "510", "guild_id": "100", "channel_id": "700", "content": "Edited",
+                    "author": author, "edited_timestamp": "2026-11-28T10:01:00Z",
+                }),
+            ),
+            dispatch(
+                10,
+                "MESSAGE_DELETE",
+                json!({ "id": "510", "guild_id": "100", "channel_id": "700" }),
+            ),
+            dispatch(
+                11,
+                "THREAD_CREATE",
+                json!({
+                    "id": "701", "guild_id": "100", "parent_id": "200", "name": "New question",
+                    "owner_id": "301", "newly_created": true, "type": 11,
+                }),
+            ),
+            dispatch(
+                12,
+                "CHANNEL_CREATE",
+                json!({ "id": "205", "guild_id": "100", "name": "launch", "type": 0 }),
+            ),
+            dispatch(
+                13,
+                "GUILD_MEMBER_ADD",
+                json!({
+                    "guild_id": "100", "user": { "id": "302", "username": "grace" },
+                    "joined_at": "2026-11-28T10:02:00Z",
+                }),
+            ),
+            // Nobody listens to members leaving: nothing is recorded.
+            dispatch(
+                14,
+                "GUILD_MEMBER_REMOVE",
+                json!({ "guild_id": "100", "user": { "id": "302", "username": "grace" } }),
+            ),
+        ];
+        for payload in dispatches {
+            send(&mut socket, payload).await;
+        }
+        acknowledge_heartbeat(&mut socket, 14).await;
+        socket
+            .close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: 4004.into(),
+                reason: "Authentication failed.".into(),
+            }))
+            .await
+            .unwrap();
+    });
+    let package = registry::active(&s, "discord").await.unwrap();
+    let stop = CancellationToken::new();
+    let result = tokio::time::timeout(
+        Duration::from_secs(15),
+        socket::run(&s, &connection, &package, &stop),
+    )
+    .await
+    .unwrap();
+    upstream.await.unwrap();
+    assert_eq!(result.unwrap_err().status, 403);
+
+    let queued = common::queued_hooks(&s.store, &connection.id).await;
+    let hook = |id: &str| {
+        queued
+            .iter()
+            .find(|event| event["id"] == id)
+            .unwrap_or_else(|| panic!("{id} in {queued:?}"))
+            .clone()
+    };
+    assert_eq!(queued.len(), 8, "{queued:?}");
+    let message = hook("message:510");
+    assert_eq!(message["payload"]["channelId"], "200");
+    assert_eq!(message["payload"]["threadId"], "700");
+    assert_eq!(message["payload"]["authorName"], "Ada");
+    assert_eq!(message["payload"]["authorBot"], false);
+    assert_eq!(message["payload"]["mentionsBot"], false);
+    assert_eq!(message["payload"]["replyToId"], "509");
+    assert_eq!(message["payload"]["attachments"][0]["name"], "log.txt");
+    assert_eq!(
+        message["payload"]["url"],
+        "https://discord.com/channels/100/700/510"
+    );
+    let reaction = hook("reaction:hooks_session:6");
+    assert_eq!(reaction["name"], "reaction-added");
+    assert_eq!(reaction["payload"]["emoji"], "👍");
+    assert_eq!(reaction["payload"]["userName"], "Ada");
+    assert_eq!(
+        hook("reaction:hooks_session:7")["payload"]["emoji"],
+        "party:800"
+    );
+    let edited = hook("edit:510:2026-11-28T10:01:00Z");
+    assert_eq!(edited["payload"]["text"], "Edited");
+    assert_eq!(edited["payload"]["threadId"], "700");
+    assert_eq!(hook("delete:510")["name"], "message-deleted");
+    let thread = hook("thread:701");
+    assert_eq!(thread["payload"]["channelId"], "200");
+    assert_eq!(thread["payload"]["ownerId"], "301");
+    assert_eq!(hook("channel:205")["payload"]["kind"], "text");
+    let joined = hook("member:hooks_session:13");
+    assert_eq!(joined["name"], "member-joined");
+    assert_eq!(joined["payload"]["userName"], "grace");
+
+    server.abort();
 }

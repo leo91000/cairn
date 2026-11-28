@@ -766,6 +766,19 @@ abstract class RulesCreationCases {
                     return
                 }
                 compose.onNodeWithText("Nom de la règle").performTextReplacement("Original")
+                // A new rule starts from an empty node: saving first says what is missing.
+                compose.onNode(hasText("Créer") and isNotEnabled()).performClick()
+                waitFor {
+                    compose
+                        .onAllNodesWithText("Commencez par choisir ce qui déclenche la règle.")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                assertTrue(writes.isEmpty())
+                compose
+                    .onNodeWithContentDescription("Choisir ce qui déclenche la règle")
+                    .performClick()
+                compose.onNodeWithText("Réponse prête").performClick()
                 compose.onNodeWithText("Étape").performScrollTo().performClick()
                 compose.onNodeWithText("Mémoriser une valeur").performClick()
                 compose.onNodeWithText("Terminer cette étape").performScrollTo().performClick()

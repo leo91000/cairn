@@ -64,7 +64,7 @@ export type HttpRequest = {
     method: ("GET" | "POST" | "PUT" | "PATCH" | "DELETE")?,
     -- HTTPS only, to a host listed in the manifest's "hosts".
     url: string,
-    -- content-type, accept, user-agent or x-* only.
+    -- content-type, accept, user-agent, if-none-match, if-modified-since or x-* only.
     headers: { [string]: string }?,
     json: Json?,
     body: string?,
@@ -140,8 +140,8 @@ export type Inbound = {
 }
 
 -- capability "hooks": transport/socket or timer handlers only. Queue admission
--- returns false on a duplicate or full backlog/receipt ledger. Retry full queues
--- using the same ID. No rules consume these events until the rule engine ships.
+-- returns false on a duplicate, a full backlog/receipt ledger, or when no enabled rule
+-- listens to the hook (nothing is recorded then). Retry full queues using the same ID.
 export type HookEmission = { name: string, id: string, payload: { [string]: Json } }
 export type ResourceRef = { resourceType: string, id: string }
 export type Resource = { resourceType: string, id: string, name: string, parent: ResourceRef? }
@@ -149,7 +149,7 @@ export type ResourcePage = { items: { Resource }, nextPage: number? }
 
 export type HttpResponse = {
     status: number,
-    -- content-type, retry-after, link and x-* headers.
+    -- content-type, retry-after, link, etag, last-modified and x-* headers.
     headers: { [string]: string },
     json: Json?,
     text: string?,

@@ -37,6 +37,8 @@ struct Google {
     send_error: Mutex<bool>,
     broken_send: Mutex<bool>,
     pause_refresh: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    /// What users.history.list answers; null answers 404, as for an expired position.
+    history: Mutex<Value>,
 }
 
 async fn answer(google: Arc<Google>, request: Request<Body>) -> Response {
@@ -91,6 +93,35 @@ async fn answer(google: Arc<Google>, request: Request<Body>) -> Response {
             "messagesTotal": 8,
             "threadsTotal": 3,
         }))
+        .into_response();
+    }
+    if path.ends_with("/history") {
+        let history = google.history.lock().unwrap().clone();
+        if history.is_null() {
+            return (
+                StatusCode::NOT_FOUND,
+                axum::Json(json!({ "error": { "status": "NOT_FOUND" } })),
+            )
+                .into_response();
+        }
+        return axum::Json(history).into_response();
+    }
+    if path.ends_with("/labels") {
+        return axum::Json(json!({ "labels": [
+            { "id": "STARRED", "name": "STARRED" }, { "id": "Label_1", "name": "Clients" },
+        ] }))
+        .into_response();
+    }
+    if path.ends_with("/messages/m-in") {
+        return axum::Json(
+            json!({ "id": "m-in", "threadId": "t1", "snippet": "Hello Ada",
+            "labelIds": ["INBOX", "UNREAD", "IMPORTANT"], "payload": { "headers": [
+                { "name": "From", "value": "\"Ada Lovelace\" <Ada@Example.test>" },
+                { "name": "To", "value": "alice@example.test" },
+                { "name": "Subject", "value": "Invoice" },
+                { "name": "Date", "value": "Sat, 28 Nov 2026 10:00:00 +0000" },
+            ] } }),
+        )
         .into_response();
     }
     if path.ends_with("/attachments/large") {
@@ -1308,4 +1339,119 @@ async fn refresh_does_not_post_after_revocation_during_credential_preparation() 
         "refresh POST escaped after its local authority was revoked"
     );
     assert!(f.s.vault.get(&key).await.unwrap().as_ref() == Some(&credential));
+}
+
+/// Releases the account's due timers into its worker once.
+async fn tick(f: &Fixture, account: &Connection, session: &mut cairn_plugin_host::Session) {
+    common::expire_plugin_timers(&f.s.store, &account.id).await;
+    cairn_installation::plugins::runtime::pump(&f.s, account, session)
+        .await
+        .unwrap();
+}
+
+fn history_calls(f: &Fixture) -> Vec<String> {
+    f.google
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| text(call, "path").ends_with("/history"))
+        .map(|call| text(call, "query").to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn mailbox_history_becomes_hooks_from_where_the_worker_started() {
+    let f = fixture().await;
+    let account = connect(&f, "alice").await;
+    for hook in [
+        "message-received",
+        "message-sent",
+        "label-added",
+        "message-deleted",
+    ] {
+        common::listen(&f.s.store, &account.id, hook).await;
+    }
+    let package = registry::active(&f.s, "gmail").await.unwrap();
+    let worker = PathBuf::from(env!("CARGO_BIN_EXE_cairn"));
+    let mut session =
+        f.s.plugins
+            .host
+            .start(&worker, &package.manifest, &package.source)
+            .await
+            .unwrap();
+    cairn_installation::plugins::runtime::begin(&f.s, &account, &mut session)
+        .await
+        .unwrap();
+
+    // The first read only takes the mailbox's position.
+    tick(&f, &account, &mut session).await;
+    assert!(history_calls(&f).is_empty());
+    assert!(
+        common::queued_hooks(&f.s.store, &account.id)
+            .await
+            .is_empty()
+    );
+
+    let change =
+        |message: &str, thread: &str| json!({ "message": { "id": message, "threadId": thread } });
+    *f.google.history.lock().unwrap() = json!({
+        "historyId": "18446744073709551615",
+        "history": [
+            { "id": "18446744073709551611", "messagesAdded": [{ "message": { "id": "m-in", "threadId": "t1", "labelIds": ["INBOX", "UNREAD"] } }] },
+            { "id": "18446744073709551612", "messagesAdded": [{ "message": { "id": "m-out", "threadId": "t1", "labelIds": ["SENT"] } }] },
+            { "id": "18446744073709551613",
+              "labelsAdded": [{ "message": { "id": "m-in", "threadId": "t1" }, "labelIds": ["STARRED", "Label_1"] }],
+              "labelsRemoved": [{ "message": { "id": "m-in", "threadId": "t1" }, "labelIds": ["UNREAD"] }] },
+            { "id": "18446744073709551614", "messagesDeleted": [change("m-old", "t0")] },
+            { "id": "18446744073709551615", "messagesAdded": [{ "message": { "id": "m-spam", "threadId": "t2", "labelIds": ["SPAM"] } }] },
+        ],
+    });
+    tick(&f, &account, &mut session).await;
+    assert_eq!(
+        history_calls(&f),
+        ["maxResults=100&startHistoryId=18446744073709551610"]
+    );
+    let queued = common::queued_hooks(&f.s.store, &account.id).await;
+    let hook = |id: &str| {
+        queued
+            .iter()
+            .find(|event| event["id"] == id)
+            .unwrap_or_else(|| panic!("{id} in {queued:?}"))
+            .clone()
+    };
+    assert_eq!(queued.len(), 4, "{queued:?}");
+    let received = hook("received:m-in");
+    assert_eq!(received["name"], "message-received");
+    assert_eq!(received["payload"]["fromEmail"], "ada@example.test");
+    assert_eq!(received["payload"]["fromName"], "Ada Lovelace");
+    assert_eq!(received["payload"]["subject"], "Invoice");
+    assert_eq!(received["payload"]["snippet"], "Hello Ada");
+    assert_eq!(
+        received["payload"]["labelIds"],
+        json!(["INBOX", "UNREAD", "IMPORTANT"])
+    );
+    assert_eq!(hook("sent:m-out")["name"], "message-sent");
+    let labelled = hook("labels:18446744073709551613:m-in:add");
+    assert_eq!(
+        labelled["payload"]["labelNames"],
+        json!(["STARRED", "Clients"])
+    );
+    assert_eq!(hook("deleted:m-old")["payload"]["threadId"], "t0");
+
+    // The next read starts after the last change; an expired position starts over.
+    *f.google.history.lock().unwrap() = Value::Null;
+    tick(&f, &account, &mut session).await;
+    assert_eq!(
+        history_calls(&f).last().unwrap(),
+        "maxResults=100&startHistoryId=18446744073709551615"
+    );
+    *f.google.history.lock().unwrap() = json!({ "historyId": "18446744073709551610" });
+    tick(&f, &account, &mut session).await;
+    assert_eq!(
+        history_calls(&f).last().unwrap(),
+        "maxResults=100&startHistoryId=18446744073709551610"
+    );
+    assert_eq!(common::queued_hooks(&f.s.store, &account.id).await.len(), 4);
+    session.stop().await;
 }

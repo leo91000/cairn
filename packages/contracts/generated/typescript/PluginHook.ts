@@ -3,6 +3,10 @@ import type { PluginResourceField } from './PluginResourceField'
 
 export interface PluginHook {
   name: string
+  /**
+   * How people read the hook when they pick it, e.g. "A message is posted".
+   */
+  title?: string | null
   description: string
   payloadSchema: any
   resourceFields?: Array<PluginResourceField>

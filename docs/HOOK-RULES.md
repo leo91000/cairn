@@ -390,13 +390,28 @@ and `cairn_installation`:
 
 `validate_hook_rule` checks a definition as saving would and returns problems located
 by JSON Pointer into the definition, with warnings. The catalog lists the hooks with
-their payload schemas and resource fields, the plugin tools with their input schemas,
+their title (the manifest's optional `title`, otherwise the hook's name), the plugin's
+brand, payload schemas and resource fields, the plugin tools with their input schemas,
 each action kind with its JSON Schema, the conditions, operators, Cairn functions,
 variables, the agents the caller may designate and the limits. A member is offered
 only the agents they may use.
 
 A rule created through the public MCP, which needs the manage scope, belongs to the
 owner who authorized the client.
+
+### The editor
+
+On the web and Android the rule is drawn on a canvas, from its starting node through
+its steps; the canvas fills the editor and is moved by dragging. A new rule starts from
+an empty starting node; touching it lists the events the person's agents may listen
+to, by plugin instance, with the plugin's mark and the hook's title, then asks whose
+rights to use when several agents hold the chosen hook. The starting node then shows
+the event, its instance and the execution agent. A plugin page that opens the editor
+for one of its instances starts from that instance's first hook. The « + » on each
+link adds a step; touching a step edits it in a panel. A rule being created is not
+judged before its first save attempt: until then its status reads Draft. Saving too
+early names what is missing and shakes the node concerned; an unnamed rule takes its
+event's title. Description and hourly limits are in a separate sheet.
 
 ### Agents with installation access
 

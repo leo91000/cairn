@@ -128,6 +128,17 @@ impl Db<'_> {
             "DELETE FROM plugin_hook_events WHERE instance_id=?1 AND package_digest<>?2",
             params![current.id, digest],
         )?;
+        // A busy service emits far more than rules use. Nothing is recorded for a hook
+        // no enabled rule listens to, so it never fills the queue or the receipt ledger.
+        let listened: bool = self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hook_rule_uses u JOIN hook_rules r ON r.id=u.rule_id \
+             WHERE u.kind='hook' AND u.instance_id=?1 AND u.name=?2 AND r.disabled_at IS NULL)",
+            params![current.id, name],
+            |row| row.get(0),
+        )?;
+        if !listened {
+            return Ok(false);
+        }
         let seen: bool = self.0.query_row("SELECT EXISTS(SELECT 1 FROM plugin_hook_receipts WHERE instance_id=?1 AND external_id=?2)", params![current.id, external], |row| row.get(0))?;
         if seen {
             return Ok(false);
@@ -247,6 +258,84 @@ mod tests {
         }
     }
 
+    /// A rule listening to `name` on the instance; the intake records nothing otherwise.
+    fn listen(db: &Db<'_>, instance: &str, name: &str) -> Result<String> {
+        let rule = id();
+        db.0.execute(
+            "INSERT INTO hook_rules(id,creator_account_id,creator_owner,revision,version,created_at,updated_at) VALUES(?1,'owner',1,'r',1,0,0)",
+            [&rule],
+        )?;
+        db.0.execute(
+            "INSERT INTO hook_rule_uses VALUES(?1,'hook','agent',?2,?3)",
+            params![rule, instance, name],
+        )?;
+        Ok(rule)
+    }
+
+    #[tokio::test]
+    async fn hooks_no_enabled_rule_listens_to_are_not_recorded() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let context = hook_context();
+                let instance = context.connection.id.clone();
+                let digest = "a".repeat(64);
+                db.save_plugin_instance(&context.connection)?;
+                assert!(!db.enqueue_hook(
+                    &context,
+                    &digest,
+                    "quiet",
+                    "message",
+                    &json!({}),
+                    now()
+                )?);
+                let rule = listen(db, &instance, "reaction")?;
+                assert!(!db.enqueue_hook(
+                    &context,
+                    &digest,
+                    "other",
+                    "message",
+                    &json!({}),
+                    now()
+                )?);
+                db.0.execute(
+                    "UPDATE hook_rule_uses SET name='message' WHERE rule_id=?1",
+                    [&rule],
+                )?;
+                db.0.execute("UPDATE hook_rules SET disabled_at=1 WHERE id=?1", [&rule])?;
+                assert!(!db.enqueue_hook(
+                    &context,
+                    &digest,
+                    "disabled",
+                    "message",
+                    &json!({}),
+                    now()
+                )?);
+                let receipts: i64 =
+                    db.0.query_row("SELECT count(*) FROM plugin_hook_receipts", [], |row| {
+                        row.get(0)
+                    })?;
+                assert_eq!(receipts, 0);
+                db.0.execute(
+                    "UPDATE hook_rules SET disabled_at=NULL WHERE id=?1",
+                    [&rule],
+                )?;
+                // Unrecorded IDs stay available once a rule listens.
+                assert!(db.enqueue_hook(
+                    &context,
+                    &digest,
+                    "quiet",
+                    "message",
+                    &json!({}),
+                    now()
+                )?);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn queue_survives_reopen_and_deduplicates_after_acknowledgement() {
         let root = tempfile::tempdir().unwrap();
@@ -257,6 +346,7 @@ mod tests {
         store
             .transaction(move |db| {
                 db.save_plugin_instance(&context.connection)?;
+                listen(db, &context.connection.id, "message")?;
                 assert!(db.enqueue_hook(
                     &context,
                     &"a".repeat(64),
@@ -312,6 +402,8 @@ mod tests {
             let at = now();
             db.save_plugin_instance(&first.connection)?;
             db.save_plugin_instance(&second.connection)?;
+            listen(db, &first.connection.id, "message")?;
+            listen(db, &second.connection.id, "message")?;
             for index in 0..MAX_PENDING {
                 assert!(db.enqueue_hook(&first, &digest, &index.to_string(), "message", &json!({}), at)?);
             }
@@ -345,6 +437,7 @@ mod tests {
                 let a = "a".repeat(64);
                 let b = "b".repeat(64);
                 db.save_plugin_instance(&context.connection)?;
+                listen(db, &context.connection.id, "message")?;
                 assert!(db.enqueue_hook(&context, &a, "old", "message", &json!({}), at)?);
                 assert!(
                     db.plugin_hooks(&context.connection.id, &context.connection.revision, &b, at)?

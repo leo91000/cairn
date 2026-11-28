@@ -3196,8 +3196,45 @@ return {
     let connection = connections::get(&s, "hook-probe", text(&saved, "id"))
         .await
         .unwrap();
+    common::listen(&s.store, &connection.id, "message").await;
     let package = registry::active(&s, "hook-probe").await.unwrap();
     (root, s, connection, package)
+}
+
+#[tokio::test]
+async fn hooks_without_a_listening_rule_are_not_recorded() {
+    let (_root, s, connection, package) = hooks_fixture().await;
+    let rule = connection.id.clone();
+    s.store
+        .transaction(move |db| {
+            db.0.execute("DELETE FROM hook_rule_uses WHERE instance_id=?1", [&rule])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(&worker(), &package.manifest, &package.source)
+        .await
+        .unwrap();
+    let (link, _commands) = socket::Link::channel();
+    let emission = json!({ "name": "message", "id": "unheard", "payload": { "channel": "c" } });
+    assert_eq!(
+        socket::deliver(&s, &connection, &mut session, &link, emission.clone())
+            .await
+            .unwrap(),
+        false
+    );
+    common::listen(&s.store, &connection.id, "message").await;
+    // The ID was never recorded, so it is admitted once a rule listens.
+    assert_eq!(
+        socket::deliver(&s, &connection, &mut session, &link, emission)
+            .await
+            .unwrap(),
+        true
+    );
+    session.stop().await;
 }
 
 #[tokio::test]

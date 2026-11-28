@@ -7,6 +7,8 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class RuleCatalogHook(
     val agentIds: List<String>,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val brand: PluginBrand? = null,
     val description: String,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val instanceName: String? = null,

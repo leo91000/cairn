@@ -15,6 +15,12 @@ import {
   untypedTextRulesFixture,
 } from './rules-fixture'
 
+// A new rule starts from an empty node: its event is chosen from the picker.
+async function chooseStart(page: Page, title: string) {
+  await page.getByRole('button', { name: 'Choose what starts the rule', exact: true }).click()
+  await page.getByRole('dialog', { name: 'What starts the rule?', exact: true }).getByRole('button', { name: new RegExp(`^${title}`) }).first().click()
+}
+
 test('nullable nested options preserve null, omitted and false states through execution', async ({ page, workspace }) => {
   const fixture = await nullableOptionsRulesFixture(workspace)
   const call = fixture.definition.steps[0].then[0]
@@ -467,8 +473,38 @@ test('new rules keep the agent whose page requested them', async ({ page, worksp
   const agent = workspace.service.agent({ name: 'Requested assistant without plugin access' })
   await page.goto(workspacePath(`/rules/new?agent=${agent.id}`))
   await signIn(page)
-  await expect(page.getByRole('combobox', { name: 'Execution agent', exact: true })).toHaveValue(agent.id)
-  await expect(page.getByRole('combobox', { name: 'Hook', exact: true })).toHaveValue(/^cairn:/)
+  await chooseStart(page, 'Reply ready')
+  await expect(page.getByRole('button', { name: 'Execution agent', exact: true })).toContainText('Requested assistant without plugin access')
+  await expect(page.getByRole('button', { name: 'Change what starts the rule: Reply ready', exact: true })).toBeVisible()
+})
+
+test('a new rule starts from an empty node and points at what is missing', async ({ page, workspace }) => {
+  const fixture = await rulesFixture(workspace)
+  await page.goto(workspacePath(`/rules/new?agent=${fixture.agent.id}`))
+  await signIn(page)
+  const start = page.getByRole('button', { name: 'Choose what starts the rule', exact: true })
+  await expect(start).toBeVisible()
+  // Nothing is judged before the person tries to save.
+  await expect(page.getByText(/to fix/)).toHaveCount(0)
+  const create = page.getByRole('button', { name: 'Create rule', exact: true })
+  await expect(create).toHaveAttribute('aria-disabled', 'true')
+  await create.click({ force: true })
+  await expect(page.getByRole('status').filter({ hasText: 'Start by choosing what starts the rule.' })).toBeVisible()
+  await start.click()
+  const picker = page.getByRole('dialog', { name: 'What starts the rule?', exact: true })
+  await picker.getByRole('textbox', { name: 'Search events', exact: true }).fill('received')
+  await expect(picker.getByRole('button', { name: /^Reply ready/ })).toHaveCount(0)
+  await picker.getByRole('button', { name: /^message/ }).click()
+  await expect(page.getByRole('button', { name: 'Change what starts the rule: message', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Add the first step', exact: true }).click()
+  await page.getByRole('menuitem', { name: /Remember a value/ }).click()
+  await page.getByRole('button', { name: 'Close the step', exact: true }).click()
+  // Left unnamed, the rule takes its event's title.
+  await create.click({ force: true })
+  await expect(page.getByRole('textbox', { name: 'Rule name', exact: true })).toHaveValue('message')
+  await expect(create).not.toHaveAttribute('aria-disabled', 'true')
+  await create.click()
+  await expect(page.getByRole('heading', { name: 'message', exact: true })).toBeVisible()
 })
 
 test('a catalog load failure explains disabled creation and can be retried', async ({ page, workspace }) => {
@@ -559,8 +595,10 @@ test('a check answering while a slider is pressed is applied at once', async ({ 
   try {
     await page.goto(workspacePath(`/rules/${rule.id}/edit`))
     await signIn(page)
-    const status = page.getByRole('status').filter({ hasText: /Checking|Ready/ })
+    // The limits live in their sheet, which leaves the header's status inert behind it.
+    const status = page.locator('[role="status"]', { hasText: /Checking|Ready/ })
     await expect(status).toHaveText('Checking…')
+    await page.getByRole('button', { name: 'Limits and description', exact: true }).click()
     // Dragging a slider has no click to protect. A synthetic press leaves its value as it is.
     await page.getByRole('slider', { name: /Triggerings that act/ })
       .dispatchEvent('pointerdown', {
@@ -590,8 +628,9 @@ async function openConditionStep(page: Page, workspace: Workspace) {
 
   await page.goto(workspacePath(`/rules/new?agent=${fixture.agent.id}&instance=${fixture.instanceId}`))
   await signIn(page)
-  const status = page.locator('[role="status"]', { hasText: /Checking|to fix|Ready/ })
-  await expect(status).toHaveText(/to fix|Ready/)
+  // A new rule is not judged before its first save: its pending problems read as a draft.
+  const status = page.locator('[role="status"]', { hasText: /Checking|Draft|Ready/ })
+  await expect(status).toHaveText(/Draft|Ready/)
 
   // The new step's check is held, and its messages will grow the step sheet.
   validation.current = Promise.withResolvers<void>()
@@ -631,7 +670,7 @@ test('a check answering during a press waits for its click on a phone', async ({
     expect((await add.boundingBox())!.y).toBe(before.y)
     await page.mouse.up()
     await expect(page.getByRole('menuitem', { name: /The author is one/ })).toBeVisible()
-    await expect(status).toHaveText(/to fix/)
+    await expect(status).toHaveText('Draft')
   }
   finally {
     validation.current.resolve()
@@ -657,7 +696,7 @@ test('a check answering during a press is applied when the press is released els
     // Released over the sheet above the button: there is no click on it to protect.
     await add.dispatchEvent('pointerup', { ...pointer, clientX: before.x + before.width / 2, clientY: before.y - 40 })
     // Well before a held check would be let through.
-    await expect(status).toHaveText(/to fix/, { timeout: 1000 })
+    await expect(status).toHaveText('Draft', { timeout: 1000 })
     await expect(page.getByRole('menuitem', { name: /The author is one/ })).toHaveCount(0)
   }
   finally {
@@ -682,7 +721,7 @@ test('a check answering during a tap waits for its click', async ({ page, worksp
     await expect(status).toHaveText('Checking…')
     await page.touchscreen.tap(before.x + before.width / 2, before.y + before.height / 2)
     await expect(page.getByRole('menuitem', { name: /The author is one/ })).toBeVisible()
-    await expect(status).toHaveText(/to fix/)
+    await expect(status).toHaveText('Draft')
   }
   finally {
     validation.current.resolve()
@@ -695,6 +734,7 @@ test('a committed creation with an unavailable response keeps later edits for a 
   await useRelayForHttpMocks(page)
   await page.goto(workspacePath(`/rules/new?agent=${fixture.agent.id}`))
   await signIn(page)
+  await chooseStart(page, 'message')
   let unavailable = true
   let createdId = ''
   await page.route('**/api/hook-rules', async (route) => {
@@ -863,7 +903,7 @@ test('removing a branch asks before dropping its nested steps', async ({ page, w
   await page.goto(workspacePath(`/rules/${rule.id}/edit`))
   await signIn(page)
   const removeBranch = page.getByRole('button', { name: 'Remove this step', exact: true }).first()
-  await expect(page.getByRole('region', { name: 'When', exact: true })).toBeInViewport({ ratio: 1 })
+  await expect(page.getByRole('button', { name: /^Change what starts the rule/ })).toBeInViewport({ ratio: 1 })
   await expect(removeBranch).toBeInViewport()
   await removeBranch.click()
   await expect(page.getByRole('dialog', { name: 'Remove this step and its branches?', exact: true })).toBeVisible()
@@ -893,6 +933,7 @@ test('a rejected creation accepts the corrected form without a duplicate rule', 
   })
   await page.goto(workspacePath(`/rules/new?agent=${fixture.agent.id}`))
   await signIn(page)
+  await chooseStart(page, 'message')
   await page.getByRole('textbox', { name: 'Rule name', exact: true }).fill('Rejected draft')
   await page.getByRole('button', { name: 'Add the first step', exact: true }).click()
   await page.getByRole('menuitem', { name: /Remember a value/ }).click()

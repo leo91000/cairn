@@ -654,6 +654,67 @@ pub async fn plugin_timers(store: &Store) -> cairn_installation::error::Result<V
         .await
 }
 
+/// Makes every timer of an instance due now, as if its delay had passed.
+pub async fn expire_plugin_timers(store: &Store, instance: &str) {
+    let instance = instance.to_owned();
+    store
+        .transaction(move |db| {
+            db.0.execute(
+                "UPDATE plugin_timers SET at=0 WHERE instance_id=?1",
+                [&instance],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// An enabled rule listening to `hook` on an instance. It has no version, so the rule
+/// engine never receives anything for it; the hook intake records the plugin's events.
+pub async fn listen(store: &Store, instance: &str, hook: &str) -> String {
+    let (instance, hook) = (instance.to_owned(), hook.to_owned());
+    store
+        .transaction(move |db| {
+            let rule = cairn_installation::config::id();
+            db.0.execute(
+                "INSERT INTO hook_rules(id,creator_account_id,creator_owner,revision,version,created_at,updated_at) VALUES(?1,'owner',1,'r',1,0,0)",
+                [&rule],
+            )?;
+            db.0.execute(
+                "INSERT INTO hook_rule_uses VALUES(?1,'hook','agent',?2,?3)",
+                [&rule, &instance, &hook],
+            )?;
+            Ok(rule)
+        })
+        .await
+        .unwrap()
+}
+
+/// Hook events an instance queued, oldest first: `{ id, name, payload }` with the
+/// plugin's own ID.
+pub async fn queued_hooks(store: &Store, instance: &str) -> Vec<Value> {
+    let instance = instance.to_owned();
+    store
+        .read(move |db| {
+            let mut statement = db.0.prepare(
+                "SELECT external_id,name,payload FROM plugin_hook_events WHERE instance_id=?1 ORDER BY created_at",
+            )?;
+            let rows = statement
+                .query_map([&instance], |row| {
+                    let payload: String = row.get(2)?;
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, String>(0)?,
+                        "name": row.get::<_, String>(1)?,
+                        "payload": serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null),
+                    }))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+        .unwrap()
+}
+
 pub async fn put_plugin_timer(
     store: &Store,
     value: Value,

@@ -2,6 +2,8 @@
 
 package build.cairn.app.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -12,11 +14,13 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
@@ -29,6 +33,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import build.cairn.app.data.*
@@ -52,12 +57,20 @@ internal fun RuleFlowTree(
     depth: Int = 0,
     problems: List<HookRuleProblem> = emptyList(),
     executionAgentId: String? = null,
+    /** The step to draw attention to: it shakes once each time `attentionCount` grows. */
+    attention: String? = null,
+    attentionCount: Int = 0,
+    /** Replaces the « Événement reçu » terminal with the rule's own starting node. */
+    start: (@Composable () -> Unit)? = null,
+    /** The graph fills the space it is given and scrolls both ways, as a canvas. */
+    fill: Boolean = false,
+    modifier: Modifier = Modifier,
 ) {
     val graphWidth = ruleFlowWidth(nodes)
     val root = container == "/steps"
     val content: @Composable () -> Unit = {
         Column(Modifier.width(graphWidth.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            if (root) RuleGraphTerminal("Événement reçu")
+            if (root) start?.invoke() ?: RuleGraphTerminal("Événement reçu")
             if (editable) RuleInsertPoint(container, 0, depth, insert, catalog, executionAgentId)
             else if (root) RuleGraphLink()
             nodes.forEachIndexed { index, raw ->
@@ -107,7 +120,8 @@ internal fun RuleFlowTree(
                             else if (selected == path) tone
                             else MaterialTheme.colorScheme.outlineVariant,
                         ),
-                    modifier = Modifier.width(240.dp),
+                    modifier =
+                        Modifier.width(240.dp).ruleAttention(attention == path, attentionCount),
                 ) {
                     Column {
                         Row(
@@ -223,6 +237,8 @@ internal fun RuleFlowTree(
                                             depth + 1,
                                             problems,
                                             executionAgentId,
+                                            attention,
+                                            attentionCount,
                                         )
                                         Box(
                                             Modifier.weight(1f)
@@ -298,6 +314,8 @@ internal fun RuleFlowTree(
                                     depth + 1,
                                     problems,
                                     executionAgentId,
+                                    attention,
+                                    attentionCount,
                                 )
                             }
                             Text(
@@ -328,7 +346,17 @@ internal fun RuleFlowTree(
             }
         }
     }
-    if (root) RuleGraphViewport(graphWidth, editable, content) else content()
+    if (root) RuleGraphViewport(graphWidth, editable, content, fill, modifier) else content()
+}
+
+/** Shakes once when `active` and each time `count` grows, to show where something is missing. */
+internal fun Modifier.ruleAttention(active: Boolean, count: Int): Modifier = composed {
+    val shift = remember { Animatable(0f) }
+    LaunchedEffect(active, count) {
+        if (!active) return@LaunchedEffect
+        for (target in listOf(-6f, 6f, -6f, 6f, 0f)) shift.animateTo(target, tween(55))
+    }
+    offset { IntOffset(shift.value.dp.roundToPx(), 0) }
 }
 
 internal fun ruleFlowWidth(nodes: List<JsonElement>): Float =
@@ -444,16 +472,32 @@ private fun RuleGraphLink(kind: String = "straight", left: Float = 240f, right: 
 }
 
 @Composable
-private fun RuleGraphViewport(width: Float, editable: Boolean, content: @Composable () -> Unit) {
+private fun RuleGraphViewport(
+    width: Float,
+    editable: Boolean,
+    content: @Composable () -> Unit,
+    fill: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
     var manualZoom by remember { mutableStateOf<Float?>(null) }
     var availableWidth by remember { mutableFloatStateOf(360f) }
     val zoom = manualZoom ?: ((availableWidth - 24) / width).coerceIn(0.25f, 1f)
     val density = LocalDensity.current
     val horizontal = rememberScrollState()
+    val vertical = rememberScrollState()
     Column(
-        Modifier.fillMaxWidth()
+        modifier
+            .fillMaxWidth()
             .onSizeChanged { availableWidth = it.width / density.density }
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp))
+            .then(
+                if (fill) Modifier
+                else
+                    Modifier.border(
+                        1.dp,
+                        MaterialTheme.colorScheme.outlineVariant,
+                        RoundedCornerShape(16.dp),
+                    )
+            )
     ) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp),
@@ -470,7 +514,7 @@ private fun RuleGraphViewport(width: Float, editable: Boolean, content: @Composa
         val dots = MaterialTheme.colorScheme.outlineVariant
         BoxWithConstraints(
             Modifier.fillMaxWidth()
-                .heightIn(min = 240.dp)
+                .then(if (fill) Modifier.weight(1f) else Modifier.heightIn(min = 240.dp))
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
         ) {
             val available = maxWidth.value
@@ -494,12 +538,14 @@ private fun RuleGraphViewport(width: Float, editable: Boolean, content: @Composa
                             x += gap
                         }
                     }
+                    .then(if (fill) Modifier.verticalScroll(vertical) else Modifier)
                     .then(
                         if (width * zoom > available - 24 + 1f)
                             Modifier.horizontalScroll(horizontal)
                         else Modifier
                     )
                     .padding(12.dp)
+                    .then(if (fill) Modifier.padding(bottom = 96.dp) else Modifier)
             ) {
                 Layout(content = content) { measurables, constraints ->
                     val child =

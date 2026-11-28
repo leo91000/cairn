@@ -31,6 +31,9 @@ pub struct ResourceField {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Hook {
     pub name: String,
+    /// How people read the hook when they pick it, e.g. "A message is posted".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub description: String,
     #[ts(type = "any ")]
     pub payload_schema: Value,
@@ -114,6 +117,9 @@ impl Manifest {
         for hook in &self.hooks {
             if !slug(&hook.name, 40)
                 || !names.insert(&hook.name)
+                || hook.title.as_deref().is_some_and(|title| {
+                    title.trim().is_empty() || !short(title, 100) || title.contains('\n')
+                })
                 || hook.description.trim().is_empty()
                 || !short(&hook.description, 4000)
                 || hook.payload_schema["type"] != "object"

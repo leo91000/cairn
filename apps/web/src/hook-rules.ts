@@ -186,7 +186,7 @@ export function describeTrigger(trigger: HookRuleTrigger, catalog: HookRuleCatal
   }
 
   return {
-    title: trigger.hook,
+    title: hook?.title ?? trigger.hook,
     source: hook?.instanceName ?? 'Plugin instance',
     description: hook?.description ?? '',
   }
