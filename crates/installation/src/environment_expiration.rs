@@ -1147,9 +1147,7 @@ mod tests {
 
                 let changed = db.run_state(&run)?.unwrap();
                 assert_eq!(changed.status, status);
-                if !explicit_stop {
-                    assert_eq!(changed.finished_at, Some(42));
-                }
+                assert_eq!(changed.finished_at, Some(42));
                 assert!(!changed.recovery_pending);
                 assert_eq!(changed.error.as_deref(),
                     (status == RunStatus::Failed).then_some("Native cleanup is still pending"));

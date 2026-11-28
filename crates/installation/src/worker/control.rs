@@ -288,14 +288,25 @@ pub(crate) fn stop_chat_in(
         crate::environment_expiration::cancel_continuation_in(db, run_id)?;
         crate::chats::continuation::cancel_for_run(db, run_id)?;
         let run = required(db.run_state(run_id)?, "Run not found")?;
-        let held = executing.contains(run_id)
-            && RunCheckpoint::load_in(db, run_id)?
-                .is_some_and(|saved| saved.held_environment.is_some());
-        if run.status.is_active() || held {
+        if can_cancel(db, &run, executing.contains(run_id))? {
             request_cancel(db, run_id, executing.contains(run_id))?;
         }
     }
     required(db.conversation_boundary(id)?, "Chat not found")
+}
+
+fn can_cancel(db: &Db<'_>, run: &cairn_contracts::RunState, executing: bool) -> Result<bool> {
+    if run.status.is_active() {
+        return Ok(true);
+    }
+    let finishing = run.status == RunStatus::Succeeded && run.recovery_pending;
+    if !finishing && !executing {
+        return Ok(false);
+    }
+    Ok(RunCheckpoint::load_in(db, &run.id)?.is_some_and(|saved| {
+        (executing && saved.held_environment.is_some())
+            || (finishing && saved.pending_native_cleanup().is_some())
+    }))
 }
 
 /// Cancelling a conversation's run or its wakeup pauses it as Stop does, in the same
@@ -315,9 +326,7 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
     crate::chats::coding_agent::cancel_in(db, id)?;
     let run = required(db.run_state(id)?, "Run not found")?;
     let waiting = crate::chats::continuation::cancel_for_run(db, id)?;
-    let held =
-        RunCheckpoint::load_in(db, id)?.is_some_and(|saved| saved.held_environment.is_some());
-    if !run.status.is_active() && !(is_active && held) {
+    if !can_cancel(db, &run, is_active)? {
         if waiting || crate::environment_expiration::pending(db, id)? {
             pause_conversation(db, id)?;
             return db.audit("run.wakeup.cancelled", &json!({ "id": id }));

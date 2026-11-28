@@ -569,8 +569,8 @@ pub(crate) async fn observe_pending_native_cleanup(
         }
         confirm_native_retirement(s, &url, attempt, &credential, &authorize).await
     };
-    // Keep this attempt's slot for the bounded relay request's lifetime so
-    // another probe cannot duplicate an outstanding node command.
+    // Keep the slot through the bounded manager-side request. Its timeout
+    // includes the node relay's budget, reducing overlapping retries.
     let retired = tokio::select! {
         () = s.shutdown.cancelled() => return Ok(()),
         result = observe => matches!(result, Ok(true)),

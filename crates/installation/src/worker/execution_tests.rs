@@ -333,12 +333,7 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
             }
             let before_verdict = observations.load(Ordering::Relaxed);
             retired_after_grace.store(true, Ordering::Relaxed);
-            if retirement == Retirement::Expired {
-                checkpoint
-                    .fence(&service, &service.store.run(&id).await.unwrap())
-                    .await
-                    .unwrap();
-            } else {
+            if retirement != Retirement::Expired {
                 let preparation = service.worker.run_preparation_lock(&id).await;
                 let _preparation = preparation.lock().await;
                 tokio::time::timeout(
@@ -363,9 +358,29 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
             // even if the controller has disconnected.
             assert!(service.store.run_state(&id).await.unwrap().recovery_pending);
             server.abort();
-            super::super::schedule::recover_completed_environments(&service)
-                .await
-                .unwrap();
+            let unrelated = crate::config::id();
+            let fixture = unrelated.clone();
+            service.store.transaction(move |db| {
+                db.add_run_fixture(&json!({
+                    "id": fixture, "taskId": fixture, "status": "succeeded", "recoveryPending": true,
+                }), None)?;
+                Ok(())
+            }).await.unwrap();
+            let preparation = service.worker.run_preparation_lock(&unrelated).await;
+            let _unrelated_preparation = preparation.lock().await;
+            let normal = service.clone();
+            let ordinary = tokio::spawn(async move {
+                super::super::schedule::recover_completed_environments(&normal).await
+            });
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                super::super::schedule::observe_native_cleanup(&service),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(!ordinary.is_finished());
+            ordinary.abort();
             let settled = service.store.run_state(&id).await.unwrap();
             if retirement == Retirement::Expired {
                 assert_eq!(settled.status, RunStatus::Failed);

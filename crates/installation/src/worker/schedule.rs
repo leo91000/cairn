@@ -505,38 +505,48 @@ impl DeferredCleanupObservers {
     }
 }
 
-/// Find and observe durable fences without waiting for ordinary recovery RPCs.
+/// Observe and settle durable fences independently of ordinary recovery RPCs.
 pub(super) async fn observe_native_cleanup(s: &Arc<Service>) -> Result<()> {
-    let mut ready = s
+    let (mut ready, mut completed) = s
         .store
         .read(|db| {
             let mut ready = Vec::new();
-            for run_id in db.native_cleanup_observation_ids()? {
+            let mut completed = Vec::new();
+            for run_id in db.native_cleanup_recovery_ids()? {
                 let Some(saved) = RunCheckpoint::load_in(db, &run_id)? else {
                     continue;
                 };
-                let Some(pending) = saved.pending_native_cleanup().filter(|pending| {
-                    pending.needs_observation()
-                        || pending.awaiting_retirement() && saved.turn_pending == Some(true)
-                }) else {
+                let Some(pending) = saved.pending_native_cleanup() else {
                     continue;
                 };
                 if crate::environment_expiration::pending(db, &run_id)? {
                     continue;
                 }
+                let Some(state) = db.run_state(&run_id)? else {
+                    continue;
+                };
                 let key = CleanupObservation {
                     run_id,
                     attempt: pending.attempt.clone(),
                 };
-                ready.push((key, saved));
+                if state.status == RunStatus::Succeeded
+                    && (state.cancel_requested_at.is_some() || !pending.needs_observation())
+                {
+                    completed.push((key, saved));
+                } else if pending.needs_observation()
+                    || pending.awaiting_retirement() && saved.turn_pending == Some(true)
+                {
+                    ready.push((key, saved));
+                }
             }
-            Ok(ready)
+            Ok((ready, completed))
         })
         .await?;
     {
         // A live worker can still be persisting its own copy of the checkpoint.
         let active = s.worker.active.lock().await;
         ready.retain(|(key, _)| !active.contains_key(&key.run_id));
+        completed.retain(|(key, _)| !active.contains_key(&key.run_id));
     }
     let admitted = s
         .worker
@@ -553,6 +563,43 @@ pub(super) async fn observe_native_cleanup(s: &Arc<Service>) -> Result<()> {
                 tracing::warn!(run_id = key.run_id, message = %error.message, "Native cleanup observation failed");
             }
         });
+    }
+    for (key, expected) in completed {
+        let preparation = s.worker.run_preparation_lock(&key.run_id).await;
+        let Ok(_preparation) = preparation.try_lock() else {
+            continue;
+        };
+        if let Err(error) = settle_native_cleanup(s, &key.run_id, expected).await {
+            tracing::warn!(run_id = key.run_id, message = %error.message, "Native cleanup settlement failed");
+        }
+    }
+    Ok(())
+}
+
+/// Reuse credential and outcome settlement after the recorded workload fence.
+async fn settle_native_cleanup(s: &Service, run_id: &str, expected: RunCheckpoint) -> Result<()> {
+    let id = run_id.to_owned();
+    let run = s
+        .store
+        .read(move |db| {
+            let current = RunCheckpoint::load_in(db, &id)?;
+            if !recovery::same_execution(current.as_ref(), Some(&expected))
+                || current
+                    .as_ref()
+                    .and_then(RunCheckpoint::pending_native_cleanup)
+                    != expected.pending_native_cleanup()
+                || crate::environment_expiration::pending(db, &id)?
+            {
+                return Ok(None);
+            }
+            Ok(db.run(&id)?.filter(|run| {
+                run["recoveryPending"] == true && RunStatus::of(run) == Some(RunStatus::Succeeded)
+            }))
+        })
+        .await?;
+    if let Some(run) = run {
+        recover(s, &run).await?;
+        s.worker.notify();
     }
     Ok(())
 }
@@ -579,11 +626,9 @@ pub(super) async fn recover_completed_environments(s: &Arc<Service>) -> Result<(
         if run["recoveryPending"] != true || RunStatus::of(&run) != Some(RunStatus::Succeeded) {
             continue;
         }
-        if run["cancelRequestedAt"].is_null()
-            && let Some(saved) = RunCheckpoint::load(&s.store, &id).await?
-            && saved
-                .pending_native_cleanup()
-                .is_some_and(crate::recovery::PendingNativeCleanup::needs_observation)
+        if RunCheckpoint::load(&s.store, &id)
+            .await?
+            .is_some_and(|saved| saved.pending_native_cleanup().is_some())
         {
             continue;
         }
@@ -1119,7 +1164,7 @@ pub(super) fn finish_recovery(
     }
     let checkpoint = published.as_ref().or(checkpoint);
     if current.cancel_requested_at.is_some() {
-        cancel_recovery(db, id, current)?;
+        cancel_recovery(db, id, current, cleanup_finished_at)?;
         return Ok(false);
     }
     if let Some(checkpoint) = checkpoint {
@@ -1311,12 +1356,12 @@ pub(super) fn finish_recovery(
 
 /// Settles a recovering run whose cancellation was requested. One waiting for an automatic
 /// retry shows the stop in its conversation; a wait's own card already shows its cancellation.
-fn cancel_recovery(db: &Db<'_>, id: &str, run: &RunState) -> Result<()> {
+fn cancel_recovery(db: &Db<'_>, id: &str, run: &RunState, finished_at: Option<i64>) -> Result<()> {
     db.change_run(
         id,
         crate::runs::RunChanges {
             status: Some(RunStatus::Cancelled),
-            finished_at: Some(Some(now())),
+            finished_at: Some(Some(finished_at.unwrap_or_else(now))),
             account_wait_reason: Some(None),
             recovery_pending: Some(false),
             retry: Some(None),

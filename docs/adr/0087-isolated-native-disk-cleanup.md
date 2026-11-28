@@ -73,8 +73,9 @@ in one transaction. That transaction starts a five-minute settlement deadline
 before the first follow-up request.
 The manager resumes bounded observations across restarts on a timer independent
 of ordinary recovery. Observations are tracked by execution attempt. Waiting
-attempts receive a slot before earlier attempts retry. Each slot covers the
-lifetime of the underlying relay request. The manager settles the saved reply
+attempts receive a slot before earlier attempts retry. An observer keeps its
+slot for the manager's request, whose timeout includes the node relay budget.
+The independent recovery loop settles the saved reply
 only when DELETE returns the
 attempt-bound `NativeCleanupRetired` receipt, which also checks the current
 conversation quarantine. A missing proof at the deadline publishes the original
@@ -84,7 +85,8 @@ execution on the retained workspace while the manager waits for retirement.
 Environment detachment settles the saved verdict
 before replacing the execution checkpoint. Without proof it publishes the
 original cleanup diagnostic. Expiration leaves a fenced turn's cancellation
-state as set by explicit Stop.
+state as set by explicit Stop. A Stop issued during cleanup uses the provider
+turn's end time to distinguish its inputs from later messages.
 The live manager checkpoint serializes fencing and reloads its durable evidence
 before heartbeat or output persistence can overwrite it; placement lease renewal
 continues independently while the fence waits.

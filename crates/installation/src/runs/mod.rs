@@ -318,17 +318,23 @@ impl Db<'_> {
     pub(crate) fn completed_recovery_ids(&self) -> Result<Vec<String>> {
         Ok(self
             .0
-            .prepare_cached("SELECT id FROM runs WHERE status='succeeded' AND recovery_pending=1 ORDER BY created_at")?
+            .prepare_cached(
+                "SELECT id FROM runs WHERE status='succeeded' AND recovery_pending=1
+                 AND NOT EXISTS (SELECT 1 FROM run_checkpoints WHERE run_id=runs.id
+                   AND json_type(state,'$.pendingNativeCleanup')='object')
+                 ORDER BY created_at",
+            )?
             .query_map([], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    pub(crate) fn native_cleanup_observation_ids(&self) -> Result<Vec<String>> {
+    pub(crate) fn native_cleanup_recovery_ids(&self) -> Result<Vec<String>> {
         Ok(self.0.prepare_cached(
             "SELECT runs.id FROM runs JOIN run_checkpoints ON run_checkpoints.run_id=runs.id
-             WHERE recovery_pending=1 AND cancel_requested_at IS NULL
-               AND ((status='succeeded' AND json_extract(run_checkpoints.state,'$.pendingNativeCleanup.state')='observing')
-                 OR (status='queued' AND json_extract(run_checkpoints.state,'$.pendingNativeCleanup.state')='awaitingRetirement'))
+             WHERE recovery_pending=1
+               AND ((status='succeeded' AND json_type(run_checkpoints.state,'$.pendingNativeCleanup')='object')
+                 OR (status='queued' AND cancel_requested_at IS NULL
+                   AND json_extract(run_checkpoints.state,'$.pendingNativeCleanup.state')='awaitingRetirement'))
              ORDER BY created_at",
         )?.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
     }

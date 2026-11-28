@@ -339,6 +339,86 @@ async fn the_next_chat_turn_waits_for_old_native_cleanup_after_the_deadline() {
 }
 
 #[tokio::test]
+async fn stop_and_run_cancellation_settle_a_deferred_reply_without_returning_later_messages() {
+    for stop_chat in [true, false] {
+        let (_root, service, chat, run, _) = fixture().await;
+        let id = run.clone();
+        service
+            .store
+            .transaction(move |db| {
+                let attempt = crate::config::id();
+                crate::run_fixture::change_run_fixture(
+                    db,
+                    &id,
+                    &json!({
+                        "status": RunStatus::Succeeded, "trigger": "chat",
+                        "finishedAt": 42, "recoveryPending": true,
+                    }),
+                )?;
+                RunCheckpoint::from_value(json!({
+                    "runnerId": attempt,
+                    "prepared": { "backend": "native", "isolated": true },
+                    "settled": { "status": "succeeded", "finishedAt": 42 },
+                    "pendingNativeCleanup": {
+                        "attempt": attempt, "state": "observing", "until": now() + 60_000,
+                        "message": "Disk cleanup pending"
+                    },
+                }))?
+                .store_in(db, &id)
+            })
+            .await
+            .unwrap();
+
+        let message = crate::config::id();
+        service
+            .chat_send(&chat, json!({ "id": message, "text": "Later message" }))
+            .await
+            .unwrap();
+        let chat_for_write = chat.clone();
+        service
+            .store
+            .transaction(move |db| {
+                crate::conversation_writers::record_message(
+                    db,
+                    &chat_for_write,
+                    &message,
+                    &crate::conversation_writers::EntryWriter::Person("person".into()),
+                )
+            })
+            .await
+            .unwrap();
+        if stop_chat {
+            service
+                .worker
+                .stop_chat_authorized(&service, &chat, |_| Ok(()))
+                .await
+                .unwrap();
+        } else {
+            service.worker.cancel(&service, &run).await.unwrap();
+        }
+        let stopping = service.store.run_state(&run).await.unwrap();
+        assert!(stopping.cancel_requested_at.is_some_and(|time| time > 42));
+        observe_native_cleanup(&service).await.unwrap();
+        let stopped = service.store.run_state(&run).await.unwrap();
+        assert_eq!(stopped.status, RunStatus::Cancelled);
+        assert_eq!(stopped.finished_at, Some(42));
+        assert!(!stopped.recovery_pending);
+        service.chat_tick(&HashSet::new()).await.unwrap();
+        service
+            .store
+            .read(move |db| {
+                let message = &db.messages(&chat)?[0];
+                assert_eq!(message["status"], "queued");
+                assert!(message["returnedTo"].is_null());
+                assert!(db.conversation(&chat)?.unwrap().paused);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn manual_resume_resets_the_budget_but_still_fences_the_old_attempt() {
     use axum::{Router, http::StatusCode, routing::delete};
     use std::sync::atomic::{AtomicBool, Ordering};
