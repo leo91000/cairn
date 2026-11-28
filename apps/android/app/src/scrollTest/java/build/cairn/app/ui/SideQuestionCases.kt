@@ -617,7 +617,7 @@ abstract class SideQuestionCases {
     }
 
     @Test
-    fun aReplyOffersItsSideQuestionsOnlyWhileTheAgentCanAnswer() {
+    fun aReplyShowsItsSideQuestionsWithoutAnAskActionOfItsOwn() {
         val asked = mutableListOf<Triple<String, String, Long?>>()
         val shown = mutableListOf<Triple<String, Long?, Long?>>()
         var canAsk by mutableStateOf(true)
@@ -661,18 +661,19 @@ abstract class SideQuestionCases {
             }
         }
         try {
-            compose.onNodeWithContentDescription("Poser une question à côté").performClick()
-            assertEquals(listOf(Triple("reply-1", "", 11L)), asked)
+            // Questions start from the general button or a selected passage, not from each reply.
+            compose.onNodeWithContentDescription("Poser une question à côté").assertDoesNotExist()
             compose.onNodeWithText("2").performClick()
             assertEquals(listOf(Triple("reply-1", 11L, 15L)), shown)
             val label = compose.onNodeWithText("Agent").getBoundsInRoot()
             canAsk = false
             compose.waitForIdle()
-            // The action leaving does not move the reply, so the history keeps its position.
+            // The reply does not move when the agent stops answering, so the history keeps its
+            // position, and its question count stays.
             val after = compose.onNodeWithText("Agent").getBoundsInRoot()
             assertEquals(label.top to label.bottom, after.top to after.bottom)
-            compose.onNodeWithContentDescription("Poser une question à côté").assertDoesNotExist()
             compose.onNodeWithText("2").assertExists()
+            assertTrue(asked.isEmpty())
         } finally {
             models.clear()
         }
