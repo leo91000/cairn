@@ -1000,27 +1000,39 @@ async fn verify_worktree_history(target: &str, env: &Environment) -> Result<()> 
             "Save this worktree's private Git references before cleaning it up.",
         ));
     }
-    let history = git(
-        &["-C", target, "reflog", "show", "--format=%H", "HEAD"],
-        env,
-    )
-    .await?;
-    if !history.success {
-        return Err(Error::conflict(
-            "Git could not verify this worktree's history.",
-        ));
-    }
-    let mut revisions = vec![
+    let history_args = ["-C", target, "reflog", "show", "--format=%H", "HEAD"].map(str::to_owned);
+    let mut history = command("git", &history_args, env, None)
+        .stderr(Stdio::null())
+        .spawn()?;
+    let pipe: Stdio = history.stdout.take().unwrap().try_into()?;
+    let revisions = [
         "-C",
         target,
         "--no-replace-objects",
         "rev-list",
         "--max-count=1",
         "HEAD",
-    ];
-    revisions.extend(history.stdout.lines());
-    revisions.extend(["--not", "--glob=refs/*"]);
-    let unique_commits = git(&revisions, env).await?;
+        "--not",
+        "--glob=refs/*",
+        "--stdin",
+    ]
+    .map(str::to_owned);
+    let mut check = command("git", &revisions, env, None);
+    check.stdin(pipe);
+    let budget = Duration::from_secs(10);
+    let (history_status, unique_commits) = tokio::time::timeout(budget, async {
+        tokio::try_join! {
+            async { Ok::<_, Error>(history.wait().await?) },
+            bounded_output(check, budget, 100_000),
+        }
+    })
+    .await
+    .map_err(|_| Error::conflict("Git could not verify this worktree's history in time."))??;
+    if !history_status.success() {
+        return Err(Error::conflict(
+            "Git could not verify this worktree's history.",
+        ));
+    }
     if !unique_commits.success || !unique_commits.stdout.is_empty() {
         return Err(Error::conflict(
             "Save this worktree's commits on a shared branch before cleaning it up.",
@@ -1806,6 +1818,27 @@ mod tests {
         ensure_removable_worktree(&run, &workspace, &env)
             .await
             .unwrap();
+        let head = git(&["-C", target, "rev-parse", "HEAD"], &env)
+            .await
+            .unwrap();
+        let head = head.stdout.trim();
+        let log = git(
+            &["-C", target, "rev-parse", "--git-path", "logs/HEAD"],
+            &env,
+        )
+        .await
+        .unwrap();
+        let log = Path::new(target).join(log.stdout.trim());
+        let mut entries = tokio::fs::read(&log).await.unwrap();
+        // Each Git log record is valid and refers to the same retained commit.
+        let entry =
+            format!("{head} {head} Fixture <fixture@example.test> 1700000000 +0000\tFixture\n");
+        entries.extend_from_slice(entry.repeat(2502).as_bytes());
+        tokio::fs::write(log, entries).await.unwrap();
+        ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap();
+
         assert!(
             git(&["-C", source, "worktree", "lock", target], &env)
                 .await

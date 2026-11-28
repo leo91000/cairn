@@ -65,28 +65,30 @@ test('retrying an uncertain creation keeps one schedule', async ({ page, workspa
   expect(saved.definition.steps[0].then[0].action.prompt.value).toBe('Review the new workspace.')
 })
 
-test('accepting a concurrent version updates the editable schedule fields', async ({ page, workspace }) => {
-  const agent = workspace.service.agent({ name: 'Scheduler' })
-  const definition = scheduleDefinition('Weekly triage', agent.id, 'Review the current workspace.')
-  const rule = await workspace.api('/api/hook-rules', 'POST', { definition, enabled: false })
-  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
-  await signIn(page)
-  const cron = page.getByLabel('Cron (five fields)', { exact: true })
-  await expect(cron).toHaveValue('0 9 * * *')
+for (const savedCron of ['30 13 * * MON', '0 9 * * *']) {
+  test(`accepting a concurrent version resets the editable schedule to ${savedCron}`, async ({ page, workspace }) => {
+    const agent = workspace.service.agent({ name: 'Scheduler' })
+    const definition = scheduleDefinition('Weekly triage', agent.id, 'Review the current workspace.')
+    const rule = await workspace.api('/api/hook-rules', 'POST', { definition, enabled: false })
+    await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+    await signIn(page)
+    const cron = page.getByLabel('Cron (five fields)', { exact: true })
+    await expect(cron).toHaveValue('0 9 * * *')
 
-  const path = `/api/hook-rules/${rule.id}`
-  const changed = { ...definition, trigger: { ...definition.trigger, cron: '30 13 * * MON' } }
-  await workspace.api(path, 'PUT', { ruleId: rule.id, revision: rule.revision, definition: changed })
-  await page.getByLabel('Rule name').fill('My unsaved title')
-  await page.getByRole('button', { name: 'Save version' }).click()
-  await page.getByRole('button', { name: 'Use the saved version' }).click()
-  await expect(cron).toHaveValue('30 13 * * MON')
+    const path = `/api/hook-rules/${rule.id}`
+    const changed = { ...definition, trigger: { ...definition.trigger, cron: savedCron } }
+    await workspace.api(path, 'PUT', { ruleId: rule.id, revision: rule.revision, definition: changed })
+    await cron.fill('15 10 * * *')
+    await page.getByRole('button', { name: 'Save version' }).click()
+    await page.getByRole('button', { name: 'Use the saved version' }).click()
+    await expect(cron).toHaveValue(savedCron)
 
-  await page.getByLabel('Time zone').fill('UTC')
-  await page.getByRole('button', { name: 'Save version' }).click()
-  await expect.poll(async () => (await workspace.api(path)).definition.trigger).toEqual({
-    type: 'clock',
-    cron: '30 13 * * MON',
-    timezone: 'UTC',
+    await page.getByLabel('Time zone').fill('UTC')
+    await page.getByRole('button', { name: 'Save version' }).click()
+    await expect.poll(async () => (await workspace.api(path)).definition.trigger).toEqual({
+      type: 'clock',
+      cron: savedCron,
+      timezone: 'UTC',
+    })
   })
-})
+}

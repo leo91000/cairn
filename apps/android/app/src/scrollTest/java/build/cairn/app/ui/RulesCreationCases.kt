@@ -655,10 +655,15 @@ abstract class RulesCreationCases {
     fun aLostReplacementResponseDoesNotWriteAnotherVersion() =
         recoverCreation(false, replace = true)
 
+    @Test
+    fun acceptingAnIdenticalSavedDefinitionResetsTheClockFields() =
+        recoverCreation(false, replace = true, sameDefinitionConflict = true)
+
     private fun recoverCreation(
         restore: Boolean,
         reject: Boolean = false,
         replace: Boolean = false,
+        sameDefinitionConflict: Boolean = false,
     ) {
         val id = "da2dd0ad-91ce-4566-b426-77c03628f59e"
         val unavailable = AtomicBoolean(true)
@@ -668,6 +673,11 @@ abstract class RulesCreationCases {
         val closed = AtomicBoolean(false)
         val stored = AtomicReference<JsonObject?>(null)
         val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
+        val initialTrigger =
+            if (sameDefinitionConflict)
+                """{"type":"clock","cron":"0 9 * * *","timezone":"Europe/Paris"}"""
+            else """{"type":"cairn","hook":"replyReady"}"""
+        val triggerTitle = if (sameDefinitionConflict) "Horloge" else "Réponse prête"
         fun record(definition: JsonObject, version: Int) = buildJsonObject {
             put("id", id)
             put("revision", "revision-$version")
@@ -679,7 +689,7 @@ abstract class RulesCreationCases {
             val initial =
                 wireJson
                     .parseToJsonElement(
-                        """{"name":"Original","description":"","trigger":{"type":"cairn","hook":"replyReady"},"executionAgentId":"$MAIN_AGENT_ID","limits":{"triggeringsPerHour":60,"conversationsPerHour":5},"steps":[{"type":"action","id":"save","action":{"type":"storeValue","scope":"rule","name":"last","value":{"type":"literal","value":0}}}]}"""
+                        """{"name":"Original","description":"","trigger":$initialTrigger,"executionAgentId":"$MAIN_AGENT_ID","limits":{"triggeringsPerHour":60,"conversationsPerHour":5},"steps":[{"type":"action","id":"save","action":{"type":"storeValue","scope":"rule","name":"last","value":{"type":"literal","value":0}}}]}"""
                     )
                     .jsonObject
             stored.set(record(initial, 1))
@@ -690,7 +700,7 @@ abstract class RulesCreationCases {
                 .setHeader("Content-Type", "application/json")
                 .setBody(body)
         val catalog =
-            """{"agents":[{"agentId":"$MAIN_AGENT_ID","name":"Assistant","native":false}],"hooks":[{"agentIds":["$MAIN_AGENT_ID"],"title":"Réponse prête","description":"","payloadSchema":null,"resourceFields":[],"trigger":{"type":"cairn","hook":"replyReady"}}],"tools":[],"actions":[],"conditions":[],"operators":[],"functions":[],"variables":[],"limits":{"defaultLimits":{"triggeringsPerHour":60,"conversationsPerHour":5},"maxTriggeringsPerHour":100,"maxConversationsPerHour":10,"maxChainDepth":8,"maxConversationValuesBytes":262144,"maxWaitSeconds":604800,"maxSteps":500,"maxToolCalls":100,"maxNodes":100}}"""
+            """{"agents":[{"agentId":"$MAIN_AGENT_ID","name":"Assistant","native":false}],"hooks":[{"agentIds":["$MAIN_AGENT_ID"],"title":"$triggerTitle","description":"","payloadSchema":null,"resourceFields":[],"trigger":$initialTrigger}],"tools":[],"actions":[],"conditions":[],"operators":[],"functions":[],"variables":[],"limits":{"defaultLimits":{"triggeringsPerHour":60,"conversationsPerHour":5},"maxTriggeringsPerHour":100,"maxConversationsPerHour":10,"maxChainDepth":8,"maxConversationValuesBytes":262144,"maxWaitSeconds":604800,"maxSteps":500,"maxToolCalls":100,"maxNodes":100}}"""
         MockWebServer().use { server ->
             server.dispatcher =
                 object : Dispatcher() {
@@ -714,6 +724,10 @@ abstract class RulesCreationCases {
                                 val body =
                                     wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
                                 writes += "PUT" to body
+                                if (sameDefinitionConflict && unavailable.getAndSet(false)) {
+                                    stored.set(record(stored.get().obj("definition")!!, 2))
+                                    return json("""{"error":"Revision conflict"}""", 409)
+                                }
                                 if (body.text("revision") != stored.get().text("revision"))
                                     return json("""{"error":"Revision conflict"}""", 409)
                                 stored.set(record(body.obj("definition")!!, 2))
@@ -775,6 +789,31 @@ abstract class RulesCreationCases {
             try {
                 waitFor {
                     compose.onAllNodesWithText("Nom de la règle").fetchSemanticsNodes().isNotEmpty()
+                }
+                if (sameDefinitionConflict) {
+                    val cron = compose.onNodeWithText("Cron (cinq champs)")
+                    cron.performScrollTo().performTextReplacement("15 10 * * *")
+                    val save = hasText("Enregistrer") and isEnabled()
+                    waitFor { compose.onAllNodes(save).fetchSemanticsNodes().isNotEmpty() }
+                    compose.onNode(save).performClick()
+                    val latest = "Utiliser la version enregistrée"
+                    waitFor {
+                        compose.onAllNodesWithText(latest).fetchSemanticsNodes().isNotEmpty()
+                    }
+                    compose.onNodeWithText(latest).performScrollTo().performClick()
+                    cron.assertTextContains("0 9 * * *")
+                    compose
+                        .onNodeWithText("Fuseau horaire (IANA)")
+                        .performScrollTo()
+                        .performTextReplacement("UTC")
+                    waitFor { compose.onAllNodes(save).fetchSemanticsNodes().isNotEmpty() }
+                    compose.onNode(save).performClick()
+                    waitFor { closed.get() }
+                    val trigger = writes.last().second.obj("definition").obj("trigger")
+                    assertEquals("0 9 * * *", trigger.text("cron"))
+                    assertEquals("UTC", trigger.text("timezone"))
+                    assertEquals("revision-2", writes.last().second.text("revision"))
+                    return
                 }
                 if (replace) {
                     compose.onNodeWithText("Nom de la règle").performTextReplacement("Latest draft")

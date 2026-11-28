@@ -697,10 +697,11 @@ async fn scheduled_conversation_wakeups_are_visible_and_cancellable_through_both
         assert_eq!(status, StatusCode::OK, "{fetched}");
         assert_eq!(result(&fetched)["chat"]["runId"], run_id);
         assert_eq!(result(&fetched)["chat"]["status"], "succeeded");
-        assert!(result(&fetched)["chat"]["wakeup"].is_null());
+        assert_eq!(&result(&fetched)["chat"]["wakeup"], wakeup);
         let (_, history) =
             node_management_call(&app, endpoint, token, "get_run", json!({ "runId": run_id }))
                 .await;
+        assert_eq!(&result(&history)["run"]["run"]["wakeup"], wakeup);
         assert!(
             result(&history)["events"]
                 .as_array()

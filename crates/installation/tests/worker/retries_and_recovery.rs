@@ -696,7 +696,7 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
             .unwrap();
         fixture.start().await;
         eventually(
-            Duration::from_secs(10),
+            WORKER_FIXTURE_TIMEOUT,
             Duration::from_millis(10),
             async || {
                 let saved = fixture
@@ -1581,7 +1581,7 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
             .unwrap();
         fixture.start().await;
         eventually(
-            Duration::from_secs(10),
+            WORKER_FIXTURE_TIMEOUT,
             Duration::from_millis(10),
             async || {
                 let saved = fixture
