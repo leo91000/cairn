@@ -297,6 +297,59 @@ async fn a_deleted_clock_rule_keeps_its_conversation_origin_identity() {
 }
 
 #[tokio::test]
+async fn run_now_checks_the_current_membership_before_admission() {
+    let app = App::new().await;
+    let member = "fixture-member";
+    common::relay_fixture::allow_member(&app.service, member, MAIN_AGENT_ID).await;
+    let definition = schedule_rule_definition(
+        "Member's schedule",
+        &json!({ "type": "clock", "cron": "0 9 * * *", "timezone": "UTC" }),
+    );
+    let (status, rule) = app
+        .request(
+            &app.member,
+            "POST",
+            "/api/hook-rules",
+            json!({ "definition": definition }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{rule}");
+    let rule_id = text(&rule, "id").to_owned();
+    let path = format!("/api/hook-rules/{rule_id}/run");
+
+    let (status, admitted) = app.request(&app.member, "POST", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{admitted}");
+
+    common::relay_fixture::authority_unavailable(&app.service, true).await;
+    let (status, refused) = app.request(&app.member, "POST", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    common::relay_fixture::authority_unavailable(&app.service, false).await;
+
+    // Beacon accepted a new invitation without notifying the installation. The
+    // earlier request's membership confirmation is still fresh in its cache.
+    common::relay_fixture::add_member(&app.service, member, "new-membership").await;
+    let (status, refused) = app.request(&app.member, "POST", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(
+        text(&refused, "error").contains("creator left"),
+        "{refused}"
+    );
+    let admitted_count: i64 = app
+        .service
+        .store
+        .read(move |db| {
+            Ok(db.0.query_row(
+                "SELECT count(*) FROM audit WHERE action='hook_rule.run_now' AND json_extract(detail,'$.ruleId')=?",
+                [&rule_id],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(admitted_count, 1);
+}
+
+#[tokio::test]
 async fn run_now_records_a_capacity_refusal() {
     let app = App::new().await;
     let definition = schedule_rule_definition(

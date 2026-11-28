@@ -361,10 +361,18 @@ pub(crate) async fn run_now(
 ) -> Result<HookRuleTriggering> {
     actor.require_scope("run")?;
     actor.recheck().await?;
-    let _authors = match &actor {
-        Actor::Installation(..) => Some(s.memberships.authors.lock().await),
-        _ => None,
+    let viewer = actor.viewer();
+    let member = matches!(&actor, Actor::Person(_)) && !viewer.owner;
+    let _authors = if member || matches!(&actor, Actor::Installation(..)) {
+        Some(s.memberships.authors.lock().await)
+    } else {
+        None
     };
+    // An invitation grants a new membership. Reconcile its generation before a
+    // manual admission can use the rule and agent access of a previous one.
+    if member && s.memberships.observe(s).await?.is_none() {
+        return Err(Error::unauthorized("The installation is not claimed."));
+    }
     let agent_author = match &actor {
         Actor::Installation(bearer, _) => Some((
             bearer.clone(),
@@ -375,7 +383,6 @@ pub(crate) async fn run_now(
         )),
         _ => None,
     };
-    let viewer = actor.viewer();
     let rule_id = input.rule_id.to_string();
     let triggering = s
         .store

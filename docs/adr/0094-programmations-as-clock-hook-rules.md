@@ -61,7 +61,8 @@ duplication et un éditeur sans code. Seul un déclencheur horaire manquait.
   à partir de maintenant.
 - Avant une admission automatique, l’installation confirme auprès de Beacon que
   le créateur fait encore partie de l’installation. Si Beacon est indisponible,
-  le créneau reste en attente de cette confirmation.
+  le créneau reste en attente de cette confirmation. Quand un membre utilise
+  « Lancer maintenant », l’installation vérifie aussi son adhésion actuelle.
 - Les programmations récurrentes issues de la migration gardent un plafond
   compatible avec la cadence de leur ancien cron.
 - **Chevauchement** : un nouveau prédicat de Cairn, « une conversation démarrée par
