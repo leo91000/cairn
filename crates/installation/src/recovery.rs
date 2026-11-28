@@ -300,6 +300,7 @@ async fn fence_attempt_authorized(
     }
     let isolated =
         run["isolated"] == true || checkpoint.as_ref().is_some_and(RunCheckpoint::isolated);
+    let mut confirmed_native_flush = false;
     if isolated {
         let attempt = expected
             .and_then(RunCheckpoint::runner_id)
@@ -351,7 +352,8 @@ async fn fence_attempt_authorized(
                 .await?
             }
         };
-        if !matches!(cleanup, FencedCleanup::Clear) {
+        confirmed_native_flush = may_defer && matches!(cleanup, FencedCleanup::FlushedNative);
+        if !matches!(cleanup, FencedCleanup::Clear | FencedCleanup::FlushedNative) {
             if matches!(cleanup, FencedCleanup::Deferred(_)) {
                 authorize.recheck().await?;
             }
@@ -379,7 +381,7 @@ async fn fence_attempt_authorized(
                         return Ok(None);
                     }
                     let cleanup = match cleanup {
-                        FencedCleanup::Clear => return Ok(None),
+                        FencedCleanup::Clear | FencedCleanup::FlushedNative => return Ok(None),
                         FencedCleanup::Failed(result) => result,
                         FencedCleanup::Deferred(pending) => {
                             let settles_completed_turn = db.run_state(&id)?.is_some_and(|state| {
@@ -466,6 +468,9 @@ async fn fence_attempt_authorized(
             }
             if let Some(saved) = &mut current {
                 saved.process = None;
+                if confirmed_native_flush {
+                    saved.native_flushed_attempt = expected.clone();
+                }
                 saved.store_in(db, &id)?;
             }
             if let Some(attempt) = release {
@@ -554,6 +559,7 @@ impl PendingNativeCleanup {
 
 enum FencedCleanup {
     Clear,
+    FlushedNative,
     Failed(crate::runner::ControllerResult),
     Deferred(PendingNativeCleanup),
 }
@@ -661,6 +667,14 @@ async fn fence_runner(
             let mut status_protocol = None;
             if let Ok(value) = response.json::<Value>().await {
                 cleanup = crate::runner::client_cleanup_result(&value, attempt);
+                if may_defer
+                    && cleanup.is_none()
+                    && value["FinalizationFailed"] != true
+                    && (value["NativeCleanupRetired"]["attemptId"].as_str() == Some(attempt)
+                        || value["PhysicalFinalized"] == true)
+                {
+                    return Ok(FencedCleanup::FlushedNative);
+                }
                 status_protocol = value["NativeCleanup"]["cleanupStatusProtocol"].as_u64();
                 if cleanup.is_none() {
                     cleanup = crate::runner::plain_finalization_failure(&value);
@@ -682,7 +696,7 @@ async fn fence_runner(
                     }));
                 }
                 if confirm_late_native_cleanup(s, &url, attempt, &credential, authorize).await {
-                    return Ok(FencedCleanup::Clear);
+                    return Ok(FencedCleanup::FlushedNative);
                 }
             } else if cleanup.is_none() && settled_status.is_some() {
                 // Both controllers expose explicit flush failures through the

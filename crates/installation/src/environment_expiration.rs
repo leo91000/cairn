@@ -460,7 +460,7 @@ fn detach_environment_in(
     };
     crate::nodes::placement::release_unclaimed(db, Some(run_id))?;
     let checkpoint = RunCheckpoint::load_in(db, run_id)?.unwrap_or_default();
-    if crate::worker::finish_deferred_cleanup_before_detach(db, run_id, &checkpoint)? {
+    if crate::worker::finish_native_cleanup_before_detach(db, run_id, &checkpoint)? {
         run = crate::error::required(db.run(run_id)?, "Run not found")?;
     }
     let environment = environment
@@ -1113,6 +1113,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
         for (live, explicit_stop, verdict, status, published) in [
+            (false, false, "unobserved", RunStatus::Failed, false),
+            (true, false, "unobserved", RunStatus::Failed, false),
+            (false, true, "unobserved", RunStatus::Cancelled, false),
+            (true, true, "unobserved", RunStatus::Cancelled, false),
+            (false, false, "flushed", RunStatus::Succeeded, false),
+            (true, false, "known-failure", RunStatus::Failed, false),
             (false, false, "observing", RunStatus::Failed, false),
             (false, false, "unconfirmed", RunStatus::Failed, false),
             (false, false, "retired", RunStatus::Succeeded, false),
@@ -1130,15 +1136,24 @@ mod tests {
                     "recoveryPending": !published, "cancelRequestedAt": explicit_stop.then_some(43),
                     "error": published.then_some("Native cleanup is still pending"),
                 }), None)?;
-                db.save_checkpoint_boundary(&run, &json!({
+                let mut checkpoint = json!({
                     "runnerId": attempt,
                     "prepared": { "backend": "native", "isolated": true },
                     "settled": { "status": "succeeded", "summary": "Provider result", "finishedAt": 42 },
-                    "pendingNativeCleanup": {
+                });
+                match verdict {
+                    "unobserved" => {}
+                    "flushed" => checkpoint["nativeFlushedAttempt"] = json!(attempt),
+                    "known-failure" => {
+                        checkpoint["finalizationFailureAttempt"] = json!(attempt);
+                        checkpoint["lastError"] = json!("Native cleanup: Flush failed");
+                    }
+                    _ => checkpoint["pendingNativeCleanup"] = json!({
                         "attempt": attempt, "state": verdict, "until": now() + 5_000,
                         "message": "Native cleanup is still pending",
-                    }
-                }))?;
+                    }),
+                }
+                db.save_checkpoint_boundary(&run, &checkpoint)?;
                 let interrupt = request_in(db, &run, &Expiration {
                     cause: Cause::NodeChange, destination: Some(id()), continue_turn: false,
                 }, live)?;
@@ -1154,8 +1169,12 @@ mod tests {
                 assert_eq!(changed.status, status);
                 assert_eq!(changed.finished_at, Some(42));
                 assert!(!changed.recovery_pending);
-                assert_eq!(changed.error.as_deref(),
-                    (status == RunStatus::Failed).then_some("Native cleanup is still pending"));
+                let expected_error = (status == RunStatus::Failed).then_some(match verdict {
+                    "unobserved" => "Native disk cleanup could not be confirmed before the environment expired.",
+                    "known-failure" => "Flush failed",
+                    _ => "Native cleanup is still pending",
+                });
+                assert_eq!(changed.error.as_deref(), expected_error);
                 assert!(RunCheckpoint::load_in(db, &run)?.unwrap().pending_native_cleanup().is_none());
                 Ok(())
             }).await.unwrap();

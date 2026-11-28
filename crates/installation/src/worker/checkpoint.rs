@@ -47,6 +47,9 @@ pub struct RunCheckpoint {
     /// Retirement evidence for a fenced native attempt and its retained workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending_native_cleanup: Option<crate::recovery::PendingNativeCleanup>,
+    /// Positive flush evidence persisted by the fence before the turn is settled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) native_flushed_attempt: Option<String>,
     /// A successful controller turn receipt, recorded before the run view is settled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) retained_completion: Option<RetainedCompletion>,
@@ -501,6 +504,16 @@ impl RunCheckpoint {
         (self.runner_id() == Some(pending.attempt.as_str())).then_some(pending)
     }
 
+    pub(super) fn native_flush_confirmed(&self) -> bool {
+        self.runner_id().is_some_and(|attempt| {
+            self.native_flushed_attempt.as_deref() == Some(attempt)
+                || self.progress.as_ref().is_some_and(|progress| {
+                    progress.runner_id.as_deref() == Some(attempt)
+                        && progress.finalized_at.is_some()
+                })
+        })
+    }
+
     /// Project the closing attempt without loading its workspace plan or provider progress.
     pub(crate) fn finishing_native_turn_in(
         db: &Db<'_>,
@@ -573,6 +586,7 @@ impl RunCheckpoint {
         }
         self.finalization_failure_attempt = None;
         self.pending_native_cleanup = None;
+        self.native_flushed_attempt = None;
     }
 
     pub fn acknowledge_finalization_observation(&mut self) {

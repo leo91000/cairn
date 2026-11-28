@@ -13,7 +13,7 @@ mod retry;
 mod schedule;
 
 pub use control::routes;
-pub(crate) use schedule::finish_deferred_cleanup_before_detach;
+pub(crate) use schedule::finish_native_cleanup_before_detach;
 
 use crate::{
     config::now,

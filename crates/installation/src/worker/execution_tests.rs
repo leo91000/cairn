@@ -665,6 +665,15 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
             .fence(&service, &service.store.run(&id).await.unwrap())
             .await
             .unwrap();
+        if !after_grace && cleared {
+            assert!(
+                RunCheckpoint::load(&service.store, &id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .native_flush_confirmed()
+            );
+        }
         if after_grace {
             let saved = RunCheckpoint::load(&service.store, &id)
                 .await

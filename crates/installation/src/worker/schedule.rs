@@ -1129,34 +1129,62 @@ fn recovery_observation_limit(deadline: Option<i64>) -> Duration {
     })
 }
 
-/// Environment detachment replaces the execution checkpoint. Settle a fenced
-/// turn with its durable verdict before that transaction discards the receipt.
-pub(crate) fn finish_deferred_cleanup_before_detach(
+/// Settle the retiring native turn before detachment replaces its checkpoint.
+pub(crate) fn finish_native_cleanup_before_detach(
     db: &Db<'_>,
     run_id: &str,
     saved: &RunCheckpoint,
 ) -> Result<bool> {
     use crate::recovery::DeferredCleanupState;
 
-    if !db
+    let Some(run) = db
         .run_state(run_id)?
-        .is_some_and(|run| run.status == RunStatus::Succeeded && run.recovery_pending)
-    {
-        return Ok(false);
-    }
-    let Some(pending) = saved
-        .pending_native_cleanup()
-        .filter(|p| !p.awaiting_retirement())
+        .filter(|run| run.status == RunStatus::Succeeded && run.recovery_pending)
     else {
         return Ok(false);
     };
-    let mut pending = pending.clone();
-    if pending.state == DeferredCleanupState::Observing {
-        pending.state = DeferredCleanupState::Unconfirmed;
+    if let Some(pending) = saved.pending_native_cleanup() {
+        if pending.awaiting_retirement() {
+            return Ok(false);
+        }
+        let mut saved = saved.clone();
+        if pending.state == DeferredCleanupState::Observing {
+            let mut pending = pending.clone();
+            pending.state = DeferredCleanupState::Unconfirmed;
+            saved.pending_native_cleanup = Some(pending);
+        }
+        finish_recovery(db, run_id, Some(&saved))?;
+        return Ok(true);
     }
-    let mut saved = saved.clone();
-    saved.pending_native_cleanup = Some(pending);
-    finish_recovery(db, run_id, Some(&saved))?;
+    if run.trigger != "chat" || !RunCheckpoint::finishing_native_turn_in(db, run_id, true)? {
+        return Ok(false);
+    }
+
+    let finished_at = saved
+        .settled()
+        .and_then(|turn| turn.finished_at)
+        .or(run.finished_at);
+    if run.cancel_requested_at.is_some() {
+        cancel_recovery(db, run_id, &run, finished_at)?;
+        return Ok(true);
+    }
+    let failure = saved
+        .runner_id()
+        .filter(|attempt| saved.finalization_failure_attempt.as_deref() == Some(*attempt))
+        .and_then(|_| saved.finalization_error());
+    if failure.is_none() && saved.native_flush_confirmed() {
+        finish_recovery(db, run_id, Some(saved))?;
+        return Ok(true);
+    }
+    crate::chats::continuation::cancel_for_run(db, run_id)?;
+    let mut outcome = Settled::failure(
+        RunStatus::Failed,
+        failure.unwrap_or(
+            "Native disk cleanup could not be confirmed before the environment expired.",
+        ),
+    );
+    outcome.finished_at = finished_at.or(outcome.finished_at);
+    db.change_run(run_id, outcome.run_changes())?;
     Ok(true)
 }
 
