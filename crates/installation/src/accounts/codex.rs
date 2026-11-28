@@ -499,27 +499,24 @@ async fn read_usage(
     // A natural reset comes first: it leaves banked resets for later.
     super::replenish(&mut account, &Codex);
     super::claim(s, account.clone()).await?;
-    let exhaustion_at = account.exhausted.as_ref().map(|exhaustion| exhaustion.at);
     let model = account.exhausted_model(model);
     let redemption = reset(s, &account, model, rpc, &tokens).await?;
     let mut account = s.accounts.account(s, id).await?;
-    apply_redemption(&mut account, exhaustion_at, redemption);
+    apply_redemption(&mut account, redemption);
     save(s, &account).await
 }
 
-fn apply_redemption(account: &mut Account, exhaustion_at: Option<i64>, redemption: Redemption) {
+fn apply_redemption(account: &mut Account, redemption: Redemption) {
     // A confirmed reset can precede a lower usage reading, but it cannot
     // clear a refusal recorded while that reset or its usage read was in flight.
-    if redemption.confirmed
-        && account.exhausted.as_ref().is_some_and(|exhaustion| {
-            exhaustion_at == Some(exhaustion.at)
-                && redemption
-                    .usage
-                    .checked_at
-                    .is_some_and(|at| at > exhaustion.at)
-                && redemption.usage.available(&exhaustion.model)
-        })
-    {
+    if account.exhausted.as_ref().is_some_and(|exhaustion| {
+        redemption.confirmed_exhaustion_at == Some(exhaustion.at)
+            && redemption
+                .usage
+                .checked_at
+                .is_some_and(|at| at > exhaustion.at)
+            && redemption.usage.available(&exhaustion.model)
+    }) {
         account.exhausted = None;
     }
     account.usage = Some(redemption.usage);
@@ -530,51 +527,71 @@ fn apply_redemption(account: &mut Account, exhaustion_at: Option<i64>, redemptio
 #[cfg(test)]
 #[tokio::test]
 async fn a_banked_reset_cannot_clear_a_newer_quota_refusal() {
-    let root = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(root.path()).unwrap();
+    let fixture = crate::accounts::broker::tests::Fixture::new(Provider::Codex).await;
+    let s = &fixture.service;
+    let id = fixture.lease.account_id;
+    let key = reset_key(&id);
     let usage = |checked_at| {
         Usage::from_value(&json!({
             "allowed": true, "checkedAt": checked_at,
             "windows": [{ "id": "primary", "usedPercent": 50 }],
         }))
     };
-    store
-        .transaction(move |db| {
-            let mut account = Account::new(Provider::Codex, "Fixture", AccountState::Ready);
-            account.usage = Some(usage(now()));
-            db.save_coding_account(&account)?;
-            db.exhaust_coding_account(&account.id, "old-model")?;
-            let observed = db
-                .coding_account(&account.id)?
-                .unwrap()
-                .exhausted
-                .unwrap()
-                .at;
-            db.exhaust_coding_account(&account.id, "new-model")?;
-
-            let mut latest = db.coding_account(&account.id)?.unwrap();
-            let newer = latest.exhausted.as_ref().unwrap().at;
-            apply_redemption(
-                &mut latest,
-                Some(observed),
-                Redemption::new(usage(newer - 1), "", true),
-            );
-            assert_eq!(latest.exhausted.as_ref().unwrap().model, "new-model");
-            assert_eq!(latest.usage().checked_at, Some(newer - 1));
-            db.save_coding_account(&latest)?;
-
-            let mut latest = db.coding_account(&account.id)?.unwrap();
-            assert_eq!(latest.exhausted.as_ref().unwrap().at, newer);
-            apply_redemption(
-                &mut latest,
-                Some(newer),
-                Redemption::new(usage(newer + 1), "", true),
-            );
-            assert!(latest.exhausted.is_none());
-            db.save_coding_account(&latest)
-        })
+    let mut account = s.accounts.account(s, &id).await.unwrap();
+    account.usage = Some(usage(now()));
+    s.store.save_coding_account(&account).await.unwrap();
+    s.accounts.exhausted(s, &id, "old-model").await.unwrap();
+    let account = s.accounts.account(s, &id).await.unwrap();
+    let observed = account.exhausted.as_ref().unwrap().at;
+    let mut attempt = new_attempt(&account.usage(), "old-model", Some(observed));
+    attempt.confirmed = true;
+    s.store
+        .set(&key, serde_json::to_value(attempt).unwrap(), None)
         .await
         .unwrap();
+
+    s.accounts.exhausted(s, &id, "new-model").await.unwrap();
+    let mut latest = s.accounts.account(s, &id).await.unwrap();
+    let newer = latest.exhausted.as_ref().unwrap().at;
+    let current = usage(newer + 1);
+    let attempt: ResetAttempt =
+        serde_json::from_value(s.store.kv(&key).await.unwrap().unwrap()).unwrap();
+    let redemption = settle(s, &key, &latest, &attempt, &current)
+        .await
+        .unwrap()
+        .unwrap();
+    apply_redemption(&mut latest, redemption);
+    assert_eq!(latest.exhausted.as_ref().unwrap().model, "new-model");
+    assert!(s.store.kv(&key).await.unwrap().is_none());
+    s.store.save_coding_account(&latest).await.unwrap();
+
+    let mut latest = s.accounts.account(s, &id).await.unwrap();
+    for (target, clears) in [(None, false), (Some(newer), true)] {
+        let mut attempt = new_attempt(&current, "new-model", target);
+        attempt.confirmed = true;
+        s.store
+            .set(&key, serde_json::to_value(&attempt).unwrap(), None)
+            .await
+            .unwrap();
+        let saved: ResetAttempt =
+            serde_json::from_value(s.store.kv(&key).await.unwrap().unwrap()).unwrap();
+        let redemption = settle(s, &key, &latest, &saved, &current)
+            .await
+            .unwrap()
+            .unwrap();
+        apply_redemption(&mut latest, redemption);
+        assert_eq!(latest.exhausted.is_none(), clears);
+        assert!(s.store.kv(&key).await.unwrap().is_none());
+    }
+    s.store.save_coding_account(&latest).await.unwrap();
+    assert!(
+        s.accounts
+            .account(s, &id)
+            .await
+            .unwrap()
+            .exhausted
+            .is_none()
+    );
 }
 
 /// A banked reset request, persisted until its outcome is known.
@@ -585,6 +602,8 @@ struct ResetAttempt {
     model: String,
     #[serde(default)]
     confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exhaustion_at: Option<i64>,
 }
 
 /// `account/rateLimitResetCredit/consume`.
@@ -637,15 +656,15 @@ impl Credit {
 struct Redemption {
     usage: Usage,
     error: String,
-    confirmed: bool,
+    confirmed_exhaustion_at: Option<i64>,
 }
 
 impl Redemption {
-    fn new(usage: Usage, error: &str, confirmed: bool) -> Self {
+    fn new(usage: Usage, error: &str, confirmed_exhaustion_at: Option<i64>) -> Self {
         Self {
             usage,
             error: error.into(),
-            confirmed,
+            confirmed_exhaustion_at,
         }
     }
 }
@@ -679,15 +698,16 @@ async fn reset(
     let low =
         account.exhausted.is_some() || current.remaining(model).is_some_and(|n| n <= RESET_AT);
     if !account.enabled || !low {
-        return Ok(Redemption::new(current, "", false));
+        return Ok(Redemption::new(current, "", None));
     }
     let attempt = match attempt {
         Some(attempt) => attempt,
         None if current.available_resets() == 0 => {
-            return Ok(Redemption::new(current, "", false));
+            return Ok(Redemption::new(current, "", None));
         }
         None => {
-            let attempt = new_attempt(&current, model);
+            let exhaustion_at = account.exhausted.as_ref().map(|exhaustion| exhaustion.at);
+            let attempt = new_attempt(&current, model, exhaustion_at);
             s.store
                 .set(&key, serde_json::to_value(&attempt)?, None)
                 .await?;
@@ -699,7 +719,7 @@ async fn reset(
         Redemption::new(
             account.usage(),
             "Unable to confirm banked reset. Retrying automatically without spending another reset.",
-            false,
+            None,
         )
     }))
 }
@@ -715,24 +735,24 @@ async fn settle(
     let restored = restored(current, &attempt.model);
     if account.exhausted.is_none() && restored {
         s.store.delete(key).await?;
-        return Ok(Some(Redemption::new(
-            current.clone(),
-            "",
-            attempt.confirmed,
-        )));
+        return Ok(Some(Redemption::new(current.clone(), "", None)));
     }
     if !attempt.confirmed {
         return Ok(None);
     }
     if !restored {
-        return Ok(Some(Redemption::new(current.clone(), RESET_PENDING, false)));
+        return Ok(Some(Redemption::new(current.clone(), RESET_PENDING, None)));
     }
     s.store.delete(key).await?;
-    Ok(Some(Redemption::new(current.clone(), "", true)))
+    Ok(Some(Redemption::new(
+        current.clone(),
+        "",
+        attempt.exhaustion_at,
+    )))
 }
 
 /// A new request for the usable credit that expires first.
-fn new_attempt(current: &Usage, model: &str) -> ResetAttempt {
+fn new_attempt(current: &Usage, model: &str, exhaustion_at: Option<i64>) -> ResetAttempt {
     let credit = current
         .resets
         .iter()
@@ -747,6 +767,7 @@ fn new_attempt(current: &Usage, model: &str) -> ResetAttempt {
         },
         model: model.into(),
         confirmed: false,
+        exhaustion_at,
     }
 }
 
@@ -772,12 +793,12 @@ async fn redeem(
         Outcome::NothingToReset => {
             s.store.delete(key).await?;
             let waiting = "Banked reset is not eligible yet; checking again automatically.";
-            Ok(Redemption::new(current, waiting, false))
+            Ok(Redemption::new(current, waiting, None))
         }
         Outcome::NoCredit => {
             s.store.delete(key).await?;
             let waiting = "No banked reset available; waiting for capacity or another account.";
-            Ok(Redemption::new(current, waiting, false))
+            Ok(Redemption::new(current, waiting, None))
         }
         Outcome::Reset | Outcome::AlreadyRedeemed => {
             attempt.confirmed = true;
@@ -796,7 +817,8 @@ async fn redeem(
                 s.store.delete(key).await?;
             }
             let error = if confirmed { "" } else { RESET_PENDING };
-            Ok(Redemption::new(current, error, confirmed))
+            let exhaustion_at = attempt.exhaustion_at.filter(|_| confirmed);
+            Ok(Redemption::new(current, error, exhaustion_at))
         }
     }
 }
