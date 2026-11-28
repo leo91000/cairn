@@ -17,6 +17,7 @@ use cairn_installation::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -1155,7 +1156,7 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         )
         .await
         .unwrap();
-    f.service.chat_tick(&Default::default()).await.unwrap();
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
     let run = f.service.chat_detail(chat_id).await.unwrap()["runId"]
         .as_str()
         .unwrap()
