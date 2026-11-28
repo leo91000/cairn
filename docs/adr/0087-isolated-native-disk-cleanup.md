@@ -75,7 +75,9 @@ minutes. The completed-environment recovery loop rechecks the fence across
 manager restarts. It settles the saved reply only when DELETE returns the
 attempt-bound `NativeCleanupRetired` receipt, which also checks the current
 conversation quarantine. A missing proof at the deadline publishes the original
-cleanup failure.
+cleanup failure. The manager stores the verdict with its fence until it commits
+the run result. That publication retains the original turn end so later messages
+stay queued for the next turn.
 The live manager checkpoint serializes fencing and reloads its durable evidence
 before heartbeat or output persistence can overwrite it; placement lease renewal
 continues independently while the fence waits.

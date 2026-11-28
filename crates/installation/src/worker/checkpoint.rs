@@ -496,6 +496,11 @@ impl RunCheckpoint {
             && self.last_error().starts_with("Native cleanup: ")
     }
 
+    pub(crate) fn pending_native_cleanup(&self) -> Option<&crate::recovery::PendingNativeCleanup> {
+        let pending = self.pending_native_cleanup.as_ref()?;
+        (self.runner_id() == Some(pending.attempt.as_str())).then_some(pending)
+    }
+
     pub fn finalization_error(&self) -> Option<&str> {
         if self.runner_id().is_some()
             && self.runner_id() == self.finalization_failure_attempt.as_deref()

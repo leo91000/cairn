@@ -158,9 +158,13 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
         (
             json!({ "NativeCleanupRetired": { "attemptId": attempt } }),
             true,
+            Retirement::Expired,
+        ),
+        (
+            json!({ "NativeCleanupRetired": { "attemptId": attempt } }),
+            true,
             Retirement::Deferred,
         ),
-        (json!({}), true, Retirement::Expired),
     ] {
         let after_grace = retirement != Retirement::WithinGrace;
         let pending = receipt.clone();
@@ -265,10 +269,45 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                     .store(&service.store, &id)
                     .await
                     .unwrap();
-                // A malformed receipt is not proof of retirement.
+                let run = id.clone();
+                service
+                    .store
+                    .transaction(move |db| {
+                        db.save_conversation_boundary(&json!({ "id": "chat", "runId": run }))?;
+                        db.put_message(&json!({
+                            "id": "follow-up", "chatId": "chat", "status": "queued",
+                            "createdAt": 43, "text": "A later message",
+                        }))?;
+                        crate::conversation_writers::record_message(
+                            db,
+                            "chat",
+                            "follow-up",
+                            &crate::conversation_writers::EntryWriter::Person("author".into()),
+                        )?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
             }
+            let before_verdict = observations.load(Ordering::Relaxed);
             retired_after_grace.store(true, Ordering::Relaxed);
+            checkpoint
+                .fence(&service, &service.store.run(&id).await.unwrap())
+                .await
+                .unwrap();
+            let after_verdict = observations.load(Ordering::Relaxed);
 
+            if retirement == Retirement::Expired {
+                assert_eq!(before_verdict, after_verdict);
+                assert_eq!(stops.load(Ordering::Relaxed), 1);
+            } else {
+                assert_eq!(before_verdict + 1, after_verdict);
+                assert_eq!(stops.load(Ordering::Relaxed), 2);
+            }
+            // A restart after storing the verdict must settle from durable evidence
+            // even if the controller has disconnected.
+            assert!(service.store.run_state(&id).await.unwrap().recovery_pending);
+            server.abort();
             super::super::schedule::recover_completed_environments(&service)
                 .await
                 .unwrap();
@@ -279,6 +318,21 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                     settled.error.as_deref(),
                     Some("Native disk cleanup is still in progress.")
                 );
+                assert_eq!(settled.finished_at, Some(42));
+                service
+                    .chat_tick(&std::collections::HashSet::new())
+                    .await
+                    .unwrap();
+                service
+                    .store
+                    .read(|db| {
+                        let queued = &db.messages("chat")?[0];
+                        assert_eq!(queued["status"], "queued");
+                        assert!(queued["returnedTo"].is_null());
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
             } else {
                 assert_eq!(settled.status, RunStatus::Succeeded);
                 assert_eq!(settled.summary, "Completed reply");
@@ -286,7 +340,12 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                 assert!(settled.error.is_none());
             }
             assert!(!settled.recovery_pending);
-            assert_eq!(stops.load(Ordering::Relaxed), 2);
+            assert_eq!(observations.load(Ordering::Relaxed), after_verdict);
+            let saved = RunCheckpoint::load(&service.store, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(saved.pending_native_cleanup.is_none());
         } else {
             assert_eq!(observations.load(Ordering::Relaxed), 2);
             assert_eq!(stops.load(Ordering::Relaxed), 2);

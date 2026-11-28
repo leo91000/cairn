@@ -924,6 +924,48 @@ pub(super) fn finish_recovery(
     } else {
         None
     };
+    let cleanup_finished_at = checkpoint
+        .filter(|saved| saved.pending_native_cleanup().is_some() || saved.native_cleanup_failure())
+        .and_then(RunCheckpoint::settled)
+        .filter(|settled| settled.status == RunStatus::Succeeded)
+        .and_then(|settled| settled.finished_at);
+    let cleanup_failure = |message| {
+        let mut failure = Settled::failure(RunStatus::Failed, message);
+        // Messages queued after the completed turn still belong to the next turn.
+        failure.finished_at = cleanup_finished_at.or(failure.finished_at);
+        failure.run_changes()
+    };
+
+    let mut published = None;
+    if let Some(saved) = checkpoint
+        && let Some(pending) = saved.pending_native_cleanup()
+    {
+        use crate::recovery::DeferredCleanupState;
+
+        let mut saved = saved.clone();
+        if current.cancel_requested_at.is_none()
+            && observed_control_failure.is_none()
+            && current.status == RunStatus::Succeeded
+            && current.recovery_pending
+        {
+            match pending.state {
+                DeferredCleanupState::Observing => return Ok(false),
+                DeferredCleanupState::Expired => saved.record_controller_result(
+                    db,
+                    id,
+                    &pending.attempt,
+                    Some(pending.clone().failure()),
+                )?,
+                DeferredCleanupState::Retired => {}
+            }
+        }
+        // Keep the fence and outcome durable until the transaction publishing
+        // the run result consumes them together.
+        saved.pending_native_cleanup = None;
+        saved.store_in(db, id)?;
+        published = Some(saved);
+    }
+    let checkpoint = published.as_ref().or(checkpoint);
     if current.cancel_requested_at.is_some() {
         cancel_recovery(db, id, current)?;
         return Ok(false);
@@ -936,9 +978,8 @@ pub(super) fn finish_recovery(
             && checkpoint.runner_id() == checkpoint.finalization_failure_attempt.as_deref()
             && let Some(error) = checkpoint.finalization_error()
         {
-            let settled = Settled::failure(RunStatus::Failed, error);
             crate::chats::continuation::cancel_for_run(db, id)?;
-            db.change_run(id, settled.run_changes())?;
+            db.change_run(id, cleanup_failure(error))?;
             return Ok(false);
         }
         if let Some(message) = observed_control_failure
@@ -949,16 +990,7 @@ pub(super) fn finish_recovery(
         {
             crate::chats::continuation::cancel_for_run(db, id)?;
             db.event(id, &EventKind::Error, &message, None)?;
-            db.change_run(
-                id,
-                Settled::failure(RunStatus::Failed, &message).run_changes(),
-            )?;
-            return Ok(false);
-        }
-        if checkpoint.pending_native_cleanup.is_some()
-            && current.status == RunStatus::Succeeded
-            && current.recovery_pending
-        {
+            db.change_run(id, cleanup_failure(&message))?;
             return Ok(false);
         }
         if let Some(settled) = checkpoint.settled() {
