@@ -254,7 +254,7 @@ fun RunScreen(
             live.error?.let { ErrorNotice(it) {} }
             run?.let { current ->
                 val headerActions: @Composable RowScope.() -> Unit = {
-                    if (current.active)
+                    if (current.stoppable)
                         ActionIcon("Arrêter", CairnIcons.Stop, !state.busy) { confirm = "cancel" }
                     Box {
                         ActionIcon("Options de l’exécution", CairnIcons.More) { menu = true }

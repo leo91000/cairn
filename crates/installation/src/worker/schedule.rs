@@ -566,12 +566,21 @@ pub(super) async fn observe_native_cleanup(s: &Arc<Service>) -> Result<()> {
     }
     for (key, expected) in completed {
         let preparation = s.worker.run_preparation_lock(&key.run_id).await;
-        let Ok(_preparation) = preparation.try_lock() else {
+        let Ok(preparation) = preparation.try_lock_owned() else {
             continue;
         };
-        if let Err(error) = settle_native_cleanup(s, &key.run_id, expected).await {
-            tracing::warn!(run_id = key.run_id, message = %error.message, "Native cleanup settlement failed");
-        }
+        let service = s.clone();
+        s.worker.spawn_recovery(async move {
+            let _preparation = preparation;
+            tokio::select! {
+                () = service.shutdown.cancelled() => {},
+                result = settle_native_cleanup(&service, &key.run_id, expected) => {
+                    if let Err(error) = result {
+                        tracing::warn!(run_id = key.run_id, message = %error.message, "Native cleanup settlement failed");
+                    }
+                }
+            }
+        });
     }
     Ok(())
 }
@@ -1164,7 +1173,10 @@ pub(super) fn finish_recovery(
     }
     let checkpoint = published.as_ref().or(checkpoint);
     if current.cancel_requested_at.is_some() {
-        cancel_recovery(db, id, current, cleanup_finished_at)?;
+        let completed_at = (current.status == RunStatus::Succeeded && current.recovery_pending)
+            .then_some(current.finished_at)
+            .flatten();
+        cancel_recovery(db, id, current, cleanup_finished_at.or(completed_at))?;
         return Ok(false);
     }
     if let Some(checkpoint) = checkpoint {

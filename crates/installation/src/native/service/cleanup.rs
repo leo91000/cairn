@@ -187,22 +187,38 @@ impl Controller {
     }
 
     async fn cleanup_receipt_superseded(&self, id: &str, attempt: Option<&str>) -> bool {
+        self.cleanup_flushed(id).await && self.cleanup_reusable(id, attempt).await
+    }
+
+    pub(super) async fn cleanup_status(&self, id: &str) -> Result<Value> {
+        uuid(id)?;
+        let check = async {
+            let flushed = self.cleanup_flushed(id).await;
+            let reusable = self.cleanup_reusable(id, None).await;
+            (flushed && reusable, reusable)
+        };
+        let (flushed, reusable) = tokio::time::timeout(WAIT_RETIREMENT_PROBE, check)
+            .await
+            .unwrap_or_default();
+        Ok(json!({ "attemptId": id, "flushed": flushed, "reusable": reusable }))
+    }
+
+    async fn cleanup_flushed(&self, id: &str) -> bool {
         let Ok(Some(bytes)) =
             read_attempt_evidence(&self.file(id, "cleanup-result"), 1024, false).await
         else {
             return false;
         };
-        if !bytes.trim_ascii_start().starts_with(b"{")
-            || !matches!(
+        bytes.trim_ascii_start().starts_with(b"{")
+            && matches!(
                 serde_json::from_slice::<Completed>(&bytes),
                 Ok(Completed {
                     completion: block::Completion::Flushed,
                 })
             )
-        {
-            return false;
-        }
+    }
 
+    async fn cleanup_reusable(&self, id: &str, attempt: Option<&str>) -> bool {
         let Ok(Some(owner)) = read_attempt_evidence(&self.file(id, "run"), 36, false).await else {
             return false;
         };
@@ -741,6 +757,77 @@ mod tests {
 
             assert_eq!(result.unwrap(), pending);
         });
+    }
+
+    #[tokio::test]
+    async fn cleanup_status_distinguishes_reusable_workspace_from_clean_flush() {
+        let (_root, controller) = super::super::tests::fixture().await;
+        private_dir(&controller.state.join("native-cleanup"))
+            .await
+            .unwrap();
+        let run = crate::config::id();
+        let attempt = crate::config::id();
+        atomic_write(&controller.file(&attempt, "run"), run.as_bytes())
+            .await
+            .unwrap();
+        atomic_write(&controller.file(&attempt, "active"), run.as_bytes())
+            .await
+            .unwrap();
+        controller
+            .record_cleanup_pending(&attempt, "cleanup pending")
+            .await
+            .unwrap();
+        super::super::super::cleanup::quarantine(&controller.state, &run, &attempt).unwrap();
+
+        let status = |flushed, reusable| json!({ "attemptId": attempt, "flushed": flushed, "reusable": reusable });
+        assert_eq!(
+            controller.cleanup_status(&attempt).await.unwrap(),
+            status(false, false)
+        );
+        tokio::fs::remove_file(controller.file(&attempt, "active"))
+            .await
+            .unwrap();
+        assert_eq!(
+            controller.cleanup_status(&attempt).await.unwrap(),
+            status(false, false)
+        );
+        tokio::fs::remove_file(
+            controller
+                .state
+                .join("native-cleanup")
+                .join(format!("{run}.json")),
+        )
+        .await
+        .unwrap();
+
+        // On restart, orphan recovery can release the workspace without a
+        // receipt from the controller that attempted the original flush.
+        assert_eq!(
+            controller.cleanup_status(&attempt).await.unwrap(),
+            status(false, true)
+        );
+        for (completion, flushed) in [
+            (block::Completion::FailedFlush, false),
+            (block::Completion::Aborted, false),
+            (block::Completion::Flushed, true),
+        ] {
+            atomic_write(
+                &controller.file(&attempt, "cleanup-result"),
+                &serde_json::to_vec(&Completed { completion }).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                controller.cleanup_status(&attempt).await.unwrap(),
+                status(flushed, true)
+            );
+        }
+        let other = crate::config::id();
+        super::super::super::cleanup::quarantine(&controller.state, &run, &other).unwrap();
+        assert_eq!(
+            controller.cleanup_status(&attempt).await.unwrap(),
+            status(false, false)
+        );
     }
 
     #[tokio::test]

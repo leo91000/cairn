@@ -192,6 +192,7 @@ pub(super) async fn route(controller: Controller, request: Request) -> Result<Re
             controller.stop_attempt(id).await?;
             controller.stopped_result(id).await
         }
+        ("GET", ["runs", id, "cleanup-status"]) => controller.cleanup_status(id).await?,
         ("POST", ["runs", id, "wait"]) => {
             uuid(id)?;
             let observe_retirement =

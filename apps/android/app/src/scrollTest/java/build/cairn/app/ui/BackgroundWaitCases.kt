@@ -32,6 +32,19 @@ abstract class BackgroundWaitCases {
     protected open fun capture(name: String) {}
 
     @Test
+    fun stoppingDeferredCleanupUsesTheConversationStopAction() =
+        conversation("succeeded", recoveryPending = true) { server, _ ->
+            compose.onNodeWithContentDescription("Arrêter").assertIsDisplayed().performClick()
+            compose.onNodeWithText("Arrêter l’agent ?").assertIsDisplayed()
+            compose.onNodeWithText("Confirmer").performClick()
+            val request = generateSequence {
+                server.takeRequest(2, TimeUnit.SECONDS)
+            }
+                .firstOrNull { it.method == "POST" && it.path?.endsWith("/stop") == true }
+            assertTrue(request?.path?.contains("/api/chats/") == true)
+        }
+
+    @Test
     fun rejectedQuotaSwitchRemainsVisibleAfterOptionsRefresh() =
         conversation("running", quota = true, codingAgentChoices = true, rejectSwitch = true) { _, _
             ->
@@ -1219,6 +1232,7 @@ abstract class BackgroundWaitCases {
         usableAgents: (() -> List<String>)? = null,
         reason: String = "Attendre la CI",
         history: ((ChatWakeup?, Long) -> List<RunEvent>)? = null,
+        recoveryPending: Boolean = false,
         check: (MockWebServer, CairnViewModel) -> Unit,
     ) {
         MockWebServer().use { server ->
@@ -1248,6 +1262,7 @@ abstract class BackgroundWaitCases {
                         Run(
                             id = SAVED_RUN_ID,
                             status = status,
+                            recoveryPending = recoveryPending,
                             startedAt = now - 60_000,
                             resumeAvailable = hasSavedTurn && !resumePrelaunch,
                             sessionId =
@@ -1397,6 +1412,21 @@ abstract class BackgroundWaitCases {
 
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
+                        if (recoveryPending && path.endsWith("/stop"))
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(
+                                    wireJson.encodeToString(
+                                        chat.copy(
+                                            paused = true,
+                                            run =
+                                                chat.run?.copy(
+                                                    status = "cancelled",
+                                                    recoveryPending = false,
+                                                ),
+                                        )
+                                    )
+                                )
                         if (codingAgentChoices && path.endsWith("/stop")) {
                             switching = false
                             return MockResponse()

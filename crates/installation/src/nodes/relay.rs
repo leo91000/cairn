@@ -223,7 +223,7 @@ fn route(method: &str, path: &str) -> Result<()> {
             uuid(id)
                 && matches!(
                     (method, *operation),
-                    ("GET", "logs" | "administrative-pause")
+                    ("GET", "logs" | "administrative-pause" | "cleanup-status")
                         | ("POST", "wait")
                         | ("POST", "artifact" | "environment")
                 )

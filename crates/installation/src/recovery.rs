@@ -560,6 +560,26 @@ pub(crate) async fn observe_pending_native_cleanup(
     let authorize = crate::authorization::Authorization::default();
     let observe = async {
         let credential = secret(&s.config.data_dir, "runner-secret").await?;
+        let status = s
+            .http
+            .get(format!("{url}/cleanup-status"))
+            .bearer_auth(&credential)
+            .timeout(crate::nodes::EXECUTION_RELAY_HEAD_TIMEOUT)
+            .send()
+            .await
+            .map_err(Error::internal)?;
+        if status.status().is_success() {
+            let status = status.json::<Value>().await.map_err(Error::internal)?;
+            return Ok(status["attemptId"].as_str() == Some(attempt)
+                && status["reusable"] == true
+                && (pending.awaiting_retirement() || status["flushed"] == true));
+        }
+        if !matches!(status.status().as_u16(), 400 | 404) {
+            return Ok(false);
+        }
+        let Some(_legacy) = s.worker.try_legacy_cleanup_probe() else {
+            return Ok(false);
+        };
         let result = crate::runner::observe_cleanup_retirement(&s.http, &url, &credential).await?;
         if !result.physical_finalized || result.native_cleanup.is_none() {
             return Ok(false);

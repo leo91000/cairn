@@ -139,7 +139,12 @@ import { connectionTone, installationKey, routeLabel } from '../installation-con
 import { modelCatalogs } from '../models'
 import { useReadWhileOpen } from '../reads'
 import { useRetryState } from '../run-retry'
-import { exclusiveSuspensionLabel, headerStatus, isExclusivelySuspended } from '../run-status'
+import {
+  canStopRun,
+  exclusiveSuspensionLabel,
+  headerStatus,
+  isExclusivelySuspended,
+} from '../run-status'
 import { backgroundWait, identityColor } from '../signal'
 import { chatSkills } from '../skill-mentions'
 import {
@@ -2270,7 +2275,7 @@ function key(event: KeyboardEvent) {
                       <Icon :name="Clock" :size="16" />
                     </button>
                     <button
-                      v-if="(active || detail?.wakeup) && !editing && (!hasDraft || readOnly)"
+                      v-if="(canStopRun(detail?.run) || detail?.wakeup) && !editing && (!hasDraft || readOnly)"
                       type="button"
                       class="round-action border border-line text-coral"
                       :aria-label="scheduled ? 'Cancel scheduled wait' : 'Stop response'"

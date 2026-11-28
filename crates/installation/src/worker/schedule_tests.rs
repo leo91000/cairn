@@ -175,50 +175,28 @@ async fn fixture_with_runner(
 
 #[tokio::test]
 async fn the_next_chat_turn_waits_for_old_native_cleanup_after_the_deadline() {
-    use axum::{
-        Json, Router,
-        routing::{delete, post},
-    };
+    use axum::{Json, Router, routing::get};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     let attempt = crate::config::id();
     let cleared = Arc::new(AtomicBool::new(false));
-    let deletes = Arc::new(AtomicUsize::new(0));
-    let stop_attempt = attempt.clone();
-    let wait_attempt = attempt.clone();
-    let app = Router::new()
-        .route("/runs/{attempt}", delete({
+    let probes = Arc::new(AtomicUsize::new(0));
+    let response_attempt = attempt.clone();
+    let app = Router::new().route(
+        "/runs/{attempt}/cleanup-status",
+        get({
             let cleared = cleared.clone();
-            let deletes = deletes.clone();
+            let probes = probes.clone();
             move || async move {
-                deletes.fetch_add(1, Ordering::Relaxed);
-                Json(if cleared.load(Ordering::Acquire) {
-                    json!({ "NativeCleanupRetired": { "attemptId": stop_attempt } })
-                } else {
-                    json!({
-                        "StatusCode": crate::runner::CONTROLLER_FAILED,
-                        "FinalizationFailed": true,
-                        "NativeCleanup": {
-                            "attemptId": stop_attempt, "workloadFenced": true,
-                            "message": "Disk cleanup pending",
-                        }
-                    })
-                })
-            }
-        }))
-        .route("/runs/{attempt}/wait", post({
-            let cleared = cleared.clone();
-            move || async move {
+                probes.fetch_add(1, Ordering::Relaxed);
                 Json(json!({
-                    "StatusCode": crate::runner::CONTROLLER_FAILED,
-                    "FinalizationFailed": true,
-                    "NativeCleanup": {
-                        "attemptId": wait_attempt, "workloadFenced": true,
-                        "retired": cleared.load(Ordering::Acquire), "message": "Disk cleanup pending",
-                    }
+                    "attemptId": response_attempt,
+                    "flushed": false,
+                    "reusable": cleared.load(Ordering::Acquire),
                 }))
             }
-        }));
+        }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -301,7 +279,7 @@ async fn the_next_chat_turn_waits_for_old_native_cleanup_after_the_deadline() {
     let blocked = service.store.run_state(&run).await.unwrap();
     assert_eq!(blocked.status, RunStatus::Queued);
     assert!(blocked.recovery_pending);
-    assert_eq!(deletes.load(Ordering::Relaxed), 0);
+    assert_eq!(probes.load(Ordering::Relaxed), 1);
     let chat_for_read = chat.clone();
     service
         .store
@@ -330,7 +308,7 @@ async fn the_next_chat_turn_waits_for_old_native_cleanup_after_the_deadline() {
     .await
     .unwrap();
     assert!(recover(&service, &queued).await.unwrap());
-    assert_eq!(deletes.load(Ordering::Relaxed), 1);
+    assert_eq!(probes.load(Ordering::Relaxed), 2);
     let ready = service.store.run_state(&run).await.unwrap();
     assert_eq!(ready.status, RunStatus::Queued);
     assert!(!ready.recovery_pending);
@@ -343,6 +321,10 @@ async fn stop_and_run_cancellation_settle_a_deferred_reply_without_returning_lat
     for stop_chat in [true, false] {
         let (_root, service, chat, run, _) = fixture().await;
         let id = run.clone();
+        let account = crate::config::id();
+        let other_run = crate::config::id();
+        let account_for_fixture = account.clone();
+        let other_for_fixture = other_run.clone();
         service
             .store
             .transaction(move |db| {
@@ -352,7 +334,7 @@ async fn stop_and_run_cancellation_settle_a_deferred_reply_without_returning_lat
                     &id,
                     &json!({
                         "status": RunStatus::Succeeded, "trigger": "chat",
-                        "finishedAt": 42, "recoveryPending": true,
+                        "createdAt": 1, "finishedAt": 42, "recoveryPending": true,
                     }),
                 )?;
                 RunCheckpoint::from_value(json!({
@@ -364,7 +346,26 @@ async fn stop_and_run_cancellation_settle_a_deferred_reply_without_returning_lat
                         "message": "Disk cleanup pending"
                     },
                 }))?
-                .store_in(db, &id)
+                .store_in(db, &id)?;
+                let other_attempt = crate::config::id();
+                db.add_run_fixture(
+                    &json!({
+                        "id": other_for_fixture, "taskId": other_for_fixture,
+                        "status": "succeeded", "trigger": "chat", "accountId": account_for_fixture,
+                        "createdAt": 0, "finishedAt": 42, "recoveryPending": true,
+                    }),
+                    None,
+                )?;
+                RunCheckpoint::from_value(json!({
+                    "runnerId": other_attempt,
+                    "prepared": { "backend": "native", "isolated": true },
+                    "settled": { "status": "succeeded", "finishedAt": 42 },
+                    "pendingNativeCleanup": {
+                        "attempt": other_attempt, "state": "retired", "until": 0,
+                        "message": "Disk cleanup pending"
+                    },
+                }))?
+                .store_in(db, &other_for_fixture)
             })
             .await
             .unwrap();
@@ -398,7 +399,33 @@ async fn stop_and_run_cancellation_settle_a_deferred_reply_without_returning_lat
         }
         let stopping = service.store.run_state(&run).await.unwrap();
         assert!(stopping.cancel_requested_at.is_some_and(|time| time > 42));
-        observe_native_cleanup(&service).await.unwrap();
+        let account_guard = service.accounts.lock(&account).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            observe_native_cleanup(&service).await.unwrap();
+            let preparation = service.worker.run_preparation_lock(&run).await;
+            drop(preparation.lock().await);
+        })
+        .await
+        .unwrap();
+        assert!(
+            service
+                .store
+                .run_state(&other_run)
+                .await
+                .unwrap()
+                .recovery_pending
+        );
+        drop(account_guard);
+        let other_preparation = service.worker.run_preparation_lock(&other_run).await;
+        drop(other_preparation.lock().await);
+        assert!(
+            !service
+                .store
+                .run_state(&other_run)
+                .await
+                .unwrap()
+                .recovery_pending
+        );
         let stopped = service.store.run_state(&run).await.unwrap();
         assert_eq!(stopped.status, RunStatus::Cancelled);
         assert_eq!(stopped.finished_at, Some(42));

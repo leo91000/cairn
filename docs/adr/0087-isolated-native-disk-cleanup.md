@@ -73,15 +73,16 @@ in one transaction. That transaction starts a five-minute settlement deadline
 before the first follow-up request.
 The manager resumes bounded observations across restarts on a timer independent
 of ordinary recovery. Observations are tracked by execution attempt. Waiting
-attempts receive a slot before earlier attempts retry. An observer keeps its
-slot for the manager's request, whose timeout includes the node relay budget.
-The independent recovery loop settles the saved reply
-only when DELETE returns the
-attempt-bound `NativeCleanupRetired` receipt, which also checks the current
-conversation quarantine. A missing proof at the deadline publishes the original
-cleanup failure. The manager stores the verdict with its fence until it commits
-the run result, with the original turn end. Later messages stay queued for
-execution on the retained workspace while the manager waits for retirement.
+attempts receive a slot before earlier attempts retry. The authenticated
+cleanup status identifies the attempt and reports both a clean flush and
+whether the workspace is available for reuse. A controller that lacks this
+read uses the historical WAIT and current DELETE receipts. A smaller pool
+limits those longer checks.
+The recovery loop settles each run independently. A clean flush and current
+quarantine clearance establish success. A missing proof at the deadline
+publishes the original cleanup failure and keeps the original turn end. Later
+messages stay queued until the workspace is reusable, including after the
+controller retires it through recovery of an interrupted or failed flush.
 Environment detachment settles the saved verdict
 before replacing the execution checkpoint. Without proof it publishes the
 original cleanup diagnostic. Expiration leaves a fenced turn's cancellation

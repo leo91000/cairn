@@ -222,7 +222,10 @@ fn change_expired_backend(
     required_tags: &Value,
 ) -> Result<()> {
     let run_id = text(&chat, "runId");
-    if crate::environment_expiration::pending(db, run_id)? {
+    if crate::environment_expiration::pending(db, run_id)?
+        && crate::worker::checkpoint::RunCheckpoint::load_in(db, run_id)?
+            .is_some_and(|saved| saved.pending_native_cleanup().is_some())
+    {
         return Err(Error::conflict(
             "The working environment is already being retired.",
         ));
@@ -588,7 +591,7 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn expired_backend_selection_waits_for_detachment() {
+    async fn expired_backend_selection_preserves_a_pending_native_cleanup_verdict() {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
         store
@@ -600,6 +603,18 @@ mod tests {
                         "recoveryPending": true
                     }),
                     None,
+                )?;
+                let attempt = id();
+                db.save_checkpoint_boundary(
+                    &run,
+                    &json!({
+                        "runnerId": attempt,
+                        "prepared": { "backend": "native", "isolated": true },
+                        "pendingNativeCleanup": {
+                            "attempt": attempt, "state": "observing", "until": now() + 5_000,
+                            "message": "Cleanup in progress"
+                        },
+                    }),
                 )?;
                 crate::environment_expiration::request_in(
                     db,

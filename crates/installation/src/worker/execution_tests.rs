@@ -202,6 +202,10 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
             let mut status = axum::http::StatusCode::OK;
             let mut slow_proof = false;
             match request.method().as_str() {
+                "GET" => {
+                    assert_eq!(request.uri().path(), format!("{url}/cleanup-status"));
+                    status = axum::http::StatusCode::NOT_FOUND;
+                }
                 "DELETE" => {
                     assert_eq!(request.uri().path(), url);
                     let previous = route_stops.fetch_add(1, Ordering::Relaxed);
@@ -372,12 +376,14 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
             let ordinary = tokio::spawn(async move {
                 super::super::schedule::recover_completed_environments(&normal).await
             });
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                super::super::schedule::observe_native_cleanup(&service),
-            )
+            tokio::time::timeout(Duration::from_secs(5), async {
+                super::super::schedule::observe_native_cleanup(&service)
+                    .await
+                    .unwrap();
+                let preparing = service.worker.run_preparation_lock(&id).await;
+                drop(preparing.lock().await);
+            })
             .await
-            .unwrap()
             .unwrap();
             assert!(!ordinary.is_finished());
             ordinary.abort();

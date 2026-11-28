@@ -529,6 +529,32 @@ test('cancelling automatic recovery pauses the conversation and preserves its wo
   expect(stopped.status).toBe('cancelled')
 })
 
+test('stopping a chat during native cleanup keeps the later message queued', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'Finish the current reply',
+  })
+  await expect.poll(() => {
+    const run = workspace.service.chats.detail(chat.id).run
+    return run && { status: run.status, recoveryPending: run.recoveryPending }
+  }).toEqual({ status: 'succeeded', recoveryPending: false })
+  const completed = workspace.service.chats.detail(chat.id).run!
+  workspace.service.store.deferNativeCleanup(completed.id)
+  const following = randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: following, text: 'Keep this for the next turn' })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Stop response' }).click()
+
+  await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('cancelled')
+  const stopped = workspace.service.chats.detail(chat.id)
+  expect(stopped.paused).toBe(true)
+  expect(stopped.run?.finishedAt).toBe(completed.finishedAt)
+  expect(stopped.run?.sessionId).toBe(completed.sessionId)
+  expect(workspace.service.store.chatMessages(chat.id).find(message => message.id === following)?.status).toBe('queued')
+})
+
 test('native Codex reconnect notices remain visible until work continues', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
