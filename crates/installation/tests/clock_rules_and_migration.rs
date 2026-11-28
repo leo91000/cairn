@@ -957,6 +957,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let blocked_run_id = id();
     let waiting_run_id = id();
     let retirement_run_id = id();
+    let resuming_retirement_run_id = id();
     let regular_chat_id = id();
     let t0 = 1_700_000_000_000i64;
     let future_snooze = now() + 3_600_000;
@@ -1217,6 +1218,32 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
                         "wakeAt": t0 + 60_000,
                     },
                 },
+            })
+            .to_string(),
+            t0 + 30_000
+        ],
+    )
+    .unwrap();
+
+    conn.execute(
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,boundary,
+           snapshot,session_id,recovery_pending,resume_available,resume_count)
+         SELECT ?1,task_id,'cancelled','schedule',created_at,started_at,finished_at,boundary,
+           snapshot,session_id,0,0,0 FROM runs WHERE id=?2",
+        params![resuming_retirement_run_id, retirement_run_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO records(kind,id,data,updated_at) VALUES('environment-expirations',?1,?2,?3)",
+        params![
+            resuming_retirement_run_id,
+            json!({
+                "id": resuming_retirement_run_id,
+                "runId": resuming_retirement_run_id,
+                "expiredAt": t0 + 30_000,
+                "cause": "node-change",
+                "continueTurn": true,
+                "environment": { "trigger": "schedule" },
             })
             .to_string(),
             t0 + 30_000
@@ -1989,10 +2016,33 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .unwrap();
     assert_eq!(ordinary_read, t0);
 
+    for retired in [&retirement_run_id, &resuming_retirement_run_id] {
+        let provisional: Option<String> = migrated.query_row(
+            "SELECT json_extract(origin,'$.legacyRun.status') FROM hook_rule_conversations WHERE run_id=?",
+            [retired], |row| row.get(0),
+        ).unwrap();
+        assert!(
+            provisional.is_none(),
+            "pending retirement can continue the original occurrence"
+        );
+    }
     drop(migrated);
     let service = cairn_installation::service::Service::new(config)
         .await
         .unwrap();
+    let app = router(service.clone()).await.unwrap();
+    let owner = RelayContext::new(&common::relay_fixture::context(&service).await);
+    let get = async |who: &RelayContext, path: &str| {
+        let request = who
+            .authorize(common::request("GET", path))
+            .body(Body::empty())
+            .unwrap();
+        let response = common::send(&app, request).await;
+        let status = response.status();
+        let body = common::read_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    };
     let retired_run = retirement_run_id.clone();
     let retirement_chat_id = service
         .store
@@ -2001,6 +2051,25 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .unwrap();
     let retirement_chat = service.chat_detail(&retirement_chat_id).await.unwrap();
     assert_eq!(retirement_chat["wakeup"]["id"], "retired-wake");
+    let retired_history = get(
+        &owner,
+        &format!("/api/hook-rule-triggerings/{retirement_chat_id}"),
+    )
+    .await;
+    assert_eq!(retired_history["status"], "waiting");
+    assert!(retired_history["finishedAt"].is_null());
+    let pending_resume = service
+        .store
+        .run(&resuming_retirement_run_id)
+        .await
+        .unwrap();
+    let resumed_history = format!(
+        "/api/hook-rule-triggerings/{}",
+        text(&pending_resume, "taskId")
+    );
+    let pending_history = get(&owner, &resumed_history).await;
+    assert_eq!(pending_history["status"], "running");
+    assert!(pending_history["finishedAt"].is_null());
     service
         .chat_send(
             &retirement_chat_id,
@@ -2009,6 +2078,15 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .await
         .unwrap();
     service.detach_stopped_environments().await.unwrap();
+    let resuming_retired = service
+        .store
+        .run(&resuming_retirement_run_id)
+        .await
+        .unwrap();
+    assert_eq!(resuming_retired["status"], "queued");
+    let resumed = get(&owner, &resumed_history).await;
+    assert_eq!(resumed["status"], "running");
+    assert!(resumed["finishedAt"].is_null());
     let retirement_chat = service.chat_detail(&retirement_chat_id).await.unwrap();
     assert!(retirement_chat["wakeup"].is_null());
     assert_eq!(
@@ -2106,19 +2184,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     assert!(next_slot.0 > now());
     assert!(!next_slot.1, "a v38 admission already delivered this slot");
     stalled_beacon.abort();
-    let app = router(service.clone()).await.unwrap();
-    let owner = RelayContext::new(&common::relay_fixture::context(&service).await);
-    let get = async |who: &RelayContext, path: &str| {
-        let request = who
-            .authorize(common::request("GET", path))
-            .body(Body::empty())
-            .unwrap();
-        let response = common::send(&app, request).await;
-        let status = response.status();
-        let body = common::read_json(response).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        body
-    };
+    common::relay_fixture::claimed(&service).await.unwrap();
     let detail = service.chat_detail(&waiting_chat_id).await.unwrap();
     assert_eq!(detail["run"]["chatExecution"]["messageId"], "legacy-turn");
     assert_eq!(detail["wakeup"]["messageId"], "legacy-turn");

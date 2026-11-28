@@ -1184,9 +1184,10 @@ fn migrated_view(
         "SELECT h.created_at,
                CASE WHEN json_extract(h.origin,'$.legacyRun.status') IS NOT NULL
                     THEN json_extract(h.origin,'$.legacyRun.finishedAt')
-                    WHEN w.id IS NOT NULL THEN NULL ELSE r.finished_at END,
+                    WHEN w.id IS NOT NULL OR p.id IS NOT NULL THEN NULL ELSE r.finished_at END,
                coalesce(json_extract(h.origin,'$.legacyRun.status'),
-                    CASE WHEN w.id IS NOT NULL THEN 'waiting' ELSE r.status END,'interrupted'),
+                    CASE WHEN w.id IS NOT NULL THEN 'waiting'
+                         WHEN p.id IS NOT NULL THEN 'queued' ELSE r.status END,'interrupted'),
                c.title,c.slug,h.agent_id,w.wake_at
              FROM hook_rule_conversations h JOIN conversations c ON c.id=h.chat_id
              LEFT JOIN runs r ON r.id=h.run_id
@@ -1194,6 +1195,9 @@ fn migrated_view(
              LEFT JOIN durable_wakeups w ON w.chat_id=h.chat_id
                 AND w.id=json_extract(k.state,'$.migratedMissionWakeupId')
                 AND json_extract(h.origin,'$.legacyRun.status') IS NULL
+             LEFT JOIN records p ON p.id=r.id AND p.kind='environment-expirations'
+                AND json_extract(p.data,'$.continueTurn')=1
+                AND coalesce(json_extract(p.data,'$.cancelled'),0)=0
              WHERE h.chat_id=?1",
         [chat_id],
         |row| {

@@ -644,7 +644,39 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 Some(mission) => mission.rule_id.clone(),
                 None => retired_mission_rule_id(&tx, &mut retired_rules, &run.task_id)?,
             };
-            let finished = RunStatus::parse(&run.status).is_some_and(|status| !status.is_active());
+            let retirement = Db(&tx)
+                .get(crate::environment_expiration::PENDING, &run.id)?
+                .filter(|pending| pending["cancelled"] != true);
+            let legacy_wait: Option<(String, Option<String>)> = tx
+                .query_row(
+                    "SELECT id,message_id FROM durable_wakeups WHERE mission_run_id=?",
+                    [&run.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            // A v38 controller could clear the wait while fencing a pending
+            // retirement. Recover the snapshot so ordinary input can supersede it.
+            let saved_wait: Option<cairn_contracts::ChatWakeup> = if legacy_wait.is_none() {
+                retirement
+                    .as_ref()
+                    .map(|pending| pending["environment"]["wakeup"].clone())
+                    .filter(Value::is_object)
+                    .map(serde_json::from_value)
+                    .transpose()?
+            } else {
+                None
+            };
+            let wakeup_id = legacy_wait
+                .as_ref()
+                .map(|(id, _)| id.clone())
+                .or_else(|| saved_wait.as_ref().map(|wakeup| wakeup.id.clone()));
+            // A worker can record cancellation before retirement restores the
+            // existing wait or queues another attempt of the original turn.
+            let finished = wakeup_id.is_none()
+                && !retirement
+                    .as_ref()
+                    .is_some_and(|pending| pending["continueTurn"] == true)
+                && RunStatus::parse(&run.status).is_some_and(|status| !status.is_active());
             let origin_json = json!({
                 "hook": "clock",
                 "ruleName": rule_name,
@@ -682,31 +714,6 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 params![chat_id, agent_id, run.created_at, rule_id],
             )?;
 
-            let legacy_wait: Option<(String, Option<String>)> = tx
-                .query_row(
-                    "SELECT id,message_id FROM durable_wakeups WHERE mission_run_id=?",
-                    [&run.id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            // A v38 controller could clear the wait while fencing a pending
-            // retirement. Recover the snapshot here so later user input can
-            // supersede the migrated wait through the ordinary conversation path.
-            let saved_wait: Option<cairn_contracts::ChatWakeup> = if legacy_wait.is_none() {
-                Db(&tx)
-                    .get(crate::environment_expiration::PENDING, &run.id)?
-                    .filter(|pending| pending["cancelled"] != true)
-                    .map(|pending| pending["environment"]["wakeup"].clone())
-                    .filter(Value::is_object)
-                    .map(serde_json::from_value)
-                    .transpose()?
-            } else {
-                None
-            };
-            let wakeup_id = legacy_wait
-                .as_ref()
-                .map(|(id, _)| id.clone())
-                .or_else(|| saved_wait.as_ref().map(|wakeup| wakeup.id.clone()));
             let turn = legacy_wait
                 .as_ref()
                 .and_then(|(_, message)| message.as_deref())

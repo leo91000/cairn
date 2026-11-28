@@ -680,8 +680,9 @@ fn detach_environment_in(
         ));
     }
     changes.boundary = Some(boundary);
-    db.change_run(run_id, changes)?;
+    let settled = db.change_run(run_id, changes)?;
     fresh.store_in(db, run_id)?;
+    db.record_migrated_settlement(&settled)?;
 
     let destination = expiration
         .destination
