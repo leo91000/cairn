@@ -317,9 +317,9 @@ hour, and refresh tokens after 30 days. Browser sessions are separate credential
 
 | Scope | Operations |
 | --- | --- |
-| `read` | `list_agents`, `list_agent_accounts`, `list_models`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `read_skill`, `list_mcps` |
-| `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `replace_task`, `set_task_state`, `delete_task`, `save_skill`, `edit_skill_files`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
-| `run` | `run_task`, `cancel_run` |
+| `read` | `list_agents`, `list_agent_accounts`, `list_models`, `list_projects`, `list_chats`, `list_runs`, `preview_schedule`, `get_run`, `read_run_content`, `list_skills`, `read_skill`, `list_mcps` |
+| `manage` | `save_agent`, `update_agent`, `save_project`, `create_hook_rule`, `replace_hook_rule`, `mark_read`, `snooze_chat`, `save_skill`, `edit_skill_files`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
+| `run` | `create_chat`, `send_chat_message`, `run_hook_rule`, `cancel_run` |
 
 `list_models` returns a coding agent's catalog as the app's picker shows it, including `connected` (also returned by `task_models`), which is false when runs need an account to be connected or resumed. Codex can also use an existing legacy host login. The apps direct owners to Connections and retain the conversation's or saved agent's selection. The catalog also includes each Codex model's `serviceTiers` (speed id, Codex's name and usage description, `limited` when some signed-in account able to run the model lacks it or cannot confirm it) and Codex's catalog `defaultServiceTier`, which Cairn does not apply. Agents (`save_agent`, `replace_agent`) and messages (`send_chat_message`, `edit_chat_message`) accept `speed`: a tier id, `standard`, or empty to inherit the agent's or conversation's speed, otherwise Standard. A message naming the coding agent of the conversation's latest turn keeps that turn's speed, as the apps show it, while an omitted model and reasoning come from the agent; an edit that omits `speed` keeps the queued one. Before each Codex turn with a faster speed, the run checks it against the model list of the Codex process running the turn; `get_run` events then include a `status` event when its outcome changes for the message: `payload.speed.applied` is `standard` when the turn runs at Standard, `payload.speed.confirmed` is `true` when both the Codex process and the account's recent catalog list the tier for the model and the turn asks for it (a request: the account's plan decides), and `payload.speed.unconfirmed` is `true` when the speed cannot be confirmed for the account and model (a model list could not be read or does not name the model exactly, or the account's catalog is unknown or older than 30 minutes), as the apps show it. Use a `serviceTiers` id from `list_models` or `standard`; Cairn sends Standard for another id, such as Codex's own `fast` alias, since Codex's list does not name it for the model, and the notice says so. A speed is rejected when the turn runs with Claude Code or OpenCode, named by the message or inherited from the queue or conversation. `replace_agent` replaces every setting: send the agent's `speed` to keep it, since an omitted or empty one runs at Standard, and a speed is rejected for a Claude Code or OpenCode agent.
 
@@ -331,13 +331,6 @@ binds each grant to that membership, so a later invitation does not inherit earl
 access. Giving or removing that access is owner-only from the web and Android apps,
 never through MCP or `cairn_installation`
 ([ADR-0075](adr/0075-plugin-hooks-rules-and-scoped-grants.md)).
-
-`create_task` accepts `{creationId?, settings}`. `replace_task` accepts
-`{taskId, revision, settings}` and replaces all mission settings. `set_task_state`
-changes only `enabled` and `archived` at that revision. Authorship and membership
-come from verified authority, never command JSON. `get_task`, `list_tasks`,
-`preview_schedule` and `list_task_activity` use the read scope; `list_tasks` returns
-`{tasks: [...]}`. These definitions are shared with HTTP and `cairn_installation`.
 
 Hook rules ([guide](HOOK-RULES.md)) use the same definitions as HTTP and
 `cairn_installation`. `list_hook_rules`, `get_hook_rule`, `list_hook_rule_versions`,
@@ -353,6 +346,16 @@ alone give it no native authority. Plugin rule templates are listed with
 only for the person of an eligible conversation ([provenance
 conditions](HOOK-RULES.md#agents-with-installation-access)).
 
+A schedule is an ordinary rule with a Clock trigger and a `startAgent`
+action. For recurring work set `trigger` to
+`{type: "clock", cron: "0 9 * * 1", timezone: "Europe/Paris"}`. For a one-time
+schedule use an epoch timestamp in milliseconds in `at` with the IANA
+`timezone`. Add a negated `ruleConversationWorking` condition to skip
+overlaps. `preview_schedule` (read) returns upcoming cron occurrences.
+`run_hook_rule` (run) accepts `{ruleId}`. The rule creator can trigger it
+without changing its next scheduled occurrence. The same operations are
+available through the apps and `cairn_installation`.
+
 `get_installation_settings`, `get_installation_overview` and `list_audit` use the
 read scope. S3 storage settings and probes are no longer exposed on HTTP, public
 MCP or `cairn_installation`. Task storage limits remain available through
@@ -360,11 +363,13 @@ MCP or `cairn_installation`. Task storage limits remain available through
 retain the shared memory cache and disk reserve, without S3 cache/synchronization
 fields. `get_node_runtime_settings` (read) and `save_node_runtime_settings` (manage)
 read or save only the installation's disconnection and shutdown deadlines.
-`mark_read` and `set_outcome_aside` use manage and
-change the read marks and set-aside outcomes of the Cairn account that authorized the
-connection; `list_chats` and `list_task_activity` report `unread`, `preview` and
-`dismissal` for that account. Executions (`cairn_installation`) have no account
-delegation: their personal writes are refused and their listings carry none.
+`mark_read` and `snooze_chat` use manage and apply to the account that
+authorized the connection. `snooze_chat` accepts
+`{chatId, action: {kind: "snooze", finishedAt, until}}` with an observed
+activity timestamp and a future deadline, or `{chatId, action: {kind: "restore"}}`.
+`list_chats` returns `unread`, `preview` and `snoozedUntil` for that account.
+Execution grants without an account delegation receive a refusal for personal
+writes.
 
 A run or event too large for a page is returned as a preview with `truncated: true`
 and `totalBytes`. The stored content is unchanged. Use `read_run_content` with
@@ -387,8 +392,8 @@ carry no challenge.
 OAuth grants and 30-day personal tokens are limited to one installation and the selected scopes. They can be revoked from that installation’s **Settings** on the beacon web app. Personal
 tokens are displayed once; put them in the client's secret storage, never its Git
 configuration. Dynamic registration is limited to 10 requests per minute per caller IP.
-A `run` grant starts existing tasks in YOLO mode inside Docker and can cause the
-external effects those tasks authorize. `manage` permits changing scheduled tasks
+A `run` grant directs conversations and can trigger schedules within the
+authorizing account’s permissions. `manage` permits changing hook rules
 and agent permissions, configuring external servers, and executing command
 servers through `test_mcp`, so it requires owner-level trust in the connected assistant.
 
@@ -397,7 +402,7 @@ servers through `test_mcp`, so it requires owner-level trust in the connected as
 On an account/workspace that permits developer mode, enable it under **Settings →
 Security and login**, then add an MCP connection from **Plugins** with a name,
 description, and the public `/mcp` URL. Complete the OAuth consent screen and
-review the discovered tools. Exercise listing, task creation, a harmless run, and
+review the discovered tools. Exercise listing, creating a schedule, a run, and
 revocation before enabling unattended actions. Refresh the connection after tool
 metadata changes. These steps follow the current [OpenAI connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt).
 
@@ -421,9 +426,9 @@ HTTP+SSE transport are outside this project's scope.
 The repository supplies the implementation, icon (`apps/web/public/favicon.svg`), screenshots,
 installation instructions, and the following evaluation prompts:
 
-1. “List my agents and scheduled tasks.” — read-only tools, no execution.
-2. “Create a paused weekly review for this existing project.” — manage permission.
-3. “Run that review now.” — explicit run permission and task access review.
+1. “List my agents and schedules.” — read-only tools, no execution.
+2. “Schedule a weekly review for this existing project.” — manage permission.
+3. “Run that review now.” — explicit run permission and rule access review.
 4. “Show its progress and final result.” — paginated read tools.
 5. “Cancel that run.” — cancellation tool; existing external changes are preserved.
 6. “Delete my production repository.” — unsupported; no arbitrary deletion tool.
@@ -477,9 +482,9 @@ every environment on the revoked node; `releasePlacements` still controls pins
 and preferences. The destination's first admission waits for capacity while it
 remains authorized and non-revoked, otherwise automatic placement chooses it.
 A new explicit choice replaces a pending destination without another loss warning.
-Messages and scheduled/conditional waits keep their continuations. An active
-mission, or an agent moving its own conversation, continues automatically in a
-fresh environment with the expiration warning; other chats wait for a message.
+Messages and scheduled/conditional waits keep their continuations. An agent
+moving its own conversation continues automatically in a fresh environment
+with the expiration warning. Other chats wait for a message.
 Automatic capacity relocation and recovery on another node are removed: existing
 environments wait for their current node or a confirmed change. See
 [environment expiration](CONVERSATION-RETENTION.md) and ADR-0083 (local conversation disks).

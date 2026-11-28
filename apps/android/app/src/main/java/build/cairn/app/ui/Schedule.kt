@@ -1,7 +1,5 @@
 package build.cairn.app.ui
 
-import build.cairn.app.data.Task
-
 private val weekdays =
     mapOf(
         "0" to "dimanche",
@@ -66,11 +64,3 @@ internal fun describeCron(cron: String): String {
         else -> "Cron · ${cron.trim()}"
     }
 }
-
-internal fun describeSchedule(task: Task): String =
-    when {
-        task.archived -> "Archivée"
-        task.cron == null -> "Ponctuelle"
-        !task.enabled -> "En pause · ${describeCron(task.cron)}"
-        else -> describeCron(task.cron)
-    }

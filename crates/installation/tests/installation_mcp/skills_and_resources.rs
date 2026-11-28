@@ -67,17 +67,6 @@ async fn skill_lifecycle_matches_http_public_and_installation_without_granting_a
         )
         .await;
         assert_eq!(result(&forgotten)["detached"], true);
-        let task = s.task_fixture(json!({"name":"Uses review", "prompt":"Review", "agentId": MAIN_AGENT_ID, "skills":["global/review"], "worktree":false}), None).await.unwrap();
-        let refused = invoke("delete_skill", json!({"scope":"global", "name":"review"})).await;
-        assert_eq!(refused["result"]["isError"], true);
-        common::owner_api_route(
-            &s,
-            "DELETE",
-            &format!("/api/tasks/{}", text(&task, "id")),
-            Value::Null,
-        )
-        .await
-        .unwrap();
         let deleted = invoke("delete_skill", json!({"scope":"global", "name":"review"})).await;
         assert_eq!(result(&deleted)["deleted"], true);
         let current = s.store.agent(text(&manager, "id")).await.unwrap().unwrap();
@@ -1973,7 +1962,7 @@ async fn placement_capabilities_share_their_commands_scopes_and_live_installatio
 }
 
 #[tokio::test]
-async fn mission_deliverables_work_without_a_conversation_on_both_management_tools() {
+async fn conversation_deliverables_are_paginated_and_shared_on_both_management_tools() {
     for internal in [false, true] {
         let root = TempDir::new().unwrap();
         let s = service(&root).await;
@@ -1981,16 +1970,8 @@ async fn mission_deliverables_work_without_a_conversation_on_both_management_too
         let (caller, configuration) = active_run(&s, &main).await;
         let (target, _) = active_run(&s, &main).await;
         let run = text(&target, "id");
-        assert!(
-            s.store
-                .read({
-                    let run = run.to_owned();
-                    move |db| db.conversation_for_run(&run)
-                })
-                .await
-                .unwrap()
-                .is_none()
-        );
+        let chat_id = text(&target, "taskId");
+        assert_eq!(s.chat_detail(chat_id).await.unwrap()["runId"], run);
         let id = uuid::Uuid::new_v4().to_string();
         let bytes = (0..220_000).map(|i| (i % 251) as u8).collect::<Vec<_>>();
         let digest = {
@@ -2153,17 +2134,8 @@ async fn mission_deliverables_work_without_a_conversation_on_both_management_too
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            s.store
-                .read({
-                    let run = run.to_owned();
-                    move |db| db.conversation_for_run(&run)
-                })
-                .await
-                .unwrap()
-                .is_none()
-        );
-        // Revoking the execution's grant removes access even to another mission's files.
+        assert_eq!(s.chat_detail(chat_id).await.unwrap()["runId"], run);
+        // Revoking the execution's grant removes access to another conversation's files.
         if internal {
             s.mcps.revoke_run(&s, text(&caller, "id")).await.unwrap();
             let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]

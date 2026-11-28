@@ -266,6 +266,9 @@ async fn native_chat_turns_reuse_the_same_run_and_conversation() {
 #[tokio::test]
 async fn sleeping_chat_survives_worker_restart_and_releases_capacity_before_waking() {
     let mut fixture = Fixture::with_concurrency(1).await;
+    fixture.stop(false).await;
+    fixture.clock = Some(FixtureClock::new(fixture.root.path()));
+    fixture.start().await;
     let s = fixture.service.clone();
     let chat = fixture
         .start_chat(message(
@@ -329,6 +332,9 @@ async fn sleeping_chat_survives_worker_restart_and_releases_capacity_before_waki
         "succeeded"
     );
     assert_eq!(s.chat_detail(&chat).await.unwrap()["wakeup"], wake);
+    // Cross the persisted deadline only after the restarted worker has used the slot.
+    let clock = fixture.clock.as_mut().unwrap();
+    clock.advance(wake["wakeAt"].as_i64().unwrap() - clock.millis + 1);
     let resumed = fixture
         .until(&run, |r| {
             r["status"] == "succeeded"
@@ -369,207 +375,6 @@ async fn sleeping_chat_survives_worker_restart_and_releases_capacity_before_waki
         1
     );
     assert!(detail["wakeup"].is_null());
-    fixture.stop(false).await;
-}
-
-#[tokio::test]
-async fn waiting_mission_survives_restart_and_releases_capacity_without_finishing() {
-    let mut fixture = Fixture::with_concurrency(1).await;
-    let s = fixture.service.clone();
-    fixture.stop(false).await;
-    let mut account = serde_json::to_value(
-        s.accounts
-            .create(&s, Provider::Codex, "Mission wait fixture")
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    account["state"] = "ready".into();
-    account["maxConcurrentRuns"] = 1.into();
-    s.store.save_account_fixture(account.clone()).await.unwrap();
-    codex_credentials(&s, text(&account, "id"), json!({
-        "access_token": "synthetic", "refresh_token": "synthetic-refresh", "account_id": "mission-wait-fixture",
-    })).await;
-    fixture.start().await;
-    let run = fixture
-        .enqueue("fixture:slow-finish Complete this mission after CI")
-        .await;
-    let run_id = text(&run, "id");
-    let first = fixture
-        .until(run_id, |run| {
-            run["status"] == "running" && run["sessionId"].is_string()
-        })
-        .await;
-    let token = "synthetic-mission-wait-token";
-    s.store
-        .transaction({
-            let grant: cairn_installation::mcps::record::RunGrant = serde_json::from_value(json!({
-                "runId": run_id, "messageId": null, "servers": {}, "workspace": true, "installation": false,
-            }))
-            .unwrap();
-            move |db| {
-                db.save_mcp_run_grant(&cairn_installation::auth::hex_digest(token), &grant, None)
-            }
-        })
-        .await
-        .unwrap();
-    let wait = cairn_installation::waits::schedule(
-        &s,
-        token,
-        &json!({
-            "conditions": [{ "type": "delay", "seconds": 15 }], "reason": "Wait for mission CI",
-        }),
-    )
-    .await
-    .unwrap();
-    assert_eq!(wait["deferred"], true);
-    let waiting = fixture
-        .until(run_id, |run| run["status"] == "waiting")
-        .await;
-    assert!(waiting["finishedAt"].is_null(), "{waiting}");
-    assert!(waiting["outcome"].is_null());
-    assert!(
-        s.enqueue(text(&run, "taskId"), "manual", None)
-            .await
-            .is_err(),
-        "A waiting mission still owns its task slot"
-    );
-    let preserved = Path::new(text(&waiting, "workspace")).join("mission-wait.txt");
-    std::fs::write(&preserved, "work before mission wait").unwrap();
-    fixture.stop(false).await;
-    fixture.start().await;
-    let other = fixture
-        .enqueue("Use the only slot while the mission waits")
-        .await;
-    assert_eq!(
-        fixture.until_finished(text(&other, "id")).await["status"],
-        "succeeded"
-    );
-    assert_eq!(s.store.run(run_id).await.unwrap()["wakeup"], wait["wakeup"]);
-    let resumed = fixture
-        .until(run_id, |run| {
-            run["status"] == "succeeded"
-                && text(run, "summary").contains("Cairn resumed this mission")
-        })
-        .await;
-    assert_eq!(resumed["sessionId"], first["sessionId"]);
-    assert_eq!(resumed["workspace"], waiting["workspace"]);
-    assert_eq!(
-        std::fs::read_to_string(preserved).unwrap(),
-        "work before mission wait"
-    );
-    assert!(resumed["wakeup"].is_null());
-    let thread: Value = serde_json::from_slice(
-        &std::fs::read(
-            fixture
-                .run_directory(run_id)
-                .join("codex/fixture-conversation.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(thread["turns"].as_array().unwrap().len(), 2);
-    assert!(
-        s.store.conversations_boundary().await.unwrap().is_empty(),
-        "Mission waits never create a hidden chat"
-    );
-    let id = run_id.to_owned();
-    let events = s
-        .store
-        .read(move |db| db.events_fixture(&id, 0, 300))
-        .await
-        .unwrap();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event["type"] == "status" && event["text"] == "succeeded")
-            .count(),
-        1
-    );
-    let wake = events
-        .iter()
-        .find(|event| event["type"] == "run.wakeup")
-        .unwrap();
-    assert!(wake["createdAt"].as_i64().unwrap() >= wait["wakeup"]["wakeAt"].as_i64().unwrap());
-    fixture.stop(false).await;
-}
-
-#[tokio::test]
-async fn stopped_waiting_mission_manual_resume_starts_a_new_provider_turn() {
-    let mut fixture = Fixture::with_concurrency(1).await;
-    fixture.stop(false).await;
-    let s = fixture.service.clone();
-    let mut account = serde_json::to_value(
-        s.accounts
-            .create(&s, Provider::Codex, "Manual mission resume")
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    account["state"] = "ready".into();
-    s.store.save_account_fixture(account.clone()).await.unwrap();
-    codex_credentials(&s, text(&account, "id"), json!({
-        "access_token": "synthetic", "refresh_token": "synthetic-refresh", "account_id": "manual-mission-resume",
-    })).await;
-    fixture.start().await;
-    let run = fixture
-        .enqueue("fixture:slow-finish Finish after the remote result")
-        .await;
-    let run_id = text(&run, "id");
-    fixture
-        .until(run_id, |run| {
-            run["status"] == "running" && run["sessionId"].is_string()
-        })
-        .await;
-    let token = "synthetic-manual-mission-token";
-    s.store
-        .transaction({
-            let grant: cairn_installation::mcps::record::RunGrant = serde_json::from_value(json!({
-                "runId": run_id, "messageId": null, "servers": {}, "workspace": true, "installation": false,
-            }))
-            .unwrap();
-            move |db| {
-                db.save_mcp_run_grant(&cairn_installation::auth::hex_digest(token), &grant, None)
-            }
-        })
-        .await
-        .unwrap();
-    cairn_installation::waits::schedule(&s, token, &json!({
-        "conditions": [{ "type": "delay", "seconds": 600 }], "reason": "Wait for the remote result",
-    })).await.unwrap();
-    let waiting = fixture
-        .until(run_id, |run| run["status"] == "waiting")
-        .await;
-    fixture.stop(false).await;
-    s.worker.cancel(&s, run_id).await.unwrap();
-    assert_eq!(s.store.run(run_id).await.unwrap()["status"], "cancelled");
-    s.worker.resume(&s, run_id).await.unwrap();
-    fixture.start().await;
-    let completed = fixture
-        .until(run_id, |run| {
-            run["status"] == "succeeded"
-                && text(run, "summary").contains("Execution was interrupted")
-        })
-        .await;
-    assert_eq!(completed["sessionId"], waiting["sessionId"]);
-    assert_eq!(completed["workspace"], waiting["workspace"]);
-    assert!(completed["missionTurnId"].is_string());
-    assert_ne!(completed["missionTurnId"], waiting["missionTurnId"]);
-    assert!(completed["waitContinuation"].is_null());
-    let thread: Value = serde_json::from_slice(
-        &std::fs::read(
-            fixture
-                .run_directory(run_id)
-                .join("codex/fixture-conversation.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        thread["turns"].as_array().unwrap().len(),
-        2,
-        "The completed wait turn must never be replayed as a successful continuation"
-    );
     fixture.stop(false).await;
 }
 

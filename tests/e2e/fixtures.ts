@@ -338,21 +338,16 @@ async function withWorkspace(
       const agent = service.agent({ name: 'Release engineer' })
       const project = await service.project({ name: 'Design system', path: projectPath })
       await service.skills.save('review', '---\nname: review\ndescription: Review the project carefully\n---\nInspect the project and report checks.')
-      const task = service.task({
-        name: 'Weekly dependency review',
-        prompt: 'Review dependencies and report the checks you ran. fixture:activity',
-        agentId: agent.id,
-        projectId: project.id,
-        skills: ['global/review'],
-        worktree: false,
-        enabled: false,
-        cron: '0 9 * * 1',
-      })
-      const run = await service.enqueue(task.id)
-      await expect.poll(() => service.store.run(run.id)?.status, { timeout: 10000 }).toBe('succeeded')
-      service.task({ ...task, prompt: 'fixture:hang' }, task.id)
-      const cancelled = await service.enqueue(task.id)
-      await api(`/api/runs/${cancelled.id}/cancel`, 'POST')
+      const startChat = async (text: string) => {
+        const chat = service.queueChat({ agentId: agent.id, projectId: project.id }, 'Weekly dependency review', text)
+        await expect.poll(() => service.chats.detail(chat.id).runId, { timeout: 10000 }).not.toBeNull()
+        return service.chats.detail(chat.id).runId!
+      }
+
+      const run = await startChat('Review dependencies and report the checks you ran. fixture:activity')
+      await expect.poll(() => service.store.run(run)?.status, { timeout: 10000 }).toBe('succeeded')
+      const cancelled = await startChat('fixture:hang')
+      await api(`/api/runs/${cancelled}/cancel`, 'POST')
     }
 
     await use({

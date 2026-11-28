@@ -381,6 +381,7 @@ impl Db<'_> {
                 'accountWaitReason',account_wait_reason, 'accountRequired',account_required,
                 'snapshot',json_object('agent',json_object('provider',provider)),
                 'contextUsage',json(boundary -> '$.contextUsage'),
+                'outcome',json(boundary -> '$.outcome'),
                 'environmentExpirationCause',json(boundary -> '$.environmentExpirationCause'),
                 'suspendedByExclusive',json(placement_suspended_by_exclusive),
                 'restoredAt',json(boundary -> '$.restoredAt'),
@@ -427,10 +428,6 @@ impl Db<'_> {
 
     pub(crate) fn queued_run_records(&self) -> Result<Vec<RunRecord>> {
         self.run_records(RunStatus::Queued)
-    }
-
-    pub(crate) fn waiting_run_records(&self) -> Result<Vec<RunRecord>> {
-        self.run_records(RunStatus::Waiting)
     }
 
     fn run_records(&self, status: RunStatus) -> Result<Vec<RunRecord>> {
@@ -568,6 +565,13 @@ impl Db<'_> {
             if let Some(boundary) = boundary {
                 self.write_run_boundary(id, &boundary)?;
             }
+            if state.status != previous_state.status
+                || state.finished_at != previous_state.finished_at
+                || state.recovery_pending != previous_state.recovery_pending
+                || state.retry != previous_state.retry
+            {
+                self.record_migrated_settlement(&state)?;
+            }
             Ok(state)
         })();
         match result {
@@ -582,6 +586,64 @@ impl Db<'_> {
                 Err(error)
             }
         }
+    }
+
+    /// Freezes the old mission occurrence while its live conversation continues to use the run.
+    pub(crate) fn record_migrated_settlement(&self, state: &RunState) -> Result<()> {
+        let Some(finished_at) = state.finished_at.filter(|_| {
+            !state.status.is_active()
+                && !state.recovery_pending
+                && state.trigger == "chat"
+                && state
+                    .retry
+                    .as_ref()
+                    .is_none_or(|retry| retry.next_attempt_at.is_none())
+        }) else {
+            return Ok(());
+        };
+        // A definitive failure ends the original occurrence and its wait. Keep
+        // a wait still owned by an environment retirement until that settles.
+        if matches!(state.status, RunStatus::Failed | RunStatus::Interrupted)
+            && !crate::environment_expiration::pending(self, &state.id)?
+        {
+            crate::chats::continuation::cancel_failed_migrated_wait(self, state)?;
+        }
+        self.0
+            .prepare_cached(
+                "UPDATE hook_rule_conversations
+             SET origin=json_set(origin,'$.legacyRun.status',?3,'$.legacyRun.finishedAt',?4,
+                 '$.legacyRun.summary',?5,'$.legacyRun.error',?6,
+                 '$.legacyRun.outcome',json((SELECT json_extract(boundary,'$.outcome') FROM runs
+                     WHERE id=?2 AND json_type(boundary,'$.outcome')='object')))
+             WHERE chat_id=?1 AND run_id=?2 AND json_type(origin,'$.legacyRun')='object'
+             AND json_extract(origin,'$.legacyRun.status') IS NULL
+             AND NOT EXISTS (SELECT 1 FROM durable_wakeups w JOIN conversations c ON c.id=w.chat_id
+                 WHERE w.chat_id=?1 AND c.run_id=?2)
+             AND NOT EXISTS (SELECT 1 FROM records WHERE id=?2 AND kind='environment-expirations'
+                 AND json_extract(data,'$.continueTurn')=1
+                 AND coalesce(json_extract(data,'$.cancelled'),0)=0)",
+            )?
+            .execute(params![
+                state.task_id,
+                state.id,
+                state.status.as_str(),
+                finished_at,
+                state.summary,
+                state.error
+            ])?;
+        Ok(())
+    }
+
+    /// Automatic continuation still belongs to the original v38 occurrence.
+    pub(crate) fn unsettled_migrated_occurrence(&self, chat: &str, run: &str) -> Result<bool> {
+        Ok(self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hook_rule_conversations h JOIN conversations c ON c.id=h.chat_id
+             WHERE h.chat_id=?1 AND h.run_id=?2 AND c.run_id=h.run_id
+             AND json_type(h.origin,'$.legacyRun')='object'
+             AND json_extract(h.origin,'$.legacyRun.status') IS NULL)",
+            params![chat, run],
+            |row| row.get(0),
+        )?)
     }
 
     fn write_run_state(&self, state: &RunState) -> Result<()> {

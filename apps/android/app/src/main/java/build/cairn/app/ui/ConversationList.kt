@@ -129,7 +129,7 @@ internal fun ConversationList(
                     item {
                         Empty(
                             if (query.isBlank()) "Aucune conversation" else "Aucun résultat",
-                            if (query.isBlank()) "Confiez une mission à votre agent pour commencer."
+                            if (query.isBlank()) "Démarrez une conversation avec votre agent."
                             else "Essayez un autre titre, agent ou projet.",
                         )
                     }

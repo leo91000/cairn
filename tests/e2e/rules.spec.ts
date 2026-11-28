@@ -15,7 +15,12 @@ test('rules show the actual saved tree, creator controls and real triggering his
   test.setTimeout(60000)
   const fixture = await rulesFixture(workspace)
   const rule = await workspace.api('/api/hook-rules', 'POST', { definition: fixture.definition, enabled: true })
-  workspace.service.emitHook(fixture.instanceId, 'message', { channel: 'support', author: 'alice', content: 'Could you help with this request?' }, 'review-event')
+  workspace.service.emitHook(fixture.instanceId, 'message', {
+    channel: 'support',
+    author: 'alice',
+    content: 'Could you help with this request?',
+    migratedConversation: { slug: 'plugin-link', title: 'Plugin-supplied link' },
+  }, 'review-event')
   await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}/triggerings`)).triggerings[0]?.status, { timeout: 20000 }).toBe('completed')
   await page.goto(workspacePath(`/rules?rule=${rule.id}`))
   await signIn(page)
@@ -25,6 +30,7 @@ test('rules show the actual saved tree, creator controls and real triggering his
   await page.getByRole('button', { name: /Completed.*1 action/ }).click()
   await page.getByText('Result', { exact: true }).click()
   await expect(page.locator('details[open] pre').filter({ hasText: 'Received: Could you help with this request?' })).toBeVisible()
+  await expect(page.getByRole('link', { name: /Plugin-supplied link/ })).toHaveCount(0)
   await page.screenshot({ path: testInfo.outputPath('rules-history.png') })
   await page.getByRole('button', { name: 'Flow', exact: true }).click()
   await page.getByRole('button', { name: 'Edit', exact: true }).click()

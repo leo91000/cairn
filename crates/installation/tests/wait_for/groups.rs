@@ -1,5 +1,5 @@
 use super::*;
-use crate::common::run_fixture::DbRunFixture;
+use crate::common::run_fixture::{DbRunFixture, complete_wakeup_fixture};
 
 impl Fixture {
     async fn group(&self, mode: &str, conditions: Vec<Value>) -> Result<Value, u16> {
@@ -38,6 +38,20 @@ impl Fixture {
             )
             .await
             .unwrap();
+    }
+
+    async fn save_dependency(&self, run: &Value, condition: Value) {
+        let mut chat = self
+            .s
+            .conversation_boundary(text(run, "taskId"))
+            .await
+            .unwrap();
+        chat["wakeup"] = json!(complete_wakeup_fixture(&json!({
+            "id": id(),
+            "messageId": run["chatExecution"]["messageId"],
+            "condition": condition,
+        })));
+        self.s.store.save_conversation_boundary(chat).await.unwrap();
     }
 
     async fn ready_events(&self) -> Vec<Value> {
@@ -633,30 +647,18 @@ async fn long_dependency_chains_are_allowed_but_cycles_at_the_end_are_rejected()
         targets.push(f.target().await);
     }
     for pair in targets.windows(2) {
-        f.s.store
-            .update_run_boundary_fixture(
-                text(&pair[0], "id"),
-                json!({
-                    "wakeup": { "condition": run_condition(&pair[1]) },
-                }),
-            )
-            .await
-            .unwrap();
+        f.save_dependency(&pair[0], run_condition(&pair[1])).await;
     }
     let sources = vec![run_condition(&targets[0]), run_condition(&targets[39])];
     assert_eq!(
         f.group("all", sources.clone()).await.unwrap()["deferred"],
         true
     );
-    f.s.store
-        .update_run_boundary_fixture(
-            text(&targets[39], "id"),
-            json!({
-                "wakeup": { "condition": { "type": "run_finished", "runId": f.run } },
-            }),
-        )
-        .await
-        .unwrap();
+    f.save_dependency(
+        &targets[39],
+        json!({ "type": "run_finished", "runId": f.run }),
+    )
+    .await;
     assert_eq!(f.group("any", sources).await.unwrap_err(), 409);
 }
 

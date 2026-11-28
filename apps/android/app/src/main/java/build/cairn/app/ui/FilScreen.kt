@@ -40,7 +40,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -64,45 +63,21 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import build.cairn.app.R
 import build.cairn.app.data.*
-import build.cairn.contracts.MissionStateInput
-import build.cairn.contracts.RunMissionInput
-import build.cairn.contracts.runMission
-import build.cairn.contracts.setMissionState
 import kotlinx.coroutines.delay
 
 internal enum class FeedKind {
     QUESTION,
     FAILED_CHAT,
     RECONNECT,
-    FAILED_TASK,
-    REVIEW_TASK,
-    /** Finished work the user has not read yet. */
+    REVIEW,
     UNREAD_CHAT,
-    UNREAD_TASK,
     RUNNING_CHAT,
-    RUNNING_TASK,
     WAITING_CHAT,
-    /** A mission run that scheduled its continuation. */
-    WAITING_TASK,
-    /** A blocked mission snoozed until [FeedItem.wakeAt]. */
-    SNOOZED_TASK,
-    /** A blocked mission that waits on someone else, or that the user dismissed. */
-    SET_ASIDE_TASK,
+    SNOOZED,
     CHAT,
 }
 
-/**
- * Why a blocked mission sits in Récents rather than Pour vous: it waits on the agent work that
- * started it, on an outside system, or the user dismissed it.
- */
-internal enum class SetAside {
-    REQUESTER,
-    EXTERNAL,
-    DISMISSED,
-}
-
-/** The conversation or mission that started a mission, while it still exists. */
-internal data class FeedRequester(val title: String, val chatId: String?, val runId: String?)
+internal data class FeedRequester(val title: String, val chatId: String)
 
 internal data class FeedItem(
     val key: String,
@@ -114,8 +89,6 @@ internal data class FeedItem(
     val stamp: Long = 0,
     val startedAt: Long? = null,
     val chatId: String? = null,
-    val runId: String? = null,
-    val taskId: String? = null,
     /** The agent is running now (not queued): the row animates. */
     val working: Boolean = false,
     /** A waiting conversation's deadline: when it resumes, or at the latest for a condition. */
@@ -126,33 +99,28 @@ internal data class FeedItem(
     val resolved: Boolean = false,
     /** The opening of the agent's final message, for finished work not read yet. */
     val preview: String? = null,
-    /** A mission's outcome that is not complete: what its actions apply to. */
-    val outcome: String? = null,
-    val setAside: SetAside? = null,
     val requester: FeedRequester? = null,
+    val originRule: build.cairn.contracts.ChatRuleOrigin? = null,
     /** The coding agent of its latest turn. */
     val harness: String? = null,
     val statusLabel: String = subtitle,
     val project: String? = null,
-    val unread: Boolean = kind == FeedKind.UNREAD_CHAT || kind == FeedKind.UNREAD_TASK,
+    val unread: Boolean = kind == FeedKind.UNREAD_CHAT,
     val readAt: Long = stamp,
+    val snoozeAt: Long = readAt,
     /** It finished as expected: its row shows no status label, only a quiet mark. */
     val finished: Boolean = false,
 ) {
-    /** Only a blocked outcome can be dismissed; input the agent asked for can only be snoozed. */
-    val dismissible
-        get() = kind == FeedKind.REVIEW_TASK && outcome == "blocked"
-
     /** What reading this item marks, with the end of the work it reads. */
     val read
-        get() = if (taskId != null) "task:$taskId" to readAt else "chat:$chatId" to readAt
+        get() = key to readAt
 }
 
 internal data class Feed(
     val forYou: List<FeedItem>,
     val running: List<FeedItem>,
     val recent: List<FeedItem>,
-    /** Conversations and missions that resume on their own, soonest first. */
+    /** Conversations that resume on their own, soonest first. */
     val waiting: List<FeedItem> = emptyList(),
 ) {
     val empty
@@ -171,20 +139,18 @@ internal data class Feed(
                 setOf(
                     FeedKind.QUESTION,
                     FeedKind.RECONNECT,
-                    FeedKind.REVIEW_TASK,
+                    FeedKind.REVIEW,
                     FeedKind.RUNNING_CHAT,
-                    FeedKind.RUNNING_TASK,
                     FeedKind.WAITING_CHAT,
-                    FeedKind.WAITING_TASK,
-                    FeedKind.SNOOZED_TASK,
-                ) || (it.kind == FeedKind.SET_ASIDE_TASK && it.setAside != SetAside.DISMISSED)
+                    FeedKind.SNOOZED,
+                )
         }
 }
 
 private fun context(agent: String, project: String?) =
     listOfNotNull(agent.ifBlank { null }, project?.ifBlank { null }).joinToString(" · ")
 
-/** 9:00 tomorrow, local time: when a snoozed mission asks again. */
+/** 9:00 tomorrow, local time: when a snoozed conversation asks again. */
 internal fun tomorrowMorning(
     now: Long = System.currentTimeMillis(),
     zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
@@ -198,19 +164,8 @@ internal fun tomorrowMorning(
         .toInstant()
         .toEpochMilli()
 
-/**
- * One home for conversations and missions, grouped by what they ask of the user: things that need
- * an answer or decision, finished work not read yet, work in progress, waiting conversations, then
- * everything else by recency. [read] holds local marks until the server reflects them.
- *
- * A blocked mission asks the user only when it waits on them: one waiting on the agent work that
- * started it or on an outside system, or one the user dismissed, sits in Récents. A snoozed one
- * waits until [now] reaches its time.
- */
 internal fun buildFeed(
     chats: List<Chat>,
-    activity: List<Run>,
-    tasks: List<Task>,
     read: Map<String, Long> = emptyMap(),
     now: Long = System.currentTimeMillis(),
     usable: List<String>? = null,
@@ -223,9 +178,22 @@ internal fun buildFeed(
     val waiting = mutableListOf<FeedItem>()
     val recent = mutableListOf<FeedItem>()
     chats
+        .filter { it.lifecycle == "active" }
         .sortedByDescending { it.updatedAt }
         .forEach { chat ->
             val agent = chat.agentName.ifBlank { "Agent" }
+            val activityAt = chat.readAt ?: chat.finishedAt ?: chat.updatedAt
+            val until = chat.snoozedUntil
+            val reminderDue = until != null && chat.unread && activityAt >= until
+            val snoozed = until != null && until > now && !reminderDue
+            val unread =
+                !snoozed &&
+                    chat.unread &&
+                    unreadNow("chat:${chat.id}", activityAt) &&
+                    (reminderDue ||
+                        chat.requestedBy == null ||
+                        chat.pendingQuestions > 0 ||
+                        chat.outcome?.status == "blocked")
             fun item(kind: FeedKind, subtitle: String) =
                 FeedItem(
                     "chat:${chat.id}",
@@ -237,36 +205,37 @@ internal fun buildFeed(
                     chat.updatedAt,
                     chat.run?.startedAt,
                     chatId = chat.id,
-                    runId = chat.runId,
                     // A delegated conversation names the conversation that delegated it.
                     requester =
                         chat.requester?.let {
                             FeedRequester(
                                 it.title.ifBlank { "Nouvelle conversation" },
                                 it.chatId,
-                                null,
                             )
                         },
                     harness = chat.provider,
+                    originRule = chat.originRule,
                     project = chat.projectName,
                     statusLabel =
                         when (kind) {
                             FeedKind.QUESTION -> "Répondre"
                             FeedKind.RECONNECT -> "Connexion requise"
+                            FeedKind.REVIEW -> "Bloquée"
+                            FeedKind.FAILED_CHAT -> "Échec"
+                            FeedKind.SNOOZED -> "Reportée"
                             FeedKind.RUNNING_CHAT ->
                                 if (chat.exclusiveSuspended) "Suspendue"
                                 else if (chat.status == "queued") "En attente" else "En cours"
                             FeedKind.WAITING_CHAT -> "Reprise prévue"
                             else -> if (chat.paused) "En pause" else statusLabel(chat.status)
                         },
-                    readAt = chat.readAt ?: chat.finishedAt ?: chat.updatedAt,
-                    unread =
-                        chat.unread &&
-                            unreadNow("chat:${chat.id}", chat.readAt ?: chat.finishedAt) &&
-                            (chat.requestedBy == null || chat.pendingQuestions > 0),
+                    readAt = activityAt,
+                    snoozeAt = maxOf(activityAt, chat.lastActivityAt ?: 0),
+                    unread = unread,
                 )
             val wait = chatWaitNotice(chat.run)
             when {
+                snoozed -> waiting += item(FeedKind.SNOOZED, "Reportée").copy(wakeAt = until)
                 chat.pendingQuestions > 0 && !canDirectChat(usable, chat, chats) ->
                     waiting +=
                         item(
@@ -283,13 +252,26 @@ internal fun buildFeed(
                 wait?.account != null ->
                     forYou +=
                         item(FeedKind.RECONNECT, "Compte ${wait.account} requis pour continuer")
-                chat.status in setOf("failed", "interrupted") ->
+                chat.status in setOf("failed", "interrupted") ||
+                    (chat.paused && chat.error != null) ->
                     forYou +=
                         item(
                             FeedKind.FAILED_CHAT,
                             chat.error?.lineSequence()?.firstOrNull()?.ifBlank { null }
                                 ?: statusLabel(chat.status),
                         )
+                chat.status == "succeeded" &&
+                    chat.outcome?.status == "blocked" &&
+                    (unread || chat.wakeup == null || chat.paused) -> {
+                    val outcome = chat.outcome
+                    val label = "Bloquée · ${outcome.reason}"
+                    if (unread) forYou += item(FeedKind.REVIEW, label)
+                    else
+                        recent +=
+                            item(FeedKind.CHAT, label).copy(unread = false, statusLabel = "Bloquée")
+                }
+                reminderDue && unread ->
+                    toRead += item(FeedKind.UNREAD_CHAT, "Report terminé").copy(stamp = activityAt)
                 !chat.paused &&
                     !chat.exclusiveSuspended &&
                     isQuotaWait(
@@ -326,10 +308,7 @@ internal fun buildFeed(
                                 // at resumption.
                                 resolved = chat.wakeup.observation != null,
                             )
-                chat.unread &&
-                    !chat.paused &&
-                    chat.requestedBy == null &&
-                    unreadNow("chat:${chat.id}", chat.readAt ?: chat.finishedAt) ->
+                unread && !chat.paused ->
                     toRead +=
                         item(FeedKind.UNREAD_CHAT, context(agent, chat.projectName))
                             .copy(
@@ -349,139 +328,6 @@ internal fun buildFeed(
                             .copy(finished = !chat.paused && chat.status == "succeeded")
             }
         }
-    val names = tasks.associateBy { it.id }
-    val missionRuns = activity.filter { it.trigger != "chat" }.associateBy { it.taskId }
-    // The work that started a mission, while it is still there to act.
-    fun requesterOf(run: Run): FeedRequester? {
-        val requested = run.requestedBy ?: return null
-        chats
-            .find { it.id == requested.chatId }
-            ?.let {
-                return FeedRequester(it.title, it.id, null)
-            }
-        val mission = names[requested.taskId]?.takeIf { !it.archived } ?: return null
-        val missionRun = missionRuns[mission.id] ?: return null
-        return FeedRequester(mission.name, null, missionRun.id)
-    }
-    activity
-        .filter { it.trigger != "chat" && it.taskId.isNotBlank() }
-        .sortedByDescending { it.finishedAt ?: it.startedAt ?: it.createdAt }
-        .forEach { run ->
-            val task = names[run.taskId]
-            if (task?.archived == true) return@forEach
-            val agent =
-                run.agentName.ifBlank { run.snapshot?.agent?.name.orEmpty() }.ifBlank { "Agent" }
-            val agentKey = run.snapshot?.agent?.id ?: task?.agentId.orEmpty()
-            fun item(kind: FeedKind, subtitle: String) =
-                FeedItem(
-                    "run:${run.id}",
-                    kind,
-                    task?.name ?: run.title,
-                    subtitle,
-                    agent,
-                    agentKey,
-                    run.finishedAt ?: run.startedAt ?: run.createdAt,
-                    run.startedAt,
-                    runId = run.id,
-                    taskId = run.taskId,
-                    harness = run.provider,
-                    statusLabel =
-                        when (kind) {
-                            FeedKind.REVIEW_TASK ->
-                                if (run.outcome?.status == "needs_input") "Répondre" else "Bloquée"
-                            FeedKind.RUNNING_TASK ->
-                                if (run.suspendedByExclusive != null) "Suspendue"
-                                else if (run.status == "queued") "En attente" else "En cours"
-                            FeedKind.WAITING_TASK -> "Reprise prévue"
-                            else -> statusLabel(run.status)
-                        },
-                    readAt = run.finishedAt ?: run.createdAt,
-                    unread = run.unread && unreadNow("task:${run.taskId}", run.finishedAt),
-                )
-            when {
-                // A mission that scheduled its continuation resumes on its own, like a chat.
-                run.status == "waiting" && run.suspendedByExclusive == null ->
-                    waiting +=
-                        item(
-                                FeedKind.WAITING_TASK,
-                                run.wakeup?.reason?.ifBlank { null }
-                                    ?: "Mission en attente de reprise",
-                            )
-                            .copy(
-                                wakeAt = run.wakeup?.wakeAt,
-                                condition = run.wakeup?.condition != null,
-                                resolved = run.wakeup?.observation != null,
-                            )
-                run.suspendedByExclusive == null &&
-                    isQuotaWait(run.status, run.accountWaitReason, run.accountRequired) ->
-                    waiting += item(FeedKind.WAITING_TASK, "En attente de quota")
-                run.active ->
-                    running +=
-                        item(
-                                FeedKind.RUNNING_TASK,
-                                if (run.suspendedByExclusive != null)
-                                    "Suspendue (exclusivité) · Mission · $agent"
-                                else if (run.status == "queued") "Mission en attente · $agent"
-                                else "Mission · $agent",
-                            )
-                            .copy(
-                                working =
-                                    run.status == "running" && run.suspendedByExclusive == null
-                            )
-                run.status in setOf("failed", "interrupted") ->
-                    forYou +=
-                        item(
-                            FeedKind.FAILED_TASK,
-                            "${statusLabel(run.status)} · ${shortStamp(run.finishedAt ?: run.createdAt)}",
-                        )
-                run.status == "succeeded" &&
-                    run.outcome != null &&
-                    run.outcome.status != "completed" -> {
-                    val label = outcomeLabel(run.outcome)
-                    val review =
-                        item(FeedKind.REVIEW_TASK, label).copy(outcome = run.outcome.status)
-                    fun setAside(reason: SetAside, subtitle: String) =
-                        review.copy(
-                            kind = FeedKind.SET_ASIDE_TASK,
-                            setAside = reason,
-                            subtitle = "$label · $subtitle",
-                        )
-                    // A requester that is gone leaves the user to act.
-                    val requester =
-                        if (run.outcome.waitingOn == "requester") requesterOf(run) else null
-                    val until = run.dismissal?.until
-                    when {
-                        requester != null ->
-                            recent +=
-                                setAside(SetAside.REQUESTER, "En attente de ${requester.title}")
-                                    .copy(requester = requester)
-                        run.outcome.waitingOn == "external" ->
-                            recent +=
-                                setAside(SetAside.EXTERNAL, "En attente d’une vérification externe")
-                        run.dismissal != null && until == null && run.outcome.status == "blocked" ->
-                            recent += setAside(SetAside.DISMISSED, "Écartée")
-                        until != null && until > now ->
-                            waiting +=
-                                review.copy(
-                                    kind = FeedKind.SNOOZED_TASK,
-                                    subtitle = "Rappel prévu · $label",
-                                    wakeAt = until,
-                                )
-                        else -> forYou += review
-                    }
-                }
-                run.status == "succeeded" &&
-                    run.unread &&
-                    unreadNow("task:${run.taskId}", run.finishedAt) ->
-                    toRead +=
-                        item(FeedKind.UNREAD_TASK, "Mission terminée · $agent")
-                            .copy(finished = true, preview = run.preview)
-                else ->
-                    recent +=
-                        item(FeedKind.UNREAD_TASK, "Mission terminée · $agent")
-                            .copy(unread = false, finished = run.status == "succeeded")
-            }
-        }
     return Feed(
         forYou + toRead.sortedByDescending { it.stamp },
         running.sortedBy { it.startedAt ?: Long.MAX_VALUE },
@@ -492,20 +338,16 @@ internal fun buildFeed(
 }
 
 /**
- * Rows in reading order, each delegated conversation or mission right below the work that started
- * it when both are listed. One that started without its requester in the list stays in place and
- * names it instead. The second value tells whether the row is nested.
+ * Rows in reading order, each delegated conversation right below the work that started it when both
+ * are listed. One that started without its requester in the list stays in place and names it
+ * instead. The second value tells whether the row is nested.
  */
 internal fun threadFeed(items: List<FeedItem>): List<Pair<FeedItem, Boolean>> {
     val byChat = items.filter { it.chatId != null }.associateBy { it.chatId }
-    val byRun = items.filter { it.runId != null }.associateBy { it.runId }
     val childrenOf = mutableMapOf<String, MutableList<FeedItem>>()
     val roots = mutableListOf<FeedItem>()
     items.forEach { item ->
-        val parent =
-            item.requester?.let { requester ->
-                requester.chatId?.let { byChat[it] } ?: requester.runId?.let { byRun[it] }
-            }
+        val parent = item.requester?.let { byChat[it.chatId] }
         if (parent != null && parent.key != item.key)
             childrenOf.getOrPut(parent.key) { mutableListOf() } += item
         else roots += item
@@ -524,83 +366,17 @@ internal fun threadFeed(items: List<FeedItem>): List<Pair<FeedItem, Boolean>> {
     return rows
 }
 
-/** A Fil row, or a run of quiet missions folded into one. */
-internal sealed interface FeedEntry {
-    data class Line(val item: FeedItem, val nested: Boolean) : FeedEntry
-
-    data class Fold(val items: List<FeedItem>) : FeedEntry {
-        val key
-            get() = "fold:${items.first().key}"
-    }
-}
-
-/**
- * Folds consecutive missions that finished as expected and were read into one row, so that
- * scheduled checks stop crowding the work worth reading. A lone one, a mission with delegated work
- * below it, and nested rows stay as they are.
- */
-internal fun foldFeed(rows: List<Pair<FeedItem, Boolean>>): List<FeedEntry> {
-    fun quiet(index: Int): Boolean {
-        val (item, nested) = rows[index]
-        return !nested &&
-            item.taskId != null &&
-            item.finished &&
-            !item.unread &&
-            rows.getOrNull(index + 1)?.second != true
-    }
-
-    val entries = mutableListOf<FeedEntry>()
-    var index = 0
-    while (index < rows.size) {
-        var end = index
-        while (end < rows.size && quiet(end)) end++
-        if (end - index >= 2) {
-            entries += FeedEntry.Fold(rows.subList(index, end).map { it.first })
-            index = end
-        } else {
-            entries += FeedEntry.Line(rows[index].first, rows[index].second)
-            index++
-        }
-    }
-    return entries
-}
-
 /** The Fil in reading order, one key per item: what a swipe between pages moves through. */
 internal fun Feed.keys() = threadFeed(all).map { (item, _) -> item.key }
 
-/** The shell and its pages share one conversation stream and one mission poll. */
-internal data class FilSnapshot(val conversations: LiveSnapshot, val activity: List<Run>?)
+/** The shell and its pages share one conversation stream . */
+internal data class FilSnapshot(val conversations: LiveSnapshot)
 
 internal val LocalFilSnapshot = compositionLocalOf<FilSnapshot?> { null }
 
 @Composable
 internal fun rememberFilConversations(vm: CairnViewModel, state: Workspace): LiveSnapshot =
     LocalFilSnapshot.current?.conversations ?: rememberLive(vm, state, "/chats/stream")
-
-/** The latest run of each mission, polled while the Fil or its pager shows; null until loaded. */
-@Composable
-internal fun rememberFilActivity(vm: CairnViewModel): List<Run>? {
-    LocalFilSnapshot.current?.let {
-        return it.activity
-    }
-    var activity by remember { mutableStateOf<List<Run>?>(null) }
-    Poll("fil-activity", 5000) {
-        try {
-            activity = vm.missionActivity()
-        } catch (e: Exception) {
-            vm.report(e)
-        }
-    }
-    return activity?.let { withLocalDismissals(it, vm.localDismissals) }
-}
-
-/** Outcomes set aside on this device show at once, before the next poll confirms them. */
-internal fun withLocalDismissals(activity: List<Run>, local: Map<String, OutcomeDismissal?>) =
-    if (local.isEmpty()) activity
-    else
-        activity.map { run ->
-            if (run.id in local) run.copy(dismissal = local[run.id]) else run
-        }
 
 internal fun feedSummary(feed: Feed): String {
     val parts = mutableListOf<String>()
@@ -629,7 +405,6 @@ fun FilScreen(
     vm: CairnViewModel,
     state: Workspace,
     openChat: (String) -> Unit,
-    openRun: (String) -> Unit,
     openConnections: () -> Unit,
     search: () -> Unit,
     openAccount: () -> Unit = {},
@@ -639,7 +414,6 @@ fun FilScreen(
     var connection by rememberSaveable { mutableStateOf(false) }
     if (connection)
         ConnectionSheet(vm, state, close = { connection = false }, openSettings = openSettings)
-    val activity = rememberFilActivity(vm).orEmpty()
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -649,41 +423,23 @@ fun FilScreen(
     }
     val trash = rememberConversationTrash(vm)
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
-    val feed =
-        buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now, state.usableAgents)
+    val feed = buildFeed(chats.orEmpty(), vm.localReads, now, state.usableAgents)
     var selectedView by rememberSaveable { mutableIntStateOf(0) }
-    var unfolded by rememberSaveable { mutableStateOf(listOf<String>()) }
     // A finished result previewed by a long press, without opening or reading it.
     var peeked by remember { mutableStateOf<FeedItem?>(null) }
     val views = listOf(feed.unread, feed.ongoing, feed.all)
     val visible = views[selectedView]
-    fun retry(item: FeedItem) {
-        val task = item.taskId ?: return
-        vm.perform { openRun(api.runMission(RunMissionInput(task)).id) }
-    }
-    fun setAside(item: FeedItem, until: Long? = null) {
-        vm.setAside(item.runId ?: return, item.taskId ?: return, item.stamp, until)
-    }
-    fun archive(item: FeedItem) {
-        val task = state.tasks.find { it.id == item.taskId } ?: return
-        vm.perform {
-            api.setMissionState(
-                MissionStateInput(
-                    taskId = task.id,
-                    revision = task.revision,
-                    enabled = false,
-                    archived = true,
-                )
-            )
-            refresh()
-            notify("Modifications enregistrées")
-        }
-    }
     fun open(item: FeedItem) {
         when {
             item.kind == FeedKind.RECONNECT -> openConnections()
             item.chatId != null -> openChat(item.chatId)
-            item.runId != null -> openRun(item.runId)
+        }
+    }
+    var snoozing by remember { mutableStateOf<FeedItem?>(null) }
+    snoozing?.let { item ->
+        SnoozeConversationDialog(item.title, dismiss = { snoozing = null }) { until ->
+            snoozing = null
+            item.chatId?.let { vm.snooze(it, item.snoozeAt, until) }
         }
     }
     peeked?.let { item ->
@@ -730,7 +486,7 @@ fun FilScreen(
                 Box(Modifier.padding(20.dp)) {
                     Empty(
                         "Aucune conversation",
-                        "Appuyez sur + pour confier une mission à un agent.",
+                        "Appuyez sur + pour démarrer une conversation.",
                     )
                 }
             }
@@ -742,35 +498,7 @@ fun FilScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        // Quiet missions fold together.
-        val entries = foldFeed(threadFeed(visible))
-        val lines = entries.flatMap { entry ->
-            when (entry) {
-                is FeedEntry.Line -> listOf(entry)
-                is FeedEntry.Fold ->
-                    listOf(entry) +
-                        if (entry.key in unfolded)
-                            entry.items.map { FeedEntry.Line(it, nested = true) }
-                        else emptyList()
-            }
-        }
-        items(
-            lines,
-            key = {
-                when (it) {
-                    is FeedEntry.Line -> it.item.key
-                    is FeedEntry.Fold -> it.key
-                }
-            },
-        ) { line ->
-            if (line is FeedEntry.Fold) {
-                FoldRow(line, line.key in unfolded, now) {
-                    unfolded =
-                        if (line.key in unfolded) unfolded - line.key else unfolded + line.key
-                }
-                return@items
-            }
-            val (item, nested) = line as FeedEntry.Line
+        items(threadFeed(visible), key = { it.first.key }) { (item, nested) ->
             FeedRow(
                 item,
                 { open(item) },
@@ -784,111 +512,18 @@ fun FilScreen(
             ) {
                 FilRowActions(
                     item,
-                    !state.busy,
-                    { open(item) },
-                    { retry(item) }.takeIf {
-                        canUseAgent(
-                            state.usableAgents,
-                            state.tasks.find { it.id == item.taskId }?.agentId ?: item.agentKey,
-                        )
+                    {
+                        val deadline = item.wakeAt.takeIf { item.kind == FeedKind.SNOOZED }
+                        vm.markRead(listOf(item.read), snoozedUntil = deadline)
                     },
-                    { vm.markRead(listOf(item.read)) },
-                    dismiss = { setAside(item) },
-                    snooze = { setAside(item, tomorrowMorning(now)) },
-                    archive = { archive(item) },
+                    snooze = { snoozing = item },
+                    restore = { item.chatId?.let(vm::restoreSnooze) },
                 )
             }
         }
     }
 }
 
-/** Quiet missions folded into one row: two stacked avatars, their count and names. */
-@Composable
-private fun FoldRow(fold: FeedEntry.Fold, open: Boolean, now: Long, toggle: () -> Unit) {
-    val rotation by
-        androidx.compose.animation.core.animateFloatAsState(
-            if (open) 180f else 0f,
-            tween(200),
-            label = "fil-fold",
-        )
-    Surface(
-        onClick = toggle,
-        color = Color.Transparent,
-        modifier =
-            Modifier.fillMaxWidth().testTag("fil-fold").semantics {
-                stateDescription = if (open) "Déplié" else "Replié"
-            },
-    ) {
-        Row(
-            Modifier.widthIn(max = 760.dp)
-                .heightIn(min = 56.dp)
-                .padding(start = 22.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(Modifier.size(28.dp)) {
-                Box(Modifier.align(Alignment.TopStart).alpha(0.8f)) {
-                    AgentAvatar(
-                        fold.items[1].agent,
-                        fold.items[1].agentKey.ifBlank { fold.items[1].agent },
-                        19.dp,
-                    )
-                }
-                Box(
-                    Modifier.align(Alignment.BottomEnd)
-                        .background(MaterialTheme.colorScheme.background, RoundedCornerShape(7.dp))
-                        .padding(1.5.dp)
-                ) {
-                    AgentAvatar(
-                        fold.items[0].agent,
-                        fold.items[0].agentKey.ifBlank { fold.items[0].agent },
-                        19.dp,
-                    )
-                }
-            }
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "${fold.items.size} missions terminées",
-                        Modifier.weight(1f),
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Stamp(fold.items.first().stamp, now)
-                }
-                Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        CairnIcons.Retry,
-                        null,
-                        Modifier.size(12.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(
-                        fold.items.joinToString(" · ") { it.title },
-                        Modifier.weight(1f).padding(start = 4.dp),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            // Where other rows have their actions, so times line up.
-            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                Icon(
-                    CairnIcons.Down,
-                    null,
-                    Modifier.size(20.dp).rotate(rotation),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-/** A finished result's opening, read without opening the work, which stays unread. */
 @Composable
 internal fun PeekSheet(item: FeedItem, now: Long, close: () -> Unit, open: () -> Unit) {
     ModalBottomSheet(
@@ -1104,34 +739,27 @@ private fun androidx.compose.foundation.lazy.LazyListScope.section(
     items(items, key = { it.key }) { Box(Modifier.animateItem()) { row(it) } }
 }
 
-/** Conversations offer a direct read action; missions keep their additional actions in a menu. */
 @Composable
 internal fun FilRowActions(
     item: FeedItem,
-    enabled: Boolean,
-    open: () -> Unit,
-    retry: (() -> Unit)?,
     markRead: () -> Unit,
-    dismiss: () -> Unit = {},
-    snooze: () -> Unit = {},
-    archive: () -> Unit = {},
+    snooze: () -> Unit,
+    restore: () -> Unit,
 ) {
-    if (item.taskId == null) {
-        if (item.unread && item.readAt > 0) {
-            RoundAction("Marquer comme lu : ${item.title}", CairnIcons.Check, size = 36.dp) {
-                markRead()
-            }
-        }
-        return
-    }
-
+    if (item.unread && item.readAt > 0)
+        RoundAction(
+            "Marquer comme lu : ${item.title}",
+            CairnIcons.Check,
+            size = 36.dp,
+            onClick = markRead,
+        )
     var menu by remember { mutableStateOf(false) }
     Box {
         RoundAction("Autres actions pour ${item.title}", CairnIcons.More, size = 36.dp) {
             menu = true
         }
         DropdownMenu(menu, { menu = false }) {
-            if (item.unread)
+            if ((item.unread || item.kind == FeedKind.SNOOZED) && item.readAt > 0)
                 DropdownMenuItem(
                     text = { Text("Marquer comme lu") },
                     onClick = {
@@ -1140,48 +768,14 @@ internal fun FilRowActions(
                     },
                 )
             DropdownMenuItem(
-                text = { Text("Ouvrir") },
+                text = {
+                    Text(if (item.kind == FeedKind.SNOOZED) "Rétablir" else "Reporter jusqu’à…")
+                },
                 onClick = {
                     menu = false
-                    open()
+                    if (item.kind == FeedKind.SNOOZED) restore() else snooze()
                 },
             )
-            if (item.dismissible)
-                DropdownMenuItem(
-                    text = { Text("Écarter le résultat") },
-                    onClick = {
-                        menu = false
-                        dismiss()
-                    },
-                )
-            if (item.kind == FeedKind.REVIEW_TASK)
-                DropdownMenuItem(
-                    text = { Text("Me le rappeler demain") },
-                    onClick = {
-                        menu = false
-                        snooze()
-                    },
-                )
-            if (retry != null) {
-                DropdownMenuItem(
-                    text = { Text("Relancer") },
-                    enabled = enabled,
-                    onClick = {
-                        menu = false
-                        retry()
-                    },
-                )
-            }
-            if (item.taskId != null) {
-                DropdownMenuItem(
-                    text = { Text("Archiver la mission") },
-                    enabled = enabled,
-                    onClick = {
-                        menu = false
-                        archive()
-                    },
-                )
-            }
         }
     }
 }
@@ -1252,23 +846,16 @@ internal fun FilAvatar(item: FeedItem, size: androidx.compose.ui.unit.Dp) {
 private fun StatusMark(item: FeedItem) {
     val (icon, tint) =
         when {
-            item.kind == FeedKind.QUESTION ||
-                (item.kind == FeedKind.REVIEW_TASK && item.outcome == "needs_input") ->
-                CairnIcons.CircleAlert to signal.answer
+            item.kind == FeedKind.QUESTION -> CairnIcons.CircleAlert to signal.answer
             item.kind == FeedKind.RECONNECT -> CairnIcons.CircleAlert to signal.warning
-            item.kind == FeedKind.FAILED_CHAT || item.kind == FeedKind.FAILED_TASK ->
-                CairnIcons.CircleX to signal.attention
-            item.kind == FeedKind.REVIEW_TASK -> CairnIcons.CirclePause to signal.warning
-            item.kind == FeedKind.RUNNING_CHAT || item.kind == FeedKind.RUNNING_TASK ->
+            item.kind == FeedKind.FAILED_CHAT -> CairnIcons.CircleX to signal.attention
+            item.kind == FeedKind.REVIEW -> CairnIcons.CirclePause to signal.warning
+            item.kind == FeedKind.RUNNING_CHAT ->
                 CairnIcons.CircleProgress to MaterialTheme.colorScheme.primary
-            item.kind == FeedKind.WAITING_CHAT ||
-                item.kind == FeedKind.WAITING_TASK ||
-                item.kind == FeedKind.SNOOZED_TASK ->
+            item.kind == FeedKind.WAITING_CHAT || item.kind == FeedKind.SNOOZED ->
                 CairnIcons.Clock to MaterialTheme.colorScheme.primary
-            item.kind == FeedKind.SET_ASIDE_TASK ->
-                CairnIcons.Hourglass to MaterialTheme.colorScheme.onSurfaceVariant
             item.finished ->
-                (if (item.taskId != null) CairnIcons.Retry else CairnIcons.CircleCheck) to
+                CairnIcons.CircleCheck to
                     MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
             item.kind == FeedKind.CHAT && item.statusLabel == "En pause" ->
                 CairnIcons.CirclePause to MaterialTheme.colorScheme.onSurfaceVariant
@@ -1381,11 +968,8 @@ private fun FeedRow(
                         Spacer(Modifier.width(8.dp))
                         Stamp(item.stamp, now)
                     }
-                    val needsAnswer =
-                        item.kind == FeedKind.QUESTION ||
-                            (item.kind == FeedKind.REVIEW_TASK && item.outcome == "needs_input")
-                    val failed =
-                        item.kind == FeedKind.FAILED_CHAT || item.kind == FeedKind.FAILED_TASK
+                    val needsAnswer = item.kind == FeedKind.QUESTION
+                    val failed = item.kind == FeedKind.FAILED_CHAT
                     val label = item.statusLabel
                     if (!nested || !item.finished)
                         Row(
@@ -1413,39 +997,25 @@ private fun FeedRow(
                                     color =
                                         if (needsAnswer) signal.answer
                                         else if (failed) signal.attention
-                                        else if (item.kind == FeedKind.REVIEW_TASK) signal.warning
+                                        else if (item.kind == FeedKind.REVIEW) signal.warning
                                         else MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
-                                )
-                            if (!nested && item.taskId != null)
-                                Icon(
-                                    CairnIcons.Retry,
-                                    "Mission",
-                                    Modifier.padding(start = if (item.finished) 0.dp else 4.dp)
-                                        .size(12.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             // The avatar already names the agent: the detail line gives the
                             // project.
                             if (!nested)
                                 Text(
-                                    (if (item.finished || item.taskId != null) "" else " · ") +
+                                    (if (item.finished) "" else " · ") +
                                         (item.project?.ifBlank { null } ?: item.agent),
-                                    Modifier.weight(1f)
-                                        .padding(start = if (item.taskId != null) 4.dp else 0.dp),
+                                    Modifier.weight(1f),
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
                         }
-                    if (
-                        item.kind == FeedKind.SET_ASIDE_TASK ||
-                            item.kind == FeedKind.SNOOZED_TASK ||
-                            item.kind == FeedKind.WAITING_CHAT ||
-                            item.kind == FeedKind.WAITING_TASK
-                    )
+                    if (item.kind == FeedKind.SNOOZED || item.kind == FeedKind.WAITING_CHAT)
                         Text(
                             item.subtitle,
                             Modifier.padding(start = inset),
@@ -1454,11 +1024,7 @@ private fun FeedRow(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                    if (
-                        item.kind == FeedKind.WAITING_CHAT ||
-                            item.kind == FeedKind.WAITING_TASK ||
-                            item.kind == FeedKind.SNOOZED_TASK
-                    )
+                    if (item.kind == FeedKind.WAITING_CHAT || item.kind == FeedKind.SNOOZED)
                         Text(
                             item.wakeAt?.let { waitLeft(it, item.condition, item.resolved, now) }
                                 ?: "Selon disponibilité",
@@ -1466,6 +1032,17 @@ private fun FeedRow(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
                         )
+                    item.originRule?.let { origin ->
+                        val type = if (origin.schedule) "Programmation" else "Règle"
+                        Text(
+                            "$type · ${origin.ruleName}",
+                            Modifier.padding(start = inset),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                     if (!nested)
                         item.requester?.let {
                             Text(

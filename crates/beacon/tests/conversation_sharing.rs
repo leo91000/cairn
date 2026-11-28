@@ -1,6 +1,6 @@
 mod common;
 
-use common::{RelayedInstallation, seeded_artifact};
+use common::{RelayedInstallation, seeded_artifact, seeded_conversation_artifact};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
@@ -25,9 +25,8 @@ async fn change(
 
 async fn fixture() -> (RelayedInstallation, String, String, String) {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let (run, artifact) = seeded_artifact(&relay, b"private report bytes", "text/plain").await;
-    let mut chat = relay.installation.chat_create(json!({})).await.unwrap();
-    chat["runId"] = run.clone().into();
+    let (mut chat, run, artifact) =
+        seeded_conversation_artifact(&relay, b"private report bytes", "text/plain").await;
     chat["title"] = "<script>alert('title')</script>".into();
     relay
         .installation

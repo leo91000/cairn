@@ -16,7 +16,8 @@ use crate::{
     performance::{Activity, Operation},
     process::Environment,
     provider::Provider,
-    recovery, run_output,
+    recovery,
+    run_output::{self, RESUME_PROMPT},
     run_status::RunStatus,
     service::{Service, covers, policy},
     skills::{atomic_write, private_dir},
@@ -40,7 +41,6 @@ use tracing::Instrument;
 const STOPPED: i32 = 143;
 const SUMMARY_LIMIT: usize = 100_000;
 const HISTORY_LIMIT: usize = 16_000;
-const RESUME_PROMPT: &str = "Continue the same task from the saved conversation and current workspace. Execution was interrupted. Resume the original task from its last completed step. Preserve completed work and verify external effects before repeating any action.";
 
 #[cfg(test)]
 #[path = "launch_stream_tests.rs"]
@@ -332,9 +332,7 @@ impl Execution<'_> {
                         checkpoint.generation = Some(generation);
                     }
                     checkpoint.bind_paid_admission(&saved_runner, &state);
-                    if !awaiting_antigravity_mission_turn(self.run, self.provider, checkpoint) {
-                        checkpoint.turn_pending = None;
-                    }
+                    checkpoint.turn_pending = None;
                     checkpoint.recovery_deadline_ms = None;
                     checkpoint.terminal_code = None;
                     checkpoint.provider_failed = None;

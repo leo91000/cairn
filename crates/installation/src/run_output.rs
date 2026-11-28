@@ -366,10 +366,12 @@ pub const INTERACTIVE: &str = "This is an interactive chat. Use cairn_workspace.
     as authorization to publish changes. Use cairn_workspace.pending_questions and \
     cairn_workspace.withdraw_question to retire a question that became unnecessary \
     or was answered in ordinary chat. Withdrawal never supplies approval. A completed \
-    outcome retires unanswered questions at the end of the turn; report needs_input \
-    when an answer is still required.";
+    outcome retires unanswered questions at the end of the turn; a blocked outcome \
+    preserves pending questions.";
 
-pub fn prompt(run: &Value, chat: bool) -> String {
+pub(crate) const RESUME_PROMPT: &str = "Continue the same task from the saved conversation and current workspace. Execution was interrupted. Resume the original task from its last completed step. Preserve completed work and verify external effects before repeating any action.";
+
+pub fn prompt(run: &Value, _chat: bool) -> String {
     // Set at launch from the plugins granting this run's agent (`agents::with_instructions`).
     let plugins = if run["isolated"] == true {
         text(run, "pluginInstructions")
@@ -387,7 +389,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             workspace or /tmp. Wait for successful publication and include the returned \
             durable URL in your reply. Before your final response, unless ending a \
             confirmed deferred wait with cairn_workspace.wait_for, call \
-            cairn_workspace.report_outcome with completed, blocked, or needs_input, a \
+            cairn_workspace.report_outcome with completed or blocked, a \
             concrete reason, and validation/delivery evidence. A successful process or \
             local commit is not a completed request when an authorized push, CI check, \
             or release remains blocked. Use waitingOn external only for work already \
@@ -398,12 +400,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
     } else {
         ""
     };
-    let interaction = if chat {
-        INTERACTIVE
-    } else {
-        "This unattended task cannot answer clarification questions; report a \
-            concrete blocker if required information is missing."
-    };
+    let interaction = INTERACTIVE;
     let projects = crate::project_workspaces::catalog(run)
         .iter()
         .map(|project| project_line(run, project))
@@ -575,7 +572,7 @@ pub fn chat_plan(
         "execution": run["chatExecution"],
         "environmentExpiredAt": run["environmentExpiredAt"],
         "environmentExpirationCause": run["environmentExpirationCause"],
-        "instructions": prompt(&context, interactive(run)),
+        "instructions": prompt(&context, true),
         "inputDirectory": input_directory,
         "output": prepared["output"],
         "cwd": prepared["cwd"],
@@ -599,31 +596,35 @@ pub fn chat_plan(
     if let Some(session) = session {
         plan["sessionId"] = session.into();
     }
+    let retry = &run["retry"];
+    if let Some(startup) = retry["cause"]["startup"].as_bool() {
+        let antigravity = provider == crate::provider::Provider::Antigravity;
+        let attempt = retry["attempt"].as_u64();
+        let authorized = attempt.is_some()
+            && retry["nextAttemptAt"]
+                .as_i64()
+                .is_some_and(|at| at <= crate::config::now());
+        if antigravity && !startup {
+            plan["antigravityRetryAttempt"] = attempt.into();
+            plan["antigravityRetryAuthorized"] = authorized.into();
+        }
+        // The legacy initial refusal may have created a session without
+        // recording the brief. A receipt recovered later can authorize
+        // another submission of that initial turn.
+        let resend_initial_brief = if startup {
+            // mark_running consumes the startup deadline before preparation.
+            let admitted = run["status"] == "running" && retry["nextAttemptAt"].is_null();
+            attempt.is_some() && session.is_none() && (authorized || admitted)
+        } else {
+            antigravity && authorized
+        };
+        if resend_initial_brief && run["sourceTaskInitialTurn"] == true {
+            plan["execution"]["text"] =
+                format!("Task brief:\n{}", text(run, "sourceTaskPrompt")).into();
+            plan["execution"]["recovery"] = false.into();
+        }
+    }
     Ok(plan)
-}
-
-/// Only chat turns can answer questions. Scheduled work also uses the chat
-/// protocol, without a conversation to deliver them to.
-fn interactive(run: &Value) -> bool {
-    run["chatExecution"].is_object()
-}
-
-/// The first turn of scheduled work sent through the chat protocol. The
-/// instructions already carry the Cairn frame, so a fresh turn sends only the
-/// task brief; a resumed turn sends its resume prompt. The brief follows a
-/// fixed lead-in: Claude Code runs a turn that starts with a command such as
-/// `/clear` as that command, and unattended work has nobody to notice.
-pub fn scheduled_turn(run: &Value, resume_prompt: Option<&str>) -> Value {
-    let turn = resume_prompt.map_or_else(
-        || format!("Task brief:\n{}", text(&run["snapshot"]["task"], "prompt")),
-        str::to_owned,
-    );
-    json!({
-        "messageId": run["missionTurnId"].as_str().unwrap_or_else(|| text(run, "id")),
-        "text": turn,
-        "recovery": resume_prompt.is_some(),
-        "attachments": [],
-    })
 }
 
 /// One line per selected skill: name, description and `SKILL.md` path. The
@@ -655,7 +656,7 @@ pub(crate) fn native_chat_privileges(chat: &mut Value, run: &Value, mode: &Value
     context["nativeMode"] = mode.clone();
     context["snapshot"]["task"]["prompt"] = "".into();
     let notice = native_privileges(mode);
-    chat["instructions"] = format!("{notice}\n\n{}", prompt(&context, interactive(run))).into();
+    chat["instructions"] = format!("{notice}\n\n{}", prompt(&context, true)).into();
     chat["execution"]["text"] = format!("{notice}\n\n{}", text(&chat["execution"], "text")).into();
 }
 
@@ -765,12 +766,13 @@ mod tests {
     }
 
     #[test]
-    fn chat_protocol_runs_receive_one_frame_matching_their_interaction() {
+    fn conversation_protocol_preserves_instructions_and_the_saved_turn() {
         let guest = "/home/node/.agents/skills/0/review/SKILL.md";
         let host = "/installation/skills/review/SKILL.md";
         for provider in ["codex", "claude", "opencode"] {
-            let mut run = json!({
-                "id": "run", "isolated": true, "missionTurnId": "turn",
+            let run = json!({
+                "id": "run", "isolated": true,
+                "chatExecution": { "messageId": "message", "text": "Hello" },
                 "pluginInstructions": "Mail: never print credentials.",
                 "snapshot": {
                     "agent": { "provider": provider, "instructions": "Agent rules." },
@@ -789,37 +791,22 @@ mod tests {
                 "Agent rules.",
                 "Mail: never print credentials.",
                 guest,
-                "This unattended task",
+                "This is an interactive chat",
             ] {
                 assert!(instructions.contains(expected), "{provider}: {expected}");
             }
             assert!(!instructions.contains(host));
-            assert!(!instructions.contains("This is an interactive chat"));
-
-            let turn = scheduled_turn(&run, None);
-            assert_eq!(turn["messageId"], "turn");
-            assert_eq!(turn["text"], "Task brief:\nCheck the deployment.");
-            assert_eq!(turn["recovery"], false);
-            let resumed = scheduled_turn(&run, Some("Continue."));
-            assert_eq!(resumed["text"], "Continue.");
-            assert_eq!(resumed["recovery"], true);
-
-            run["chatExecution"] = json!({ "messageId": "message", "text": "Hello" });
-            let plan = chat_plan(&run, &prepared, Path::new("/tmp"), &json!({}), None).unwrap();
-            let instructions = text(&plan, "instructions");
-            assert!(instructions.contains("This is an interactive chat"));
-            assert!(instructions.contains("Mail: never print credentials."));
-            assert!(!instructions.contains("This unattended task"));
             assert_eq!(plan["execution"]["text"], "Hello");
         }
     }
 
     #[test]
-    fn native_chat_protocol_runs_keep_the_frame_of_their_interaction() {
+    fn native_conversations_preserve_the_interactive_frame() {
         for provider in ["codex", "claude", "opencode"] {
-            let mut run = json!({
+            let run = json!({
                 "id": "run",
                 "isolated": true,
+                "chatExecution": { "messageId": "message", "text": "Check the deployment." },
                 "pluginInstructions": "Mail: never print credentials.",
                 "snapshot": {
                     "agent": { "provider": provider, "access": { "backend": "native" } },
@@ -833,20 +820,14 @@ mod tests {
             native_chat_privileges(&mut chat, &run, &mode);
             let instructions = text(&chat, "instructions");
             assert!(instructions.contains("Mail: never print credentials."));
-            assert!(instructions.contains("This unattended task"), "{provider}");
-            assert!(!instructions.contains("This is an interactive chat"));
-            assert!(!instructions.contains("Check the deployment."));
-
-            run["chatExecution"] = json!({ "messageId": "message", "text": "Hello" });
-            let mut chat = json!({ "execution": { "text": "Hello" } });
-            native_chat_privileges(&mut chat, &run, &mode);
-            let instructions = text(&chat, "instructions");
-            assert!(instructions.contains("Mail: never print credentials."));
             assert!(
                 instructions.contains("This is an interactive chat"),
                 "{provider}"
             );
-            assert!(!instructions.contains("This unattended task"));
+            assert!(!instructions.contains("Check the deployment."));
+            let execution = text(&chat["execution"], "text");
+            assert!(execution.contains("Effective node mode: Native protected."));
+            assert!(execution.ends_with("Task brief:\nCheck the deployment."));
         }
     }
 

@@ -46,9 +46,14 @@ pub(crate) const RULE_OPERATIONS: &[RuleOperation] = &[
         description: "Check a rule definition as saving would, without writing: problems located by JSON Pointer, and warnings.",
     },
     RuleOperation {
+        name: "preview_schedule",
+        scope: "read",
+        description: "Preview the next scheduled occurrences of a 5-field cron expression in an IANA timezone.",
+    },
+    RuleOperation {
         name: "create_hook_rule",
         scope: "manage",
-        description: "Create a hook rule for the owner who authorized this connection; creationId makes retries return the same rule. Installation agents write rules only for the person of a conversation that this person alone wrote, never in tasks or missions.",
+        description: "Create a hook rule for the account that authorized this connection. Use the clock trigger and a startAgent action to schedule an agent. Use ruleConversationWorking to skip launches while the previous conversation works. creationId makes retries return the same rule. Installation agents write rules only for the person of a conversation that this person alone wrote, never in delegated or rule-started conversations.",
     },
     RuleOperation {
         name: "replace_hook_rule",
@@ -69,6 +74,11 @@ pub(crate) const RULE_OPERATIONS: &[RuleOperation] = &[
         name: "lift_hook_rule_budget",
         scope: "manage",
         description: "Resume a rule suspended for exceeding an hourly cap. Its creator or the installation owner does.",
+    },
+    RuleOperation {
+        name: "run_hook_rule",
+        scope: "run",
+        description: "Trigger a clock hook rule immediately without waiting for its next scheduled occurrence. Only its creator does.",
     },
     RuleOperation {
         name: "duplicate_hook_rule",
@@ -126,6 +136,14 @@ impl RuleOperation {
             "validate_hook_rule" => (
                 schema_for::<ValidateHookRuleInput>(Contract::Deserialize),
                 schema_for::<ValidateHookRuleOutput>(Contract::Serialize),
+            ),
+            "preview_schedule" => (
+                schema_for::<SchedulePreviewInput>(Contract::Deserialize),
+                schema_for::<SchedulePreviewOutput>(Contract::Serialize),
+            ),
+            "run_hook_rule" => (
+                schema_for::<HookRuleInput>(Contract::Deserialize),
+                schema_for::<HookRuleTriggering>(Contract::Serialize),
             ),
             "create_hook_rule" => (
                 schema_for::<CreateHookRuleInput>(Contract::Deserialize),
@@ -221,6 +239,9 @@ impl RuleOperation {
             "validate_hook_rule" => {
                 serde_json::to_value(validate(s, decode(input)?, actor).await?)?
             }
+            "preview_schedule" => {
+                serde_json::to_value(preview_schedule(s, decode(input)?, actor).await?)?
+            }
             "create_hook_rule" => serde_json::to_value(create(s, decode(input)?, actor).await?)?,
             "replace_hook_rule" => serde_json::to_value(replace(s, decode(input)?, actor).await?)?,
             "set_hook_rule_enabled" => {
@@ -232,6 +253,7 @@ impl RuleOperation {
             "lift_hook_rule_budget" => {
                 serde_json::to_value(lift_budget(s, decode(input)?, actor).await?)?
             }
+            "run_hook_rule" => serde_json::to_value(run_now(s, decode(input)?, actor).await?)?,
             "duplicate_hook_rule" => {
                 serde_json::to_value(duplicate(s, decode(input)?, actor).await?)?
             }

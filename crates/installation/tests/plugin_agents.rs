@@ -5,7 +5,7 @@
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
 use common::AgentFixture;
-use common::MissionFixture;
+use common::ChatRunFixture;
 
 mod common;
 
@@ -59,14 +59,7 @@ async fn fixture() -> Fixture {
 }
 
 async fn bearer_for_agent(s: &Service, agent: &str) -> String {
-    let task = s
-        .task_fixture(
-            json!({ "name": "Probe", "agentId": agent, "prompt": "Hello" }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
+    let (_, run) = s.chat_run_fixture(agent, None, "Hello").await.unwrap();
     s.store
         .change_run(
             text(&run, "id"),

@@ -9,18 +9,18 @@ import { listAudit } from '../../../packages/contracts/generated/listAudit'
 import auditSchema from '../../../packages/contracts/generated/ListAuditOutput.json'
 import { markRead } from '../../../packages/contracts/generated/markRead'
 import markSchema from '../../../packages/contracts/generated/MarkReadInput.json'
-import { setOutcomeAside } from '../../../packages/contracts/generated/setOutcomeAside'
-import asideSchema from '../../../packages/contracts/generated/SetOutcomeAsideInput.json'
-import asideOutputSchema from '../../../packages/contracts/generated/SetOutcomeAsideOutput.json'
+import snoozeSchema from '../../../packages/contracts/generated/SetConversationSnoozeInput.json'
+import snoozeOutputSchema from '../../../packages/contracts/generated/SetConversationSnoozeOutput.json'
+import { snoozeChat } from '../../../packages/contracts/generated/snoozeChat'
 import corpus from '../../../tests/fixtures/personal-settings-contracts.json'
 
-it('qualifies read marks, set-aside outcomes and redacted installation views', () => {
+it('qualifies read marks, conversation snoozes and redacted installation views', () => {
   const ajv = new Ajv({ strict: false })
   addFormats(ajv)
   const valid: [object, unknown[]][] = [
     [markSchema, corpus.marks],
-    [asideSchema, corpus.asides],
-    [asideOutputSchema, corpus.asideOutputs],
+    [snoozeSchema, corpus.snoozes],
+    [snoozeOutputSchema, corpus.snoozeOutputs],
     [settingsSchema, corpus.settings],
     [overviewSchema, corpus.overviews],
     [auditSchema, corpus.audits],
@@ -33,7 +33,7 @@ it('qualifies read marks, set-aside outcomes and redacted installation views', (
 
   const invalid: [object, unknown[]][] = [
     [markSchema, corpus.invalidMarks],
-    [asideSchema, corpus.invalidAsides],
+    [snoozeSchema, corpus.invalidSnoozes],
   ]
   for (const [schema, values] of invalid) {
     const validate = ajv.compile(schema)
@@ -50,13 +50,13 @@ it('uses the generated personal and settings routes', async () => {
   }
 
   await markRead(request, corpus.marks[0] as Parameters<typeof markRead>[1])
-  await setOutcomeAside(request, corpus.asides[2] as Parameters<typeof setOutcomeAside>[1])
+  await snoozeChat(request, corpus.snoozes[1] as Parameters<typeof snoozeChat>[1])
   await getInstallationSettings(request, {})
   await getInstallationOverview(request, {})
   await listAudit(request, {})
   expect(calls).toEqual([
     ['/reads', { method: 'POST', body: JSON.stringify(corpus.marks[0]) }],
-    ['/dismissals', { method: 'POST', body: JSON.stringify(corpus.asides[2]) }],
+    ['/snoozes', { method: 'POST', body: JSON.stringify(corpus.snoozes[1]) }],
     ['/settings', { method: 'GET' }],
     ['/overview', { method: 'GET' }],
     ['/audit', { method: 'GET' }],

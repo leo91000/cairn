@@ -125,10 +125,10 @@ candidate pending for repair and retry. The supervisor does not start a previous
 binary against the data. The replacement's stop, readiness and verification
 bounds remain within the twenty-minute lease.
 
-The compacted database uses schema 38. Before approving the update for an
-existing installation, verify schema 37 and a successful start on a
-local-disk release, such as Cairn v0.80.0. For a schema 11–36 database, complete
-the intermediate upgrade first. Follow the
+The current database uses schema 39. Existing schema-38 installations can
+upgrade directly. For schema 37, verify a successful start on a compatible
+local-disk release, such as Cairn v0.80.0, before updating. For schemas 11–36,
+complete the intermediate upgrade first. Follow the
 [data-preserving upgrade procedure](PRODUCTION-CAIRN.md#data-preserving-upgrades)
 and retain a consistent database/WAL backup. Automatic updates create no backups.
 

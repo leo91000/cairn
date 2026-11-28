@@ -434,7 +434,9 @@ pub(super) fn continue_run(
     run: &Value,
     snapshot: &Value,
     mut execution: ChatExecution,
+    wakeup_id: Option<&str>,
 ) -> Result<()> {
+    require_workspace_not_cleaned(run)?;
     let agent = &snapshot["snapshot"]["agent"];
     // The workspace keeps what earlier turns could reach, so reduced access needs a new chat.
     if !crate::service::covers(agent, &run["snapshot"]["agent"]) {
@@ -551,7 +553,11 @@ pub(super) fn continue_run(
             "The previous environment will be stopped before continuing; background completion is unknown.",
         )?;
     }
-    if checkpoint.held_environment.is_none() {
+    let migrated_wakeup_id = checkpoint.migrated_mission_wakeup_id.take();
+    let resumes_migrated_wait = wakeup_id.is_some()
+        && (wakeup_id == migrated_wakeup_id.as_deref()
+            || db.unsettled_migrated_occurrence(&chat.id, run_id)?);
+    if checkpoint.held_environment.is_none() && !resumes_migrated_wait {
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(agent));
     }
     checkpoint.last_message = None;
@@ -559,6 +565,14 @@ pub(super) fn continue_run(
     checkpoint.retired_environment_deadline = None;
     checkpoint.retained_completion = None;
     checkpoint.store_in(db, run_id)?;
+    if wakeup_id.is_none()
+        && let Some(wakeup) = &chat.wakeup
+    {
+        // New input ends the parked occurrence before reusing its run.
+        if super::continuation::cancel_for_run(db, run_id)? {
+            super::continuation::settle_superseded_wait(db, run_id, &wakeup.id)?;
+        }
+    }
     let compaction = execution.operation.as_deref() == Some(COMPACT);
     let mut patch = crate::runs::RunChanges {
         snapshot: Some(serde_json::from_value(snapshot["snapshot"].clone())?),
@@ -570,6 +584,7 @@ pub(super) fn continue_run(
         recovery_pending: Some(checkpoint.held_environment.is_none()),
         boundary: Some(json!({
             "chatExecution": serde_json::to_value(execution)?,
+            "sourceTaskInitialTurn": null,
             "chatMessageDigest": null,
             "chatMessageChanged": null,
             "environmentState": if expired { json!("expired") } else { run["environmentState"].clone() },
@@ -659,9 +674,22 @@ pub(super) fn launch_turn(
     provider
         .adapter()
         .validate_agent(&snapshot["snapshot"]["agent"])?;
+    let message_id = text(&message, "id");
+    let input = text(&message, "text");
+    let scheduled_brief = run.is_none()
+        && crate::rules::engine::conversations::origin_rule_for_chat(db, chat_id)?
+            .is_some_and(|origin| origin.schedule)
+        && crate::conversation_writers::person(db, chat_id, message_id)?.is_none();
+    // A scheduled brief is text for the model. A leading slash otherwise
+    // becomes an engine command when it is the first input in Claude Code.
+    let input = if scheduled_brief {
+        format!("Task brief:\n{input}")
+    } else {
+        input.to_owned()
+    };
     let execution = ChatExecution {
-        message_id: text(&message, "id").to_owned(),
-        text: with_invoked_skills(text(&message, "text"), &snapshot["snapshot"]["skills"]),
+        message_id: message_id.to_owned(),
+        text: with_invoked_skills(&input, &snapshot["snapshot"]["skills"]),
         attachments: serde_json::from_value(message["attachments"].clone())?,
         recovery: false,
         context: None,
@@ -679,7 +707,14 @@ pub(super) fn launch_turn(
         })
     });
     let run_id = if let Some(run) = run {
-        continue_run(db, &chat, &run, &snapshot, execution)?;
+        continue_run(
+            db,
+            &chat,
+            &run,
+            &snapshot,
+            execution,
+            message["wakeup"]["id"].as_str(),
+        )?;
         text(&run, "id").to_owned()
     } else {
         crate::native::policy::apply(&mut snapshot, &serde_json::to_value(&chat)?);
@@ -719,6 +754,7 @@ pub(super) fn launch_turn(
     chat.environment_state = None;
     chat.wakeup = None;
     db.save_conversation(&chat)?;
+    db.delete(&format!("chat-error:{}", chat.id))?;
     if waking {
         let mut observed_wakeup = message["wakeup"].clone();
         if message["observation"].is_object() {
@@ -735,103 +771,4 @@ pub(super) fn launch_turn(
     message["status"] = MessageStatus::Sending.into();
     db.put_message(&message)?;
     Ok(())
-}
-
-/// Transfers a completed mission's conversation to a chat without replaying it.
-pub(super) fn from_run(
-    db: &Db<'_>,
-    run_id: &str,
-    origin: &crate::native::policy::Origin,
-) -> Result<Value> {
-    crate::conversation_lifecycle::require_active_run(db, run_id)?;
-    if let Some(chat) = db.conversation_for_run(run_id)? {
-        return Ok(serde_json::to_value(chat)?);
-    }
-
-    let run = required(db.run(run_id)?, "Run not found")?;
-    if run["trigger"] == "chat" || run["status"] != RunStatus::Succeeded {
-        return Err(Error::conflict(
-            "Wait for this mission to finish successfully before continuing in chat.",
-        ));
-    }
-    if run["recoveryPending"] == true || !run["workspaceCleanedAt"].is_null() {
-        return Err(Error::conflict(
-            "This mission's workspace is unavailable. Start a new chat.",
-        ));
-    }
-    let checkpoint = required(
-        RunCheckpoint::load_in(db, run_id)?,
-        "Run checkpoint not found",
-    )?;
-    if checkpoint.prepared().is_none() || text(&run, "sessionId").is_empty() {
-        return Err(Error::conflict(
-            "This mission has no saved conversation available to continue.",
-        ));
-    }
-
-    crate::native::policy::authorize_run_in(db, run_id, origin)?;
-    let run = required(db.run(run_id)?, "Run not found")?;
-    let agent = required(
-        db.agent_snapshot(text(&run["snapshot"]["agent"], "id"))?,
-        "Agent not found",
-    )?;
-    if !crate::service::covers(&agent, &run["snapshot"]["agent"]) {
-        return Err(Error::conflict(
-            "Agent access was reduced. Start a new chat with the updated permissions.",
-        ));
-    }
-
-    let created_at = now();
-    let mut chat = json!({
-        "id": id(),
-        "title": run["snapshot"]["task"]["name"],
-        "agentId": agent["id"],
-        "projectId": run["projectId"],
-        "runId": run_id,
-        "paused": false,
-        "createdAt": created_at,
-        "updatedAt": created_at,
-        "lastActivityAt": created_at,
-    });
-    crate::native::policy::apply(&mut chat, &run);
-    task_projects(&agent, &chat, &db.projects()?)?;
-
-    let chat = db.save_conversation(&serde_json::from_value(chat)?)?;
-    db.change_run(
-        run_id,
-        crate::runs::RunChanges {
-            task_id: Some(chat.id.clone()),
-            trigger: Some(("chat").to_owned()),
-            boundary: Some(json!({
-                "sourceTaskId": run["taskId"],
-                "sourceTaskPrompt": run["snapshot"]["task"]["prompt"],
-                "sourceSessionId": run["sessionId"],
-            })),
-            ..Default::default()
-        },
-    )?;
-    // Work already delegated by this run still returns to its new conversation.
-    let dependents = db.json_rows(
-        "SELECT data FROM run_views AS runs WHERE json_extract(requested_by,'$.runId')=?",
-        [run_id],
-    )?;
-    for dependent in dependents {
-        db.change_run(
-            text(&dependent, "id"),
-            crate::runs::RunChanges {
-                requested_by: Some(Some(cairn_contracts::RunRequester {
-                    run_id: run_id.to_owned(),
-                    chat_id: Some(chat.id.clone()),
-                    task_id: None,
-                })),
-                ..Default::default()
-            },
-        )?;
-    }
-    db.restore_chat_summaries(Some(run_id))?;
-    db.audit(
-        "run.converted_to_chat",
-        &json!({ "runId": run_id, "chatId": chat.id }),
-    )?;
-    Ok(serde_json::to_value(chat)?)
 }

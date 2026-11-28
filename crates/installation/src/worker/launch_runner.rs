@@ -36,7 +36,7 @@ impl Execution<'_> {
         // The environment starts the turn as soon as it accepts it: unless it refuses, its
         // message may be read even if this launch fails before the runner client is recorded
         // (ADR-0091).
-        let turn = launched_turn(self.run, self.provider);
+        let turn = launched_turn(self.run);
         self.checkpoint
             .update(|c| {
                 c.launched_turn_before = c.launched_turn.take();
@@ -112,8 +112,7 @@ impl Execution<'_> {
             let run = crate::plugins::agents::with_instructions(self.s, self.run).await;
             return Ok(run_output::prompt(&run, false));
         }
-        let mut prompt =
-            crate::waits::mission_prompt(self.run).unwrap_or_else(|| RESUME_PROMPT.to_owned());
+        let mut prompt = RESUME_PROMPT.to_owned();
         let Some(restored) = self.run["restoredAt"].as_i64() else {
             return Ok(prompt);
         };
@@ -156,7 +155,11 @@ impl Execution<'_> {
     ) -> Result<Value> {
         let s = self.s;
         let adapter = self.provider.adapter();
-        let chat_execution = self.run["chatExecution"].is_object();
+        if !self.run["chatExecution"].is_object() {
+            return Err(Error::conflict(
+                "This conversation has no saved input to run.",
+            ));
+        }
         private_dir(&self.directory.join("chat-input")).await?;
         if self.run["environmentExpiredAt"].is_number() {
             let run_id = self.id.clone();
@@ -186,45 +189,19 @@ impl Execution<'_> {
         )?;
         chat["runId"] = self.id.clone().into();
         chat["attemptId"] = self.attempt_id.clone().into();
-        if self.provider == Provider::Antigravity && self.run["retry"]["cause"]["startup"] == false
+        if chat["antigravityRetryAuthorized"] == false
+            && chat["antigravityRetryAttempt"].is_number()
         {
-            let retry = &self.run["retry"];
-            let attempt = retry["attempt"].as_u64();
-            let authorized = attempt.is_some()
-                && retry["nextAttemptAt"]
-                    .as_i64()
-                    .is_some_and(|at| at <= now());
-            chat["antigravityRetryAttempt"] = attempt.into();
-            chat["antigravityRetryAuthorized"] = authorized.into();
-            if !authorized && attempt.is_some() {
-                chat["antigravityPreviousAttempt"] = self
-                    .checkpoint
-                    .read(|saved| {
-                        saved
-                            .progress
-                            .as_ref()
-                            .map(|progress| progress.execution_id.clone())
-                    })
-                    .await
-                    .into();
-            }
-        }
-        if !chat_execution {
-            // Scheduled work keeps its own task brief and session.
-            let resume_prompt = resume.map(|_| launch.prompt.as_str());
-            let retry_authorized = chat["antigravityRetryAuthorized"] == true;
-            chat["execution"] = self
+            chat["antigravityPreviousAttempt"] = self
                 .checkpoint
                 .read(|saved| {
-                    scheduled_execution(
-                        self.run,
-                        resume_prompt,
-                        self.provider,
-                        saved,
-                        retry_authorized,
-                    )
+                    saved
+                        .progress
+                        .as_ref()
+                        .map(|progress| progress.execution_id.clone())
                 })
-                .await;
+                .await
+                .into();
         }
         adapter
             .configure_plan(s, &mut chat, self.account.as_ref())
@@ -532,7 +509,7 @@ impl Execution<'_> {
         )
         .await?;
         let identity = recovery::process_identity(child.child.id().unwrap()).await?;
-        let launched_turn = launched_turn(self.run, self.provider);
+        let launched_turn = launched_turn(self.run);
         let observed_turn = crate::waits::execution_id(self.run)
             .as_str()
             .map(str::to_owned);
@@ -1086,42 +1063,37 @@ impl Execution<'_> {
         // cleanup retirement must not replace its recorded failure.
         let report_expiration =
             exit.timed_out || (retained_completion.is_none() && !saved.native_cleanup_failure());
-        s.store.transaction(move |db| {
-            let current = db.run(&id)?.ok_or_else(|| Error::not_found("Run not found"))?;
-            let expired = report_expiration && deadline.is_some_and(|deadline| now() >= deadline);
-            let status = if !current["cancelRequestedAt"].is_null() {
-                RunStatus::Cancelled
-            } else if expired {
-                let message = "Run exceeded its time limit.";
-                patch.error = Some(Some(message.into()));
-                patch.summary = Some(message.into());
-                patch.wakeup = Some(None);
-                RunStatus::Failed
-            } else if status == RunStatus::Succeeded && current["trigger"] != "chat" && current["wakeup"].is_object() {
-                if !has_session {
-                    return Err(Error::conflict("Cannot wait without a saved agent session. Working files were preserved."));
+        s.store
+            .transaction(move |db| {
+                let current = db
+                    .run(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                let expired =
+                    report_expiration && deadline.is_some_and(|deadline| now() >= deadline);
+                let status = if !current["cancelRequestedAt"].is_null() {
+                    RunStatus::Cancelled
+                } else if expired {
+                    let message = "Run exceeded its time limit.";
+                    patch.error = Some(Some(message.into()));
+                    patch.summary = Some(message.into());
+                    patch.wakeup = Some(None);
+                    RunStatus::Failed
+                } else {
+                    status
+                };
+                patch.status = Some(status);
+                if status == RunStatus::Succeeded {
+                    crate::chats::keep_reply_after_compaction(&current, &mut patch)?;
                 }
-                RunStatus::Waiting
-            } else { status };
-            patch.status = Some(status);
-            if status == RunStatus::Succeeded {
-                crate::chats::keep_reply_after_compaction(&current, &mut patch)?;
-            }
-            if status == RunStatus::Waiting {
-                patch.finished_at = Some(None);
-                patch.resume_available = Some(true);
-                patch.boundary.as_mut().unwrap()["outcome"] = Value::Null;
-            } else if current["trigger"] != "chat" {
-                patch.wakeup = Some(None);
-            }
-            db.change_run(&id, patch)?;
-            let details = if status == RunStatus::Failed && expired {
-                Some(json!({ "error": { "message": "Run exceeded its time limit." } }))
-            } else {
-                details.filter(|_| status == RunStatus::Failed)
-            };
-            db.event(&id, &EventKind::Status, status.as_str(), details.as_ref())
-        }).await
+                db.change_run(&id, patch)?;
+                let details = if status == RunStatus::Failed && expired {
+                    Some(json!({ "error": { "message": "Run exceeded its time limit." } }))
+                } else {
+                    details.filter(|_| status == RunStatus::Failed)
+                };
+                db.event(&id, &EventKind::Status, status.as_str(), details.as_ref())
+            })
+            .await
     }
 
     pub(super) fn failure_message(
@@ -1151,13 +1123,8 @@ impl Execution<'_> {
         if !saved.last_error().is_empty() {
             return saved.last_error().to_owned();
         }
-        // A conversation shows what continues it: its returned message or its held queue
-        // (ADR-0091). A mission is resumed.
-        let next = if self.run["trigger"] == "chat" {
-            ""
-        } else {
-            " Resume the conversation to continue."
-        };
+        // A conversation shows what continues it: its returned message or its held queue (ADR-0091).
+        let next = "";
         match exit.code {
             Some(crate::runner::CONTROLLER_FAILED) => {
                 format!(
@@ -1187,52 +1154,13 @@ pub(super) async fn close_output_readers(
 }
 
 /// Records which input the agent may already have received.
-pub(super) fn launched_turn(run: &Value, provider: Provider) -> Option<String> {
-    let mission = if provider == Provider::Antigravity {
-        antigravity_execution_id(run)
-    } else {
-        None
-    };
+pub(super) fn launched_turn(run: &Value) -> Option<String> {
     Some(
         run["chatExecution"]["messageId"]
             .as_str()
-            .or(mission)
             .unwrap_or_default()
             .to_owned(),
     )
-}
-
-pub(super) fn scheduled_execution(
-    run: &Value,
-    resume_prompt: Option<&str>,
-    provider: Provider,
-    saved: &RunCheckpoint,
-    retry_authorized: bool,
-) -> Value {
-    let resume_prompt = if retry_authorized && !run["missionTurnId"].is_string() {
-        // The native session may exist before it has recorded the initial brief.
-        None
-    } else {
-        resume_prompt
-    };
-    let mut execution = run_output::scheduled_turn(run, resume_prompt);
-    if awaiting_antigravity_mission_turn(run, provider, saved) {
-        execution["recovery"] = false.into();
-    }
-    execution
-}
-
-pub(super) fn awaiting_antigravity_mission_turn(
-    run: &Value,
-    provider: Provider,
-    saved: &RunCheckpoint,
-) -> bool {
-    provider == Provider::Antigravity
-        && !run["chatExecution"].is_object()
-        && saved.turn_pending == Some(true)
-        && run["missionTurnId"]
-            .as_str()
-            .is_some_and(|turn| saved.launched_turn.as_deref() != Some(turn))
 }
 
 pub(super) fn has_live_environment(

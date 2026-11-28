@@ -41,9 +41,9 @@ the next save replaces it. A revision that moves between that read and the renam
 more; a second refusal from the installation is reported in the dialog. Public MCP
 and `cairn_installation` agents rename through `rename_chat`, with the same effect.
 
-When an agent reports completion, **Task completed** appears beneath the reply in the conversation. **View evidence** expands the report and supporting details, including clickable commit and workflow links; **Hide evidence** collapses it. Reports without evidence use **View details**. **Blocked** and **Your input needed** show their reason immediately. These are agent-reported outcomes, and a new reply clears the previous report. The composer remains available while reading the evidence.
+When an agent reports completion, **Task completed** appears beneath the reply in the conversation. **View evidence** expands the report and supporting details, including clickable commit and workflow links; **Hide evidence** collapses it. Reports without evidence use **View details**. **Blocked** shows its reason immediately. An agent can ask a question from the same conversation. These are agent-reported outcomes, and a new reply clears the previous report. The composer remains available while reading the evidence.
 
-The conversation reads like the Android app. Your messages sit in a tonal bubble; the agent's replies are plain text under its name. Short conversations sit just above the composer. The agent's actions between two messages collapse into one sentence (for example *Read 2 files, searched once, edited 2 files, ran 2 commands*) with the step count and any failures; expanding it shows a timeline where consecutive reads fold into one step, and each step opens a sheet with its command, output and technical details. While the agent works, the step in progress is left to the working indicator. Deliverables appear as a compact horizontal rail beside the reply. Connection status (**Reconnecting…**, **Updating…**) floats over the conversation instead of moving it. Mission runs use the same reader; see [missions](#missions).
+The conversation reads like the Android app. Your messages sit in a tonal bubble; the agent's replies are plain text under its name. Short conversations sit just above the composer. The agent's actions between two messages collapse into one sentence (for example *Read 2 files, searched once, edited 2 files, ran 2 commands*) with the step count and any failures; expanding it shows a timeline where consecutive reads fold into one step, and each step opens a sheet with its command, output and technical details. While the agent works, the step in progress is left to the working indicator. Deliverables appear as a compact horizontal rail beside the reply. Connection status (**Reconnecting…**, **Updating…**) floats over the conversation instead of moving it.
 
 Routine session updates (connecting, starting, finishing and success) are hidden from chat, including inside tool groups. The working indicator and completion footer provide that status. Failures and unresolved interruptions appear as inline notices; recovered connection retries disappear. Raw lifecycle events remain in run activity for troubleshooting.
 
@@ -106,7 +106,7 @@ The message is stored and displayed exactly as typed. When a reply starts, or a 
 
 ## Execution and recovery
 
-All executions, including missions, use the chat protocol. Codex uses app-server `thread/start`, `thread/resume`, `turn/start` and `turn/steer`, tested against Codex 0.154.0. Steering includes the active `expectedTurnId`. If that turn has already finished, the message remains pending for the next turn.
+All executions use the conversation protocol. Codex uses app-server `thread/start`, `thread/resume`, `turn/start` and `turn/steer`, tested against Codex 0.154.0. Steering includes the active `expectedTurnId`. If that turn has already finished, the message remains pending for the next turn.
 
 `Chats` owns durable user messages and dispatch. `Worker` owns account selection, project locks, timeout budgets, restart fencing and execution. The Rust coding-agent adapters map engine notifications to the shared Activity format. Each active reply has a supervised process; idle chats hold no account or worker slot. Restricted agents run the same adapter inside the isolated environment, with a read-only inbox containing only that run's steering messages.
 
@@ -122,8 +122,7 @@ Validation includes authenticated API boundaries, restricted project access, liv
 
 Codex, Claude Code and OpenCode use the same `cairn_workspace.ask_questions`
 interface. It creates a questionnaire and immediately returns its ID. The agent
-can continue independent work, or report `needs_input` and end its turn while it
-waits. A **Your input** card opens the questionnaire on web; Android presents the
+can continue independent work or end its turn while it waits for the answer. A **Your input** card opens the questionnaire on web; Android presents the
 same choices in its native dialog.
 
 Each question defaults to single choice, or can allow multiple choices with
@@ -133,7 +132,7 @@ replace a missing choice. Recommendations are visible and never preselected.
 Every question needs a response before the group is submitted in one operation.
 
 Questionnaires survive navigation, restarts, turn completion and coding-agent
-changes. A `completed` outcome retires unanswered questionnaires; `needs_input`
+changes. A `completed` outcome retires unanswered questionnaires; `blocked`
 keeps them. Manual withdrawal supplies neither an answer nor approval. Answers
 steer an active turn or start a continuation, including when the ordinary queue
 is paused. Selected option IDs and labels remain separate from the comment in
@@ -219,32 +218,15 @@ The public app must use HTTPS. No notification SaaS account is required: VAPID k
 
 Tests cover common questionnaire creation, native-tool rejection, choices with comments, late answers, replay, restart, API authorization, notification retry and expiry, private push content, device enrollment/revocation, notification routing, and desktop/mobile question screens in Chromium and WebKit. Browser automation replaces the OS permission prompt and push provider; actual delivery to a phone requires opting in on that phone.
 
-## Missions
+## Scheduled conversations
 
-Missions follow the Android app. The list shows one card per mission: its agent and
-project, its name, the schedule in words (for example *Every Monday · 09:00*, or *Paused ·*
-before it) with the next date, and a strip of its last twelve runs in order (green
-succeeded, coral failed, accent running). A mission needing review says why: **Failed**,
-**Interrupted**, **Blocked** or **Your input needed**. The round button runs the mission;
-while it runs, the button shows the elapsed time instead. Running missions come first, then
-those needing review, then the next scheduled ones, then the rest by name.
+In **Rules**, **Schedule an agent** creates a Clock rule. Enter the agent,
+optional project, brief, time zone and a recurring cron or one-time date.
+**Run now** triggers the current version and opens its history. Each start
+opens a fresh conversation with the rule as its origin. From there a person
+can reply, answer a questionnaire or view the files and history.
 
-The title summarises how many missions are active and when the next one runs. **Search
-missions** filters by name and tags; the chips filter **All**, **Scheduled**, **One-off**,
-**Paused** and **Archived**, each with its count. **New mission** opens the editor.
-
-Selecting a card opens the mission: beside the list on wide screens, in a bottom sheet on
-screens up to 900 px. It shows the agent and project, the name and tags, the schedule with
-its time, cron expression, timezone and next two dates, the brief (three lines, expandable),
-and the last ten runs with their success rate. Each run opens its own page. The detail ends with
-**Edit mission**, **Pause schedule** / **Resume schedule** and **Run now**; the actions menu
-duplicates or archives the mission (both paused), opens the latest run, or deletes it. The
-selected mission stays in the URL across reloads.
-
-**Run now** opens the new run, as on Android. A run page opens on its **Conversation**, then
-offers **Result**, **Files** and **Mission brief**. The conversation reads like a chat: the
-agent's actions between messages collapse into one sentence, expand into a timeline and
-open each step's command, output and details in a sheet.
+## Plan turns
 
 During Plan, `ask_questions`, `pending_questions` and `withdraw_question` keep the
 common questionnaire lifecycle available. Withdrawal only retires a pending

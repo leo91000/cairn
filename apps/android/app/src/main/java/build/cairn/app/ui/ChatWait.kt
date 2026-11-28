@@ -106,7 +106,7 @@ internal data class LiveWait(
     val settled: Boolean = true,
     /** Another action is under way, so pausing would be ignored. */
     val busy: Boolean = false,
-    /** Missions cancel their run instead of pausing a conversation. */
+    /** A read-only view shows the wait without pause controls. */
     val canPause: Boolean = true,
     /** Opens a run a grouped wait waits for. */
     val openRun: ((String) -> Unit)? = null,

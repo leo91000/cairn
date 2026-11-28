@@ -287,12 +287,20 @@ pub(super) fn plan(
         RuleAction::Wait { seconds } => evaluator.value(seconds, &items),
         _ => conversation_input(action, &evaluator, &items),
     };
+    let starts_agent = matches!(action, RuleAction::StartAgent { .. });
+    let input_limit = if starts_agent {
+        validation::MAX_START_AGENT_INPUT
+    } else {
+        evaluate::MAX_BYTES
+    };
     match input {
-        Ok(input)
-            if serde_json::to_vec(&input)
-                .map_or(true, |bytes| bytes.len() > evaluate::MAX_BYTES) =>
-        {
-            Plan::Fail(format!("{}: the action input exceeds 256 KiB.", node.id()))
+        Ok(input) if serde_json::to_vec(&input).map_or(true, |bytes| bytes.len() > input_limit) => {
+            let limit = if starts_agent {
+                "the encoded brief limit"
+            } else {
+                "256 KiB"
+            };
+            Plan::Fail(format!("{}: the action input exceeds {limit}.", node.id()))
         }
         Ok(input) => Plan::Act(Box::new(Acting {
             node: node.clone(),
@@ -385,6 +393,16 @@ impl Facts for EngineFacts {
             .block_on(self.store.read(move |db| {
                 conversations::author_triggerings(db, &rule, &author, since, &triggering)
             }))
+            .map_err(|error| error.message)
+    }
+
+    fn rule_conversation_working(&self) -> std::result::Result<bool, String> {
+        let rule = self.rule.clone();
+        self.runtime
+            .block_on(
+                self.store
+                    .read(move |db| conversations::rule_has_working_conversation(db, &rule)),
+            )
             .map_err(|error| error.message)
     }
 }
@@ -554,9 +572,9 @@ pub(super) async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
     // again after each wait. The cursor stays where it is until it does.
     if !row.creator_owner {
         let verified = if triggering.verify {
-            s.missions.verify_membership_since(s, resumed).await
+            s.memberships.verify_membership_since(s, resumed).await
         } else {
-            s.missions
+            s.memberships
                 .verify_membership(s, std::time::Duration::from_secs(60))
                 .await
         };
@@ -1029,6 +1047,15 @@ pub(super) fn details_visible(
     definition: &cairn_contracts::HookRuleDefinition,
     viewer: &super::super::Viewer,
 ) -> Result<bool> {
+    details_visible_for_agent(db, row, &definition.execution_agent_id.to_string(), viewer)
+}
+
+fn details_visible_for_agent(
+    db: &Db<'_>,
+    row: &RuleRow,
+    agent: &str,
+    viewer: &super::super::Viewer,
+) -> Result<bool> {
     let Some(account) = &viewer.account else {
         return Ok(true);
     };
@@ -1039,7 +1066,7 @@ pub(super) fn details_visible(
         account: account.clone(),
         owner: false,
     }
-    .uses_agent(db, &definition.execution_agent_id.to_string())
+    .uses_agent(db, agent)
 }
 
 pub(super) fn view(
@@ -1135,6 +1162,110 @@ pub(super) fn view(
 
 pub(super) const PAGE: usize = 50;
 
+/// The old run remains in its conversation. Project it into rule history without
+/// giving the rule executor a new triggering or changing the rule's budget.
+fn migrated_view(
+    db: &Db<'_>,
+    chat_id: &str,
+    rule: &RuleRow,
+    viewer: &super::super::Viewer,
+    detail: bool,
+) -> Result<cairn_contracts::HookRuleTriggering> {
+    use cairn_contracts::{HookRuleTriggering, HookRuleTriggeringEvent, HookRuleTriggeringStatus};
+    let (created_at, finished_at, status, title, slug, agent, wake_at): (
+        i64,
+        Option<i64>,
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+    ) = db.0.query_row(
+        "SELECT h.created_at,
+               CASE WHEN json_extract(h.origin,'$.legacyRun.status') IS NOT NULL
+                    THEN json_extract(h.origin,'$.legacyRun.finishedAt')
+                    WHEN w.id IS NOT NULL OR p.id IS NOT NULL THEN NULL ELSE r.finished_at END,
+               coalesce(json_extract(h.origin,'$.legacyRun.status'),
+                    CASE WHEN w.id IS NOT NULL THEN 'waiting'
+                         WHEN p.id IS NOT NULL THEN 'queued' ELSE r.status END,'interrupted'),
+               c.title,c.slug,h.agent_id,w.wake_at
+             FROM hook_rule_conversations h JOIN conversations c ON c.id=h.chat_id
+             LEFT JOIN runs r ON r.id=h.run_id
+             LEFT JOIN durable_wakeups w ON w.chat_id=h.chat_id
+                AND c.run_id=r.id
+                AND json_extract(h.origin,'$.legacyRun.status') IS NULL
+             LEFT JOIN records p ON p.id=r.id AND p.kind='environment-expirations'
+                AND json_extract(p.data,'$.continueTurn')=1
+                AND coalesce(json_extract(p.data,'$.cancelled'),0)=0
+             WHERE h.chat_id=?1",
+        [chat_id],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        },
+    )?;
+    let visible = details_visible_for_agent(db, rule, &agent, viewer)?;
+    let triggering_status = match status.as_str() {
+        "queued" | "running" => HookRuleTriggeringStatus::Running,
+        "waiting" => HookRuleTriggeringStatus::Waiting,
+        "succeeded" => HookRuleTriggeringStatus::Completed,
+        "cancelled" => HookRuleTriggeringStatus::Stopped,
+        _ => HookRuleTriggeringStatus::Failed,
+    };
+    let (event, error) = if visible && detail {
+        let (history, brief): (String, Option<String>) = db.0.query_row(
+            "SELECT json_extract(h.origin,'$.legacyRun'),json_extract(r.boundary,'$.sourceTaskPrompt')
+             FROM hook_rule_conversations h LEFT JOIN runs r ON r.id=h.run_id WHERE h.chat_id=?1",
+            [chat_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let history: Json = serde_json::from_str(&history)?;
+        let event = HookRuleTriggeringEvent {
+            hook: "clock".into(),
+            instance_id: None,
+            received_at: created_at,
+            payload: json!({
+                "migratedConversation": {
+                    "id": chat_id,
+                    "slug": slug,
+                    "title": title,
+                    "runStatus": status,
+                    "brief": brief,
+                    "summary": history["summary"],
+                    "outcome": history["outcome"],
+                },
+            }),
+        };
+        (Some(event), history["error"].as_str().map(str::to_owned))
+    } else {
+        (None, None)
+    };
+    Ok(HookRuleTriggering {
+        id: uuid::Uuid::parse_str(chat_id).map_err(Error::internal)?,
+        rule_id: cairn_contracts::HookRuleId(
+            uuid::Uuid::parse_str(&rule.id).map_err(Error::internal)?,
+        ),
+        version: 1,
+        status: triggering_status,
+        actions: 1,
+        created_at,
+        updated_at: finished_at.unwrap_or(created_at),
+        finished_at,
+        resumes_at: wake_at,
+        details_visible: visible,
+        error,
+        event,
+        steps: None,
+    })
+}
+
 /// Details follow the execution agent of the version a triggering ran with.
 pub(super) fn visible_for(
     db: &Db<'_>,
@@ -1171,8 +1302,11 @@ pub(crate) fn list(
     };
     let ids =
         db.0.prepare_cached(
-            "SELECT id,created_at,version FROM hook_rule_triggerings WHERE rule_id=?1 \
-             AND (created_at<?2 OR (created_at=?2 AND id<?3)) \
+            "SELECT id,created_at,version,0 FROM hook_rule_triggerings WHERE rule_id=?1 \
+             AND (created_at,id)<(?2,?3) \
+             UNION ALL \
+             SELECT chat_id AS id,created_at,1,1 FROM hook_rule_conversations WHERE rule_id=?1 \
+             AND (created_at,chat_id)<(?2,?3) AND json_type(origin,'$.legacyRun')='object' \
              ORDER BY created_at DESC,id DESC LIMIT ?4",
         )?
         .query_map(params![rule, before, after_id, PAGE as i64 + 1], |row| {
@@ -1180,16 +1314,21 @@ pub(crate) fn list(
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, u32>(2)?,
+                row.get::<_, bool>(3)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let next_cursor = (ids.len() > PAGE).then(|| {
-        let (id, at, _) = &ids[PAGE - 1];
+        let (id, at, _, _) = &ids[PAGE - 1];
         format!("{at}:{id}")
     });
     let mut visibility = std::collections::BTreeMap::new();
     let mut triggerings = Vec::new();
-    for (id, _, version) in ids.into_iter().take(PAGE) {
+    for (id, _, version, migrated) in ids.into_iter().take(PAGE) {
+        if migrated {
+            triggerings.push(migrated_view(db, &id, &row, viewer, false)?);
+            continue;
+        }
         let visible = match visibility.get(&version) {
             Some(visible) => *visible,
             None => {
@@ -1221,10 +1360,22 @@ pub(crate) fn get(
     id: &str,
     viewer: &super::super::Viewer,
 ) -> Result<cairn_contracts::HookRuleTriggering> {
-    let t = required(db.hook_triggering(id)?, "Triggering not found")?;
-    let row = required(db.hook_rule(&t.rule_id)?, "Rule not found")?;
-    let visible = visible_for(db, &row, t.version, viewer)?;
-    view(db, id, visible, true)
+    if let Some(t) = db.hook_triggering(id)? {
+        let row = required(db.hook_rule(&t.rule_id)?, "Rule not found")?;
+        let visible = visible_for(db, &row, t.version, viewer)?;
+        return view(db, id, visible, true);
+    }
+    let rule: Option<String> =
+        db.0.query_row(
+            "SELECT rule_id FROM hook_rule_conversations
+         WHERE chat_id=?1 AND json_type(origin,'$.legacyRun')='object'",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let rule = required(rule, "Triggering not found")?;
+    let row = required(db.hook_rule(&rule)?, "Rule not found")?;
+    migrated_view(db, id, &row, viewer, true)
 }
 
 #[cfg(test)]

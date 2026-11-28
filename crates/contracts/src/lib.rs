@@ -94,7 +94,7 @@ pub struct QualificationFixture {
 pub const RESUME_RUN_ID: &str = "resume_run";
 pub const RESUME_RUN_SCOPE: &str = "run";
 pub const RESUME_RUN_PATH: &str = "/runs/{runId}/resume";
-pub const RESUME_RUN_DESCRIPTION: &str = "Resume an existing stopped chat run with its saved workspace, session and checkpoint. An optional selection changes only the model, reasoning and speed for this same coding agent; turnId is required and guards against a stale selection. An empty model resolves to the current catalog default unless preserveModel is true, in which case the saved model must also be blank and remains unchanged. For Codex, an empty selection speed inherits the saved request and standard explicitly selects Standard. Mission runs retain their existing resume behavior without model selection. This does not create a new run (unlike run_task or retry).";
+pub const RESUME_RUN_DESCRIPTION: &str = "Resume an existing stopped conversation run with its saved workspace, session and checkpoint. An optional selection changes only the model, reasoning and speed for this same coding agent; turnId is required and guards against a stale selection. An empty model resolves to the current catalog default unless preserveModel is true, in which case the saved model must also be blank and remains unchanged. For Codex, an empty selection speed inherits the saved request and standard explicitly selects Standard. This does not create a new run.";
 
 /// One schema profile for exported files and live MCP discovery.
 pub fn schema_for<T: JsonSchema>(contract: Contract) -> serde_json::Value {
@@ -237,10 +237,6 @@ mod plugin_grants;
 pub use agents::*;
 pub use hook_rules::*;
 pub use plugin_grants::*;
-
-mod missions;
-
-pub use missions::*;
 
 mod mcps;
 

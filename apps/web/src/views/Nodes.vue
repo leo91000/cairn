@@ -875,7 +875,7 @@ function revoke() {
       <div class="node-form">
         <p>{{ revoking.name }} will immediately lose access to the master, and agents lose their permission to use it.</p>
         <p>This conversation's working files will be lost. Its history, attachments and artifacts are kept. This applies to every conversation on this node.</p>
-        <p>Their environments expire. The next message starts an empty environment on an authorized node; active missions resume automatically. Conversations fixed to this node wait until their placement changes.</p>
+        <p>Their environments expire. The next message starts an empty environment on an authorized node. Conversations fixed to this node wait until their placement changes.</p>
         <p>Files stored on the machine are not deleted. To uninstall it, run on the machine:</p>
         <code class="block break-all select-all">{{ uninstallCommands[nodeBackend(revoking)] }}</code>
         <p class="text-sm text-muted">
@@ -910,7 +910,7 @@ function revoke() {
         </p>
         <p>Conversations fixed to or preferring the previous node return to automatic placement. Conversations keep their execution backend: their next environments start on other {{ backendNames[nodeBackend(retiring.previous)] }} nodes.</p>
         <p>This conversation's working files will be lost. Its history, attachments and artifacts are kept. This applies to every conversation on the previous node.</p>
-        <p>Their environments expire. The next message starts an empty environment; active missions resume automatically.</p>
+        <p>Their environments expire. The next message starts an empty environment.</p>
         <p>Then uninstall the previous runtime on the machine:</p>
         <code class="block break-all select-all" aria-label="Previous runtime uninstall command">{{ uninstallCommands[nodeBackend(retiring.previous)] }}</code>
         <p class="text-sm text-muted">

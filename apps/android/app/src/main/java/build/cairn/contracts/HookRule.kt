@@ -15,6 +15,8 @@ data class HookRule(
     val definition: HookRuleDefinition,
     val id: String,
     val nativeAuthority: Boolean,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val nextRun: Long? = null,
     val revision: String,
     val source: String,
     val updatedAt: Long,
@@ -25,8 +27,10 @@ data class HookRule(
         conversationId?.let { java.util.UUID.fromString(it) }
         require(createdAt in 0L..9007199254740991L)
         java.util.UUID.fromString(id)
+        nextRun?.let { require(it in 0L..9007199254740991L) }
         require(
-            Regex("^(app|publicMcp|installationAgent|duplicate|template)\$").containsMatchIn(source)
+            Regex("^(app|publicMcp|installationAgent|duplicate|template|migration)\$")
+                .containsMatchIn(source)
         )
         require(updatedAt in 0L..9007199254740991L)
         require(version >= 0L)

@@ -4,7 +4,7 @@ use common::run_fixture::*;
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
 use common::AgentFixture;
-use common::MissionFixture;
+use common::ChatRunFixture;
 use common::ProjectFixture;
 
 mod common;
@@ -2882,14 +2882,10 @@ async fn plugin_management_is_owner_only_and_mcp_never_returns_secret_reads() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let task = s
-        .task_fixture(
-            json!({ "name": "Inspect", "agentId": MAIN_AGENT_ID, "prompt": "Inspect" }),
-            None,
-        )
+    let (_, run) = s
+        .chat_run_fixture(MAIN_AGENT_ID, None, "Inspect")
         .await
         .unwrap();
-    let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
     s.store
         .change_run(
             text(&run, "id"),

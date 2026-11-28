@@ -28,7 +28,7 @@ pub(crate) const NODE_OPERATIONS: &[NodeOperation] = &[
     NodeOperation {
         name: "move_to_node",
         scope: "run",
-        description: "Change the conversation to an authorized node, including one of the other execution backend. The working environment expires: its working files are lost; the conversation history, attachments and artifacts are kept. Requires discardWorkingFiles: true; a request without it is refused with that warning. The running turn stops and open questions close; queued messages, scheduled waits and an active mission continue on the destination, where the new environment waits for capacity while the node stays authorized. Returns an operation id; poll get_node_move_operation in separate tool calls. Validation failure leaves the current environment unchanged; once expired, files cannot be recovered.",
+        description: "Change the conversation to an authorized node, including one of the other execution backend. The working environment expires: its working files are lost; the conversation history, attachments and artifacts are kept. Requires discardWorkingFiles: true; a request without it is refused with that warning. The running turn stops and open questions close; queued messages and scheduled waits continue on the destination, where the new environment waits for capacity while the node stays authorized. Returns an operation id; poll get_node_move_operation in separate tool calls. Validation failure leaves the current environment unchanged; once expired, files cannot be recovered.",
     },
     NodeOperation {
         name: "get_node_move_operation",

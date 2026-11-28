@@ -1,6 +1,6 @@
 use crate::common::run_fixture::DbRunFixture;
 use cairn_contracts::EventKind;
-use common::MissionFixture;
+use common::ChatRunFixture;
 
 mod common;
 
@@ -17,6 +17,7 @@ use cairn_installation::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -28,6 +29,7 @@ struct Fixture {
     service: Arc<Service>,
     url: String,
     token: String,
+    chat: String,
     run: String,
     server: tokio::task::JoinHandle<()>,
 }
@@ -41,15 +43,8 @@ impl Fixture {
         };
         let service = Service::new(config).await.unwrap();
         let token = text(&common::relay_fixture::context(&service).await, "value").to_owned();
-        let task = service
-            .task_fixture(
-                json!({ "name": "Live test", "prompt": "Test", "agentId": MAIN_AGENT_ID }),
-                None,
-            )
-            .await
-            .unwrap();
-        let run = service
-            .enqueue(text(&task, "id"), "manual", None)
+        let (chat, run) = service
+            .chat_run_fixture(MAIN_AGENT_ID, None, "Test")
             .await
             .unwrap();
         let (url, server) = serve(service.clone()).await;
@@ -58,9 +53,18 @@ impl Fixture {
             service,
             url,
             token,
+            chat: text(&chat, "id").into(),
             run: text(&run, "id").into(),
             server,
         }
+    }
+
+    async fn acknowledge_prompt(&self) {
+        let run = self.service.store.run(&self.run).await.unwrap();
+        self.service
+            .chat_acknowledge(&self.run, text(&run["chatExecution"], "messageId"))
+            .await
+            .unwrap();
     }
 
     async fn open(&self, after: i64) -> Stream {
@@ -168,6 +172,7 @@ impl Drop for Fixture {
 #[tokio::test]
 async fn many_updated_cards_are_delivered_in_bounded_batches_after_reconnect() {
     let f = Fixture::new().await;
+    f.acknowledge_prompt().await;
     let mut initial = f.open(0).await;
     let (_, first) = initial.batch().await;
     let history = first["history"].as_str().unwrap().to_owned();
@@ -234,6 +239,7 @@ async fn many_updated_cards_are_delivered_in_bounded_batches_after_reconnect() {
 #[tokio::test]
 async fn older_history_pages_bound_hydrated_cards_without_losing_positions() {
     let f = Fixture::new().await;
+    f.acknowledge_prompt().await;
     let mut initial = f.open(0).await;
     let (_, first) = initial.batch().await;
     let history = first["history"].as_str().unwrap().to_owned();
@@ -482,25 +488,8 @@ async fn ids(f: &Fixture) -> Vec<i64> {
 #[tokio::test]
 async fn cached_resume_drains_backlog_without_waiting_between_live_batches() {
     let f = Fixture::new().await;
-    f.service
-        .store
-        .change_run(
-            &f.run,
-            cairn_installation::runs::RunChanges {
-                trigger: Some(("chat").to_owned()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let mut chat = f.service.chat_create(json!({})).await.unwrap();
-    chat["runId"] = f.run.clone().into();
-    let path = format!("/api/chats/{}/stream", text(&chat, "id"));
-    f.service
-        .store
-        .save_conversation_boundary(chat)
-        .await
-        .unwrap();
+    f.acknowledge_prompt().await;
+    let path = format!("/api/chats/{}/stream", f.chat);
     let mut initial = f.open_path(&format!("{path}?window=1"), None).await;
     let (cursor, batch) = initial.batch().await;
     let history = batch["history"].as_str().unwrap();
@@ -561,26 +550,9 @@ async fn cached_resume_drains_backlog_without_waiting_between_live_batches() {
 #[tokio::test]
 async fn following_viewer_resumes_a_long_backlog_on_the_recent_window() {
     let f = Fixture::new().await;
-    f.service
-        .store
-        .change_run(
-            &f.run,
-            cairn_installation::runs::RunChanges {
-                trigger: Some(("chat").to_owned()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let mut chat = f.service.chat_create(json!({})).await.unwrap();
-    chat["runId"] = f.run.clone().into();
-    let chat_id = text(&chat, "id").to_owned();
+    f.acknowledge_prompt().await;
+    let chat_id = &f.chat;
     let path = format!("/api/chats/{chat_id}/stream");
-    f.service
-        .store
-        .save_conversation_boundary(chat)
-        .await
-        .unwrap();
     let mut initial = f.open_path(&format!("{path}?window=1"), None).await;
     let (cursor, batch) = initial.batch().await;
     let history = batch["history"].as_str().unwrap().to_owned();
@@ -668,25 +640,8 @@ async fn following_viewer_resumes_a_long_backlog_on_the_recent_window() {
 #[tokio::test]
 async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
     let f = Fixture::new().await;
-    f.service
-        .store
-        .change_run(
-            &f.run,
-            cairn_installation::runs::RunChanges {
-                trigger: Some(("chat").to_owned()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let mut chat = f.service.chat_create(json!({})).await.unwrap();
-    chat["runId"] = f.run.clone().into();
-    let path = format!("/api/chats/{}/stream", text(&chat, "id"));
-    f.service
-        .store
-        .save_conversation_boundary(chat)
-        .await
-        .unwrap();
+    f.acknowledge_prompt().await;
+    let path = format!("/api/chats/{}/stream", f.chat);
     let mut initial = f.open_path(&format!("{path}?window=1"), None).await;
     let (cursor, batch) = initial.batch().await;
     let history = batch["history"].as_str().unwrap().to_owned();
@@ -907,7 +862,10 @@ async fn compact_streams_send_the_list_once_then_only_changed_conversations() {
         )
         .await;
     let (_, batch) = conversation.batch().await;
-    assert_eq!(ids(&batch["state"]["chats"]), [newer_id, older_id]);
+    assert_eq!(
+        ids(&batch["state"]["chats"]),
+        [newer_id, older_id, f.chat.as_str()]
+    );
     // The chat's run is the stream's own `run`, sent once.
     assert_eq!(batch["state"]["chat"]["id"], older["id"]);
     assert!(batch["state"]["chat"].get("run").is_none());
@@ -921,7 +879,10 @@ async fn compact_streams_send_the_list_once_then_only_changed_conversations() {
 
     let mut list = f.open_path("/api/chats/stream?compact=1", None).await;
     let (_, batch) = list.batch().await;
-    assert_eq!(ids(&batch["state"]["chats"]), [newer_id, older_id]);
+    assert_eq!(
+        ids(&batch["state"]["chats"]),
+        [newer_id, older_id, f.chat.as_str()]
+    );
 
     // A conversation that changes in place is sent alone, without the order.
     f.service.chat_pause(newer_id, true).await.unwrap();
@@ -944,7 +905,7 @@ async fn compact_streams_send_the_list_once_then_only_changed_conversations() {
             .iter()
             .map(|id| id.as_str().unwrap())
             .collect();
-        assert_eq!(order, [older_id, newer_id]);
+        assert_eq!(order, [older_id, newer_id, f.chat.as_str()]);
     }
 
     // A trashed conversation leaves the list; other saved conversations stay valid.
@@ -957,7 +918,7 @@ async fn compact_streams_send_the_list_once_then_only_changed_conversations() {
     }
     let mut reopened = f.open_path("/api/chats/stream?compact=1", None).await;
     let (_, batch) = reopened.batch().await;
-    assert_eq!(ids(&batch["state"]["chats"]), [older_id]);
+    assert_eq!(ids(&batch["state"]["chats"]), [older_id, f.chat.as_str()]);
     assert_eq!(batch["state"]["historyRevision"], revision);
     // Clients without list changes still drop every saved conversation.
     let mut legacy = f.open_path("/api/chats/stream", None).await;
@@ -1188,21 +1149,29 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         .await;
     let (_, first) = stream.batch().await;
     assert!(first["state"]["run"].is_null());
-    let mut attached = chat.clone();
-    attached["runId"] = f.run.clone().into();
     f.service
-        .store
-        .save_conversation_boundary(attached)
+        .chat_send(
+            chat_id,
+            json!({ "id": id(), "text": "Start the conversation" }),
+        )
         .await
         .unwrap();
-    let (_, batch) = stream.batch().await;
-    assert_eq!(batch["state"]["run"]["id"], f.run);
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
+    let run = f.service.chat_detail(chat_id).await.unwrap()["runId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut batch = stream.batch().await.1;
+    while batch["state"]["run"].is_null() {
+        batch = stream.batch().await.1;
+    }
+    assert_eq!(batch["state"]["run"]["id"], run);
     assert_eq!(batch["reset"], true);
     f.service.chat_pause(chat_id, true).await.unwrap();
     assert_eq!(stream.batch().await.1["state"]["chat"]["paused"], true);
     // Mutations of metadata have no event id of their own and still reach every client.
     let question = serde_json::from_value(json!({
-        "id": "question", "chatId": chat_id, "runId": f.run,
+        "id": "question", "chatId": chat_id, "runId": run,
         "source": "cairn", "blocking": false, "status": "pending",
         "fields": [{"id":"scope","title":"Pending question"}],
     }))
@@ -1217,7 +1186,7 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         1
     );
     let artifact = common::deliverable(
-        &f.run,
+        &run,
         "file",
         &json!({
             "previewStatus": "pending",
@@ -1249,6 +1218,7 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
 #[tokio::test]
 async fn live_delivery_latency_under_repeated_writes() {
     let f = Fixture::new().await;
+    f.acknowledge_prompt().await;
     let mut stream = f.open(0).await;
     let initial = *ids(&f).await.last().unwrap();
     stream.through(initial).await;
@@ -1629,27 +1599,19 @@ async fn compressed_history_bounds_decoded_json_and_advances_past_oversized_even
 #[tokio::test]
 async fn paginated_chat_metadata_keeps_pending_messages_without_replaying_delivered_text() {
     let f = Fixture::new().await;
-    let mut chat = f.service.chat_create(json!({})).await.unwrap();
-    chat["runId"] = f.run.clone().into();
-    let id = text(&chat, "id").to_owned();
-    f.service
-        .store
-        .save_conversation_boundary(chat)
-        .await
-        .unwrap();
-    let chat_id = id.clone();
+    f.acknowledge_prompt().await;
+    let id = &f.chat;
+    let chat_id = f.chat.clone();
     f.service
         .store
         .transaction(move |db| {
-            for status in ["delivered", "queued"] {
-                db.put_message(&json!({
-                    "id": status,
-                    "chatId": chat_id,
-                    "createdAt": 1,
-                    "status": status,
-                    "text": "A message",
-                }))?;
-            }
+            db.put_message(&json!({
+                "id": "queued",
+                "chatId": chat_id,
+                "createdAt": 1,
+                "status": "queued",
+                "text": "A message",
+            }))?;
             Ok(())
         })
         .await
@@ -2097,6 +2059,7 @@ async fn profile_conversation_opening() {
 async fn typed_history_get_keeps_native_history_readable_to_members_after_agent_deletion() {
     use common::run_fixture::RunFixture;
     let fixture = Fixture::new().await;
+    fixture.acknowledge_prompt().await;
     let missing_agent = id();
     fixture
         .service
@@ -2136,14 +2099,8 @@ async fn typed_history_get_keeps_native_history_readable_to_members_after_agent_
 async fn conversation_streams_mask_queued_and_sending_private_answers() {
     use cairn_installation::chats::MessageStatus;
     let f = Fixture::new().await;
-    let mut chat = f.service.chat_create(json!({})).await.unwrap();
-    let chat_id = text(&chat, "id").to_owned();
-    chat["runId"] = f.run.clone().into();
-    f.service
-        .store
-        .save_conversation_boundary(chat)
-        .await
-        .unwrap();
+    f.acknowledge_prompt().await;
+    let chat_id = f.chat.clone();
     let question_id = "a".repeat(64);
     f.service
         .question_receive(
@@ -2188,9 +2145,13 @@ async fn conversation_streams_mask_queued_and_sending_private_answers() {
                 "{batch}"
             );
             let messages = batch["state"]["chat"]["messages"].as_array().unwrap();
-            assert_eq!(messages.len(), 1);
-            assert_eq!(messages[0]["text"], "Private answer");
-            assert!(messages[0].get("answers").is_none());
+            assert_eq!(messages.len(), if window { 1 } else { 2 });
+            let reply = messages
+                .iter()
+                .find(|message| message["id"] == message_id)
+                .unwrap();
+            assert_eq!(reply["text"], "Private answer");
+            assert!(reply.get("answers").is_none());
         }
     }
 }
@@ -2353,10 +2314,9 @@ async fn member_can_hydrate_native_proposals_without_execution_authority_or_reta
             )
             .await
             .unwrap();
-        let mut chat = f.service.chat_create(json!({})).await.unwrap();
-        let chat_id = text(&chat, "id").to_owned();
+        let chat_id = f.chat.clone();
+        let mut chat = f.service.conversation_boundary(&chat_id).await.unwrap();
         chat["agentId"] = agent_id.clone().into();
-        chat["runId"] = f.run.clone().into();
         f.service
             .store
             .save_conversation_boundary(chat)

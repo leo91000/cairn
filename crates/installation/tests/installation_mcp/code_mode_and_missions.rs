@@ -118,7 +118,7 @@ async fn plan_turns_only_read_the_installation() {
         "get_chat",
         "create_chat",
         "send_chat_message",
-        "create_task",
+        "create_hook_rule",
         "update_agent",
         // These operations are read-only in effect, but require the `manage`
         // scope and must not enter the installation surface during Plan.
@@ -134,7 +134,7 @@ async fn plan_turns_only_read_the_installation() {
     for changing in [
         "create_chat",
         "send_chat_message",
-        "create_task",
+        "create_hook_rule",
         "update_agent",
         "list_source_projects",
         "get_skill_source_status",
@@ -183,7 +183,9 @@ async fn plan_turns_only_read_the_installation() {
         );
     }
 
-    assert!(s.chat_list().await.unwrap().is_empty());
+    let chats = s.chat_list().await.unwrap();
+    assert_eq!(chats.len(), 1);
+    assert_eq!(chats[0]["runId"], run["id"]);
 }
 
 #[tokio::test]
@@ -631,14 +633,12 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
 }
 
 #[tokio::test]
-async fn waiting_missions_are_visible_and_cancellable_through_both_installation_interfaces() {
+async fn scheduled_conversation_wakeups_are_visible_and_cancellable_through_both_tools() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
-    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
-        .as_str()
-        .unwrap();
+    let agent_token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
     let owner_token = common::relay_fixture::grant(&s, &["read", "manage", "run"]).await;
     let app = common::relay_fixture::router(s.clone()).await.unwrap();
     for (endpoint, token) in [
@@ -646,63 +646,100 @@ async fn waiting_missions_are_visible_and_cancellable_through_both_installation_
         ("/mcp-installation", agent_token),
     ] {
         let (run, _) = active_run(&s, &main).await;
-        let run_id = run["id"].as_str().unwrap();
-        let wakeup = json!({
-            "id": cairn_installation::config::id(),
-            "messageId": null,
-            "reason": "Mission CI",
-            "seconds": 60,
-            "createdAt": 1,
-            "wakeAt": 60_001,
-        });
+        let run_id = text(&run, "id");
+        let chat_id = text(&run, "taskId");
+        let message = cairn_installation::config::id();
+        s.store
+            .update_run_boundary(
+                run_id,
+                json!({
+                    "chatExecution": {
+                        "messageId": message,
+                        "text": "Check CI",
+                        "attachments": [],
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+        let run = s.store.run(run_id).await.unwrap();
+        let target_configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+        let target_token = text(&target_configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+        let reason = "Check for the CI result";
+        let wait = cairn_installation::chats::wait_for::schedule(
+            &s,
+            target_token,
+            &json!({
+                "conditions": [{ "type": "delay", "seconds": 60 }],
+                "reason": reason,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(wait["deferred"], true);
+        let wakeup = &wait["wakeup"];
+        assert_eq!(wakeup["messageId"], message);
         s.store
             .change_run(
                 run_id,
                 cairn_installation::runs::RunChanges {
-                    status: Some(cairn_contracts::RunStatus::Waiting),
-                    wakeup: Some(Some(serde_json::from_value(wakeup.clone()).unwrap())),
+                    status: Some(RunStatus::Succeeded),
                     ..Default::default()
                 },
             )
             .await
             .unwrap();
+        assert_eq!(&s.chat_detail(chat_id).await.unwrap()["wakeup"], wakeup);
+
+        let args = json!({ "chatId": chat_id });
         let (status, fetched) =
+            node_management_call(&app, endpoint, token, "get_chat", args.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{fetched}");
+        assert_eq!(result(&fetched)["chat"]["runId"], run_id);
+        assert_eq!(result(&fetched)["chat"]["status"], "succeeded");
+        assert_eq!(
+            result(&fetched)["chat"]["wakeup"],
+            json!({
+                "id": wakeup["id"],
+                "messageId": message,
+                "reason": reason,
+                "seconds": wakeup["seconds"],
+                "createdAt": wakeup["createdAt"],
+                "wakeAt": wakeup["wakeAt"],
+            })
+        );
+        let (_, history) =
             node_management_call(&app, endpoint, token, "get_run", json!({ "runId": run_id }))
                 .await;
-        assert_eq!(status, StatusCode::OK, "{fetched}");
-        assert_eq!(
-            result(&fetched)["run"]["run"]["status"],
-            "waiting",
-            "{fetched}"
-        );
-        assert_eq!(result(&fetched)["run"]["run"]["wakeup"], wakeup);
-        let (_, listed) = node_management_call(
-            &app,
-            endpoint,
-            token,
-            "list_runs",
-            json!({ "status": "waiting" }),
-        )
-        .await;
+        assert_eq!(&result(&history)["run"]["run"]["wakeup"], wakeup);
         assert!(
-            result(&listed)
+            result(&history)["events"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|item| item["id"] == run_id && item["wakeup"] == wakeup)
+                .map(|entry| &entry["event"])
+                .any(|event| {
+                    event["type"] == "chat.wait"
+                        && event["text"] == reason
+                        && event["payload"]["id"] == wakeup["id"]
+                }),
+            "{history}"
         );
-        let (_, cancelled) = node_management_call(
-            &app,
-            endpoint,
-            token,
-            "cancel_run",
-            json!({ "runId": run_id }),
-        )
-        .await;
-        assert_eq!(result(&cancelled)["cancelled"], true);
-        let final_run = s.store.run(run_id).await.unwrap();
-        assert_eq!(final_run["status"], "cancelled");
-        assert!(final_run["wakeup"].is_null());
+        let (_, listed) =
+            node_management_call(&app, endpoint, token, "list_chats", json!({})).await;
+        assert!(
+            result(&listed)["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == chat_id && item["runId"] == run_id)
+        );
+        let (_, stopped) = node_management_call(&app, endpoint, token, "stop_chat", args).await;
+        assert_eq!(result(&stopped)["paused"], true);
+        assert!(result(&stopped)["wakeup"].is_null());
+        let final_chat = s.chat_detail(chat_id).await.unwrap();
+        assert_eq!(final_chat["run"]["status"], RunStatus::Succeeded);
+        assert!(final_chat["wakeup"].is_null());
     }
 }
 
@@ -799,10 +836,7 @@ async fn chat_compaction_matches_public_mcp_and_installation_tools() {
             .save_checkpoint_boundary(run_id, json!({ "launched": true, "completed": true }))
             .await
             .unwrap();
-        let mut chat = s.chat_create(json!({})).await.unwrap();
-        chat["runId"] = target["id"].clone();
-        let chat_id = chat["id"].as_str().unwrap().to_owned();
-        s.store.save_conversation_boundary(chat).await.unwrap();
+        let chat_id = text(&target, "taskId").to_owned();
         let invoke = |name, args| {
             let s = s.clone();
             let configuration = configuration.clone();
@@ -900,7 +934,7 @@ async fn resume_run_is_one_capability_on_http_public_and_installation() {
     common::relay_fixture::allow_member(&s, "other-member", MAIN_AGENT_ID).await;
     let agent_token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
     for surface in ["owner", "member", "public", "installation"] {
-        let before = saved_mission(&s, &main).await;
+        let before = saved_run(&s, &main).await;
         let id = text(&before, "id");
         let (_, denied) =
             node_management_call(&app, "/mcp", &read, "resume_run", json!({ "runId": id })).await;
@@ -1119,7 +1153,7 @@ async fn concurrent_resume_run_publishes_once_and_a_revoked_grant_cannot_resume(
     let s = service(&root).await;
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
-    let target = saved_mission(&s, &main).await;
+    let target = saved_run(&s, &main).await;
     let id = text(&target, "id");
     let args = json!({ "runId": id });
     let (one, two) = tokio::join!(

@@ -73,6 +73,44 @@ impl Change {
         }
     }
 
+    async fn due_wakeup(&self, reason: &str) -> Value {
+        let mut chat = self
+            .owner
+            .service
+            .conversation_boundary(&self.chat)
+            .await
+            .unwrap();
+        let run = self.owner.run(&self.run).await;
+        let time = now();
+        let wakeup = json!({
+            "id": id(),
+            "messageId": run["chatExecution"]["messageId"],
+            "reason": reason,
+            "seconds": 1,
+            "createdAt": time - 2000,
+            "wakeAt": time - 1000,
+        });
+        chat["wakeup"] = wakeup.clone();
+        self.owner.save_conversation_boundary(chat).await;
+        wakeup
+    }
+
+    async fn detail(&self) -> Value {
+        self.owner.service.chat_detail(&self.chat).await.unwrap()
+    }
+
+    async fn tick(&self) {
+        self.owner.service.chat_tick(&HashSet::new()).await.unwrap();
+    }
+
+    async fn stop(&self) {
+        let (status, stopped) = self
+            .owner
+            .send("POST", &format!("/api/chats/{}/stop", self.chat), json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{stopped}");
+    }
+
     async fn move_to(&self, body: Value) -> (StatusCode, Value) {
         self.owner
             .send(
@@ -169,7 +207,6 @@ async fn agent_move(owner: &Owner, run: &str, args: Value) -> Value {
     let current = owner.run(run).await;
     let message = current["chatExecution"]["messageId"]
         .as_str()
-        .or(current["missionTurnId"].as_str())
         .map(str::to_owned);
     let grant = cairn_installation::mcps::record::RunGrant {
         run_id: run.to_owned(),
@@ -628,43 +665,54 @@ async fn an_agent_changing_its_own_node_continues_there_in_a_fresh_environment()
 }
 
 #[tokio::test]
-async fn an_active_mission_resumes_on_the_destination() {
+async fn a_live_self_move_requeues_the_same_conversation_turn_after_detachment() {
     let change = Change::new(RunStatus::Running).await;
+    let original = change.owner.run(&change.run).await;
+    let token = CancellationToken::new();
     change
         .owner
         .service
-        .store
-        .transaction({
-            let (run, chat) = (change.run.clone(), change.chat.clone());
-            move |db| {
-                db.0.execute("DELETE FROM conversations WHERE id=?", [chat])?;
-                db.change_run(
-                    &run,
-                    cairn_installation::runs::RunChanges {
-                        trigger: Some("manual".into()),
-                        ..Default::default()
-                    },
-                )?;
-                db.update_run_boundary(&run, &json!({ "chatExecution": null }))
-            }
-        })
+        .worker
+        .active
+        .lock()
+        .await
+        .insert(change.run.clone(), token);
+    let moved = agent_move(
+        &change.owner,
+        &change.run,
+        json!({ "nodeId": change.destination, "discardWorkingFiles": true }),
+    )
+    .await;
+    assert_ne!(moved["isError"], true, "{moved}");
+    assert!(change.admission_blocked().await);
+    change
+        .owner
+        .service
+        .worker
+        .active
+        .lock()
+        .await
+        .remove(&change.run);
+    change
+        .owner
+        .service
+        .detach_stopped_environments()
         .await
         .unwrap();
-    let (status, moved) = change
-        .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
-        .await;
-    assert_eq!(status, StatusCode::OK, "{moved}");
+
     let resumed = change.owner.run(&change.run).await;
+    assert_eq!(resumed["status"], RunStatus::Queued);
     assert_eq!(
-        resumed["status"],
-        RunStatus::Queued,
-        "error={}, summary={}",
-        resumed["error"],
-        resumed["summary"]
+        resumed["chatExecution"]["messageId"],
+        original["chatExecution"]["messageId"]
+    );
+    assert_eq!(
+        resumed["chatExecution"]["text"],
+        original["chatExecution"]["text"]
     );
     assert_eq!(resumed["targetNodeId"], change.destination);
-    assert!(resumed["sessionHandoff"].is_string());
     assert_eq!(resumed["environmentExpirationCause"], "node-change");
+    assert!(resumed["sessionId"].is_null());
     assert!(resumed["nodeId"].is_null());
 }
 
@@ -850,104 +898,56 @@ async fn a_retired_disk_blocks_only_readmission_to_its_own_node_until_deleted() 
 }
 
 #[tokio::test]
-async fn a_waiting_mission_keeps_its_wakeup_when_changing_node() {
-    let change = Change::new(RunStatus::Waiting).await;
-    let wakeup = json!({ "id": id(), "messageId": "mission-turn", "seconds": 1, "createdAt": now() - 2000, "wakeAt": now() - 1000, "reason": "Wait for the scheduled continuation" });
-    let (run, chat, retained) = (change.run.clone(), change.chat.clone(), wakeup.clone());
+async fn an_idle_conversation_keeps_its_wakeup_when_changing_node() {
+    let change = Change::new(RunStatus::Succeeded).await;
     change
         .owner
         .service
         .store
-        .transaction(move |db| {
-            db.0.execute("DELETE FROM conversations WHERE id=?", [chat])?;
-            db.change_run(
-                &run,
-                cairn_installation::runs::RunChanges {
-                    trigger: Some("manual".into()),
-                    wakeup: Some(Some(serde_json::from_value(retained)?)),
-                    ..Default::default()
-                },
-            )?;
-            db.update_run_boundary(
-                &run,
-                &json!({ "chatExecution": null, "missionTurnId": "mission-turn" }),
-            )?;
-            db.save_checkpoint_boundary(&run, &json!({ "completed": true, "remainingMs": 123000 }))
-        })
+        .event(
+            &change.run,
+            &cairn_contracts::EventKind::ChatUser,
+            "Keep working",
+            None,
+        )
         .await
         .unwrap();
+    let wakeup = change
+        .due_wakeup("Wait for the scheduled continuation")
+        .await;
     let (status, moved) = change
         .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
         .await;
     assert_eq!(status, StatusCode::OK, "{moved}");
-    let waiting = change.owner.run(&change.run).await;
-    assert_eq!(waiting["status"], RunStatus::Waiting);
+    let waiting = change.detail().await;
+    assert_eq!(waiting["run"]["status"], RunStatus::Succeeded);
     assert_eq!(waiting["wakeup"], wakeup);
-    assert_eq!(waiting["targetNodeId"], change.destination);
+    assert_eq!(waiting["run"]["targetNodeId"], change.destination);
     assert_eq!(waiting["environmentExpirationCause"], "node-change");
-    let checkpoint = change
-        .owner
-        .service
-        .store
-        .checkpoint_boundary(&change.run)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(checkpoint["remainingMs"], 123000);
-    let prompt = cairn_installation::run_output::prompt(&waiting, false);
-    assert!(prompt.contains("when the conversation changed node"));
-    assert!(prompt.contains("<previous_conversation>"));
-    change
-        .owner
-        .service
-        .worker
-        .tick(&change.owner.service)
-        .await
-        .unwrap();
-    let resumed = change.owner.run(&change.run).await;
-    assert_eq!(
-        resumed["status"],
-        RunStatus::Queued,
-        "error={}, summary={}",
-        resumed["error"],
-        resumed["summary"]
-    );
+
+    change.tick().await;
+    let resumed = change.detail().await;
+    let run = &resumed["run"];
+    assert_eq!(run["status"], RunStatus::Queued);
+    assert_eq!(run["targetNodeId"], change.destination);
+    assert!(run["sessionId"].is_null());
+    assert_eq!(run["chatExecution"]["messageId"], wakeup["id"]);
+    assert!(text(&run["chatExecution"], "text").contains("Wait for the scheduled continuation"));
     assert!(resumed["wakeup"].is_null());
-    let checkpoint = change
-        .owner
-        .service
-        .store
-        .checkpoint_boundary(&change.run)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(checkpoint["remainingMs"], 123000);
+
+    let prompt = cairn_installation::chats::execution_text(&json!({
+        "execution": run["chatExecution"],
+        "environmentExpiredAt": run["environmentExpiredAt"],
+        "environmentExpirationCause": run["environmentExpirationCause"],
+    }));
+    assert!(prompt.contains("when the conversation changed node"));
+    assert!(prompt.contains("<previous_conversation>\nUser:\nKeep working"));
 }
 
 #[tokio::test]
-async fn explicit_stop_wins_over_a_pending_self_move_or_mission_continuation() {
-    for mission in [false, true] {
+async fn explicit_stop_wins_over_a_pending_move() {
+    for self_move in [false, true] {
         let change = Change::new(RunStatus::Running).await;
-        if mission {
-            let (run, chat) = (change.run.clone(), change.chat.clone());
-            change
-                .owner
-                .service
-                .store
-                .transaction(move |db| {
-                    db.0.execute("DELETE FROM conversations WHERE id=?", [chat])?;
-                    db.change_run(
-                        &run,
-                        cairn_installation::runs::RunChanges {
-                            trigger: Some("manual".into()),
-                            ..Default::default()
-                        },
-                    )?;
-                    db.update_run_boundary(&run, &json!({ "chatExecution": null }))
-                })
-                .await
-                .unwrap();
-        }
         let token = CancellationToken::new();
         change
             .owner
@@ -957,19 +957,7 @@ async fn explicit_stop_wins_over_a_pending_self_move_or_mission_continuation() {
             .lock()
             .await
             .insert(change.run.clone(), token);
-        if mission {
-            let (status, moved) = change
-                .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
-                .await;
-            assert_eq!(status, StatusCode::OK, "{moved}");
-            change
-                .owner
-                .service
-                .worker
-                .cancel(&change.owner.service, &change.run)
-                .await
-                .unwrap();
-        } else {
+        if self_move {
             let moved = agent_move(
                 &change.owner,
                 &change.run,
@@ -977,16 +965,13 @@ async fn explicit_stop_wins_over_a_pending_self_move_or_mission_continuation() {
             )
             .await;
             assert_ne!(moved["isError"], true, "{moved}");
-            let (status, stopped) = change
-                .owner
-                .send(
-                    "POST",
-                    &format!("/api/chats/{}/stop", change.chat),
-                    json!({}),
-                )
+        } else {
+            let (status, moved) = change
+                .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
                 .await;
-            assert_eq!(status, StatusCode::OK, "{stopped}");
+            assert_eq!(status, StatusCode::OK, "{moved}");
         }
+        change.stop().await;
         change
             .owner
             .service
@@ -1010,32 +995,10 @@ async fn explicit_stop_wins_over_a_pending_self_move_or_mission_continuation() {
 }
 
 #[tokio::test]
-async fn expiration_restores_a_live_missions_settled_wait_but_explicit_stop_cancels_it() {
+async fn expiration_keeps_a_live_conversations_wait_unless_explicitly_stopped() {
     for stopped in [false, true] {
-        let change = Change::new(RunStatus::Waiting).await;
-        let wakeup = json!({ "id": id(), "messageId": "mission-turn", "seconds": 1, "createdAt": now() - 2000, "wakeAt": now() - 1000, "reason": "Continue the original mission" });
-        let (run, chat, wake) = (change.run.clone(), change.chat.clone(), wakeup.clone());
-        change
-            .owner
-            .service
-            .store
-            .transaction(move |db| {
-                db.0.execute("DELETE FROM conversations WHERE id=?", [chat])?;
-                db.change_run(
-                    &run,
-                    cairn_installation::runs::RunChanges {
-                        trigger: Some("manual".into()),
-                        wakeup: Some(Some(serde_json::from_value(wake)?)),
-                        ..Default::default()
-                    },
-                )?;
-                db.update_run_boundary(
-                    &run,
-                    &json!({ "chatExecution": null, "missionTurnId": "mission-turn" }),
-                )
-            })
-            .await
-            .unwrap();
+        let change = Change::new(RunStatus::Running).await;
+        let wakeup = change.due_wakeup("Continue the original work").await;
         change
             .owner
             .service
@@ -1049,15 +1012,9 @@ async fn expiration_restores_a_live_missions_settled_wait_but_explicit_stop_canc
             .await;
         assert_eq!(status, StatusCode::OK, "{moved}");
         if stopped {
-            change
-                .owner
-                .service
-                .worker
-                .cancel(&change.owner.service, &change.run)
-                .await
-                .unwrap();
+            change.stop().await;
         }
-        // The interrupted worker's ordinary cancellation settlement clears its wait.
+        // Settle the interrupted worker before the environment retires.
         change
             .owner
             .service
@@ -1066,7 +1023,6 @@ async fn expiration_restores_a_live_missions_settled_wait_but_explicit_stop_canc
                 &change.run,
                 cairn_installation::runs::RunChanges {
                     status: Some(RunStatus::Cancelled),
-                    wakeup: Some(None),
                     ..Default::default()
                 },
             )
@@ -1086,35 +1042,16 @@ async fn expiration_restores_a_live_missions_settled_wait_but_explicit_stop_canc
             .detach_stopped_environments()
             .await
             .unwrap();
-        let detached = change.owner.run(&change.run).await;
+        let detached = change.detail().await;
         assert_eq!(detached["environmentState"], "expired");
         if stopped {
-            assert_eq!(detached["status"], RunStatus::Cancelled);
+            assert_eq!(detached["run"]["status"], RunStatus::Cancelled);
             assert!(detached["wakeup"].is_null());
             continue;
         }
-        assert_eq!(detached["status"], RunStatus::Waiting);
+        assert_eq!(detached["run"]["status"], RunStatus::Succeeded);
         assert_eq!(detached["wakeup"], wakeup);
-        let checkpoint = change
-            .owner
-            .service
-            .store
-            .checkpoint_boundary(&change.run)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(checkpoint["remainingMs"], 123000);
-        assert!(
-            cairn_installation::run_output::prompt(&detached, false)
-                .contains("when the conversation changed node")
-        );
-        change
-            .owner
-            .service
-            .worker
-            .tick(&change.owner.service)
-            .await
-            .unwrap();
+        change.tick().await;
         let queued = change.owner.run(&change.run).await;
         assert_eq!(
             queued["status"],
@@ -1124,6 +1061,8 @@ async fn expiration_restores_a_live_missions_settled_wait_but_explicit_stop_canc
             queued["summary"]
         );
         assert_eq!(queued["environmentState"], "expired");
+        assert_eq!(queued["chatExecution"]["messageId"], wakeup["id"]);
+        assert!(text(&queued["chatExecution"], "text").contains("Continue the original work"));
         let (status, selected) = change
             .move_to(json!({ "nodeId": change.destination }))
             .await;
@@ -1153,40 +1092,28 @@ async fn expiration_restores_a_live_missions_settled_wait_but_explicit_stop_canc
 }
 
 #[tokio::test]
-async fn queued_messages_and_active_missions_can_reselect_before_first_admission_without_losing_files_again()
+async fn queued_messages_and_self_moves_can_reselect_before_first_admission_without_losing_files_again()
  {
-    for mission in [false, true] {
-        let change = Change::new(if mission {
+    for self_move in [false, true] {
+        let change = Change::new(if self_move {
             RunStatus::Running
         } else {
             RunStatus::Succeeded
         })
         .await;
-        if mission {
-            let (run, chat) = (change.run.clone(), change.chat.clone());
-            change
-                .owner
-                .service
-                .store
-                .transaction(move |db| {
-                    db.0.execute("DELETE FROM conversations WHERE id=?", [chat])?;
-                    db.change_run(
-                        &run,
-                        cairn_installation::runs::RunChanges {
-                            trigger: Some("manual".into()),
-                            ..Default::default()
-                        },
-                    )?;
-                    db.update_run_boundary(&run, &json!({ "chatExecution": null }))
-                })
-                .await
-                .unwrap();
-        }
-        let (status, moved) = change
-            .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
+        if self_move {
+            let moved = agent_move(
+                &change.owner,
+                &change.run,
+                json!({ "nodeId": change.destination, "discardWorkingFiles": true }),
+            )
             .await;
-        assert_eq!(status, StatusCode::OK, "{moved}");
-        if !mission {
+            assert_ne!(moved["isError"], true, "{moved}");
+        } else {
+            let (status, moved) = change
+                .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{moved}");
             let (status, sent) = change
                 .owner
                 .send(
@@ -1296,31 +1223,9 @@ async fn revocation_sees_a_fresh_admission_before_its_checkpoint_is_persisted() 
 }
 
 #[tokio::test]
-async fn a_pending_expiration_holds_a_due_mission_wakeup_until_detachment() {
-    let change = Change::new(RunStatus::Waiting).await;
-    let wakeup = json!({ "id": id(), "messageId": "original-turn", "seconds": 1, "createdAt": now() - 2000, "wakeAt": now() - 1000, "reason": "Continue after the condition" });
-    let (run, chat, wake) = (change.run.clone(), change.chat.clone(), wakeup.clone());
-    change
-        .owner
-        .service
-        .store
-        .transaction(move |db| {
-            db.0.execute("DELETE FROM conversations WHERE id=?", [chat])?;
-            db.change_run(
-                &run,
-                cairn_installation::runs::RunChanges {
-                    trigger: Some("manual".into()),
-                    wakeup: Some(Some(serde_json::from_value(wake)?)),
-                    ..Default::default()
-                },
-            )?;
-            db.update_run_boundary(
-                &run,
-                &json!({ "chatExecution": null, "missionTurnId": "original-turn" }),
-            )
-        })
-        .await
-        .unwrap();
+async fn a_pending_expiration_holds_a_due_conversation_wakeup_until_detachment() {
+    let change = Change::new(RunStatus::Succeeded).await;
+    let wakeup = change.due_wakeup("Continue after the condition").await;
     change
         .owner
         .service
@@ -1341,17 +1246,14 @@ async fn a_pending_expiration_holds_a_due_mission_wakeup_until_detachment() {
         .lock()
         .await
         .remove(&change.run);
-    // The scheduler wins the wakeup race against the retirement task.
-    change
-        .owner
-        .service
-        .worker
-        .tick(&change.owner.service)
-        .await
-        .unwrap();
-    let held = change.owner.run(&change.run).await;
-    assert_eq!(held["status"], RunStatus::Waiting);
-    assert_eq!(held["missionTurnId"], "original-turn");
+    // The scheduler sees the due wakeup before the retirement task detaches the run.
+    change.tick().await;
+    let held = change.detail().await;
+    assert_eq!(held["run"]["status"], RunStatus::Succeeded);
+    assert_eq!(
+        held["run"]["chatExecution"]["messageId"],
+        wakeup["messageId"]
+    );
     assert_eq!(held["wakeup"], wakeup);
     change
         .owner
@@ -1359,18 +1261,15 @@ async fn a_pending_expiration_holds_a_due_mission_wakeup_until_detachment() {
         .detach_stopped_environments()
         .await
         .unwrap();
-    let detached = change.owner.run(&change.run).await;
-    assert_eq!(detached["wakeup"]["messageId"], detached["missionTurnId"]);
-    change
-        .owner
-        .service
-        .worker
-        .tick(&change.owner.service)
-        .await
-        .unwrap();
-    let continued = change.owner.run(&change.run).await;
-    assert_eq!(continued["status"], RunStatus::Queued);
-    assert_eq!(continued["missionTurnId"], wakeup["id"]);
+    let detached = change.detail().await;
+    assert_eq!(
+        detached["wakeup"]["messageId"],
+        detached["run"]["chatExecution"]["messageId"]
+    );
+    change.tick().await;
+    let continued = change.detail().await;
+    assert_eq!(continued["run"]["status"], RunStatus::Queued);
+    assert_eq!(continued["run"]["chatExecution"]["messageId"], wakeup["id"]);
     assert!(continued["wakeup"].is_null());
 }
 
@@ -1378,24 +1277,6 @@ async fn a_pending_expiration_holds_a_due_mission_wakeup_until_detachment() {
 async fn a_stop_accepted_before_expiration_is_preserved_for_moves_and_revocation() {
     for revoke in [false, true] {
         let change = Change::new(RunStatus::Running).await;
-        let (run, chat) = (change.run.clone(), change.chat.clone());
-        change
-            .owner
-            .service
-            .store
-            .transaction(move |db| {
-                db.0.execute("DELETE FROM conversations WHERE id=?", [chat])?;
-                db.change_run(
-                    &run,
-                    cairn_installation::runs::RunChanges {
-                        trigger: Some("manual".into()),
-                        ..Default::default()
-                    },
-                )?;
-                db.update_run_boundary(&run, &json!({ "chatExecution": null }))
-            })
-            .await
-            .unwrap();
         change
             .owner
             .service
@@ -1404,13 +1285,7 @@ async fn a_stop_accepted_before_expiration_is_preserved_for_moves_and_revocation
             .lock()
             .await
             .insert(change.run.clone(), CancellationToken::new());
-        change
-            .owner
-            .service
-            .worker
-            .cancel(&change.owner.service, &change.run)
-            .await
-            .unwrap();
+        change.stop().await;
         let stopped_at = change.owner.run(&change.run).await["cancelRequestedAt"].clone();
         assert!(stopped_at.is_number());
         let (status, expired) = if revoke {

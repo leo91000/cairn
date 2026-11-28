@@ -98,6 +98,9 @@ pub struct RunCheckpoint {
     /// `null` means the run has no time limit; absent means its budget is spent.
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub remaining_ms: Nullable<i64>,
+    /// This migrated mission wakeup keeps the previous turn's execution budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) migrated_mission_wakeup_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation: Option<String>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]

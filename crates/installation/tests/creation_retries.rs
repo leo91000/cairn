@@ -1,15 +1,9 @@
 use common::AgentFixture;
-use common::MissionFixture;
 use common::ProjectFixture;
-use common::StoreMissionFixture;
 
 mod common;
 
-use cairn_installation::{
-    auth::{InstallationIdentity, InstallationRole},
-    config::{MAIN_AGENT_ID, id},
-    service::Service,
-};
+use cairn_installation::{config::id, service::Service};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -18,20 +12,11 @@ async fn creation_replays_survive_restart_without_overwriting_later_edits() {
     let root = TempDir::new().unwrap();
     let config = common::config(root.path());
     let service = Service::new(config.clone()).await.unwrap();
-    for kind in ["agents", "projects", "tasks"] {
+    for kind in ["agents", "projects"] {
         let creation_id = id();
         let request = match kind {
             "agents" => json!({ "name": "Agent", "creationId": creation_id }),
-            "projects" => {
-                json!({ "name": "Project", "path": root.path(), "creationId": creation_id })
-            }
-            _ => json!({
-                "name": "Scheduled mission",
-                "prompt": "Do the work",
-                "agentId": MAIN_AGENT_ID,
-                "cron": "0 9 * * *",
-                "creationId": creation_id,
-            }),
+            _ => json!({ "name": "Project", "path": root.path(), "creationId": creation_id }),
         };
         let (first, concurrent) = tokio::join!(
             save(&service, kind, request.clone(), None),
@@ -42,23 +27,10 @@ async fn creation_replays_survive_restart_without_overwriting_later_edits() {
         assert!(first.get("creationId").is_none());
         let mut edited = request.clone();
         edited["name"] = "Updated after creation".into();
-        let mut edited = save(&service, kind, edited, Some(&creation_id)).await;
-        if kind == "tasks" {
-            // A scheduler may have advanced the commitment since the lost response.
-            // Recovering the creation must not recompute its next occurrence.
-            edited["nextRun"] = 1234.into();
-            service
-                .store
-                .put_mission_fixture(edited.clone())
-                .await
-                .unwrap();
-        }
+        let edited = save(&service, kind, edited, Some(&creation_id)).await;
         let restarted = Service::new(config.clone()).await.unwrap();
         let replay = save(&restarted, kind, request, None).await;
-        assert_eq!(
-            replay, edited,
-            "{kind} replay must preserve later edits and schedule"
-        );
+        assert_eq!(replay, edited, "{kind} replay must preserve later edits");
         assert_eq!(replay["createdAt"], first["createdAt"]);
         let records = if kind == "projects" {
             restarted
@@ -69,10 +41,8 @@ async fn creation_replays_survive_restart_without_overwriting_later_edits() {
                 .into_iter()
                 .map(|project| serde_json::to_value(project).unwrap())
                 .collect::<Vec<_>>()
-        } else if kind == "agents" {
-            restarted.store.agent_snapshots().await.unwrap()
         } else {
-            restarted.store.mission_values_fixture().await.unwrap()
+            restarted.store.agent_snapshots().await.unwrap()
         };
         assert_eq!(
             records
@@ -109,20 +79,6 @@ async fn creation_identity_is_validated_and_cannot_replace_an_update_identity() 
                 .await
                 .is_err()
         );
-        assert!(
-            service
-                .task_fixture(
-                    json!({
-                        "name": "Task",
-                        "prompt": "Work",
-                        "agentId": MAIN_AGENT_ID,
-                        "creationId": invalid,
-                    }),
-                    None
-                )
-                .await
-                .is_err()
-        );
     }
     let original = service
         .agent_fixture(json!({ "name": "Original" }), None)
@@ -148,34 +104,6 @@ async fn creation_identity_is_validated_and_cannot_replace_an_update_identity() 
 }
 
 #[tokio::test]
-async fn another_member_cannot_recover_a_task_creation_as_their_own() {
-    let root = TempDir::new().unwrap();
-    let service = Service::new(common::config(root.path())).await.unwrap();
-    let request = json!({
-        "name": "Task",
-        "prompt": "Work",
-        "agentId": MAIN_AGENT_ID,
-        "creationId": id(),
-    });
-    let task = service.task_fixture(request.clone(), None).await.unwrap();
-
-    let identity = InstallationIdentity::trusted(InstallationRole::Member, "another-author");
-    assert!(
-        service
-            .task_as_fixture(request.clone(), None, Some(&identity))
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        service
-            .mission_snapshot_fixture(task["id"].as_str().unwrap())
-            .await
-            .unwrap(),
-        task
-    );
-}
-
-#[tokio::test]
 async fn creation_identity_cannot_overwrite_another_resource_kind() {
     let root = TempDir::new().unwrap();
     let service = Service::new(common::config(root.path())).await.unwrap();
@@ -193,33 +121,11 @@ async fn creation_identity_cannot_overwrite_another_resource_kind() {
             .await
             .is_err()
     );
-    assert!(
-        service
-            .task_fixture(
-                json!({
-                    "name": "Task",
-                    "prompt": "Work",
-                    "agentId": MAIN_AGENT_ID,
-                    "creationId": creation_id,
-                }),
-                None
-            )
-            .await
-            .is_err()
-    );
     assert_eq!(
         service.agent_snapshot(&creation_id).await.unwrap(),
         original
     );
     assert!(service.store.projects().await.unwrap().is_empty());
-    assert!(
-        service
-            .store
-            .mission_values_fixture()
-            .await
-            .unwrap()
-            .is_empty()
-    );
 }
 
 async fn save(
@@ -230,8 +136,7 @@ async fn save(
 ) -> Value {
     match kind {
         "agents" => service.agent_fixture(input, existing).await,
-        "projects" => service.project_fixture(input, existing).await,
-        _ => service.task_fixture(input, existing).await,
+        _ => service.project_fixture(input, existing).await,
     }
     .unwrap()
 }
@@ -255,36 +160,33 @@ async fn measure_creation_retries() {
         let mut ids = Vec::new();
         for _ in 0..100 {
             let mut request = json!({
-                "name": "Scheduled mission",
-                "prompt": "Check the repository and report the result.",
-                "agentId": MAIN_AGENT_ID,
-                "cron": "0 9 * * *",
+                "name": "Measured agent",
             });
             if replayable {
                 request["creationId"] = id().into();
             }
             let start = Instant::now();
-            let saved = service.task_fixture(request.clone(), None).await.unwrap();
+            let saved = service.agent_fixture(request.clone(), None).await.unwrap();
             writes.push(start.elapsed().as_micros());
             ids.push(saved["id"].as_str().unwrap().to_owned());
             let start = Instant::now();
-            service.task_fixture(request, None).await.unwrap();
+            service.agent_fixture(request, None).await.unwrap();
             retries.push(start.elapsed().as_micros());
         }
         let mut cold = Vec::new();
         for id in ids.iter().take(20) {
             let store = Store::open(&config.data_dir).unwrap();
             let start = Instant::now();
-            store.mission(id).await.unwrap().unwrap();
+            store.agent_snapshot(id).await.unwrap().unwrap();
             cold.push(start.elapsed().as_micros());
         }
         let mut warm = Vec::new();
         for id in ids.iter().cycle().take(200) {
             let start = Instant::now();
-            service.store.mission(id).await.unwrap().unwrap();
+            service.store.agent_snapshot(id).await.unwrap().unwrap();
             warm.push(start.elapsed().as_micros());
         }
-        let records = service.store.mission_values_fixture().await.unwrap();
+        let records = service.store.agent_snapshots().await.unwrap();
         let bytes: usize = records.iter().map(|record| record.to_string().len()).sum();
         println!(
             "{} records={} encoded_record_bytes={} cpu_us={} write_us={} retry_us={} connection_cold_read_us={} warm_read_us={}",

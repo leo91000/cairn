@@ -4,9 +4,8 @@ use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
 use crate::common::run_fixture::DbRunFixture;
 use common::AgentFixture;
-use common::MissionFixture;
+use common::ChatRunFixture;
 use common::StoreAgentFixture;
-use common::StoreMissionFixture;
 
 mod common;
 
@@ -37,15 +36,6 @@ fn input(source: &Value) -> Value {
     json!({ "sourceId": source["id"], "targetId": MAIN_AGENT_ID, "confirm": true })
 }
 
-async fn task(s: &Arc<Service>, source: &Value) -> Value {
-    s.task_fixture(
-        json!({ "name": "Existing task", "prompt": "Inspect", "agentId": source["id"] }),
-        None,
-    )
-    .await
-    .unwrap()
-}
-
 async fn mcp(s: &Arc<Service>, endpoint: &str, token: &str, args: Value) -> (StatusCode, Value) {
     let app = common::relay_fixture::router(s.clone()).await.unwrap();
     let request = common::request("POST", endpoint)
@@ -63,16 +53,15 @@ async fn mcp(s: &Arc<Service>, endpoint: &str, token: &str, args: Value) -> (Sta
 }
 
 #[tokio::test]
-async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities() {
+async fn merge_transfers_trash_chats_and_resumable_run_identities() {
     let (root, s, source) = fixture().await;
     let target = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
-    let task = task(&s, &source).await;
-    let chat = s
-        .chat_create(json!({ "agentId": source["id"] }))
+    let (chat_detail, run) = s
+        .chat_run_fixture(source["id"].as_str().unwrap(), None, "Inspect")
         .await
         .unwrap();
-    let run = s
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+    let chat = s
+        .conversation_boundary(chat_detail["id"].as_str().unwrap())
         .await
         .unwrap();
     let mut original_snapshot = run["snapshot"].clone();
@@ -88,16 +77,13 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
         .await
         .unwrap();
     s.store.transaction({
-        let mut task = task.clone();
         let mut chat = chat.clone();
         let source = source.clone();
         let run = run.clone();
         move |db| {
-            task["archived"] = true.into();
-            task["enabled"] = false.into();
-            db.save_mission(&serde_json::from_value(task.clone())?)?;
             chat["lifecycle"] = "trash".into();
             chat["trashedAt"] = 1.into();
+            chat["purgeAt"] = (cairn_installation::config::now() + 60_000).into();
             db.save_conversation_boundary(&chat)?;
             db.put_message(&json!({ "id": id(), "chatId": chat["id"], "createdAt": 1, "text": "Keep this message" }))?;
             db.event(run["id"].as_str().unwrap(), &EventKind::Status, "Keep this history", None)?;
@@ -106,10 +92,7 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
     }).await.unwrap();
 
     let result = s.merge_agents_fixture(input(&source)).await.unwrap();
-    assert_eq!(
-        result["transferred"],
-        json!({ "tasks": 1, "chats": 1, "runs": 1 })
-    );
+    assert_eq!(result["transferred"], json!({ "chats": 1, "runs": 1 }));
     assert!(
         s.store
             .agent_snapshot(source["id"].as_str().unwrap())
@@ -118,12 +101,6 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
             .is_none()
     );
     assert_eq!(s.agent_snapshot(MAIN_AGENT_ID).await.unwrap(), target);
-    let transferred_task = s
-        .mission_snapshot_fixture(task["id"].as_str().unwrap())
-        .await
-        .unwrap();
-    assert_eq!(transferred_task["agentId"], MAIN_AGENT_ID);
-    assert_eq!(transferred_task["archived"], true);
     let transferred_chat = s
         .conversation_boundary(chat["id"].as_str().unwrap())
         .await
@@ -148,7 +125,8 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
             let chat = chat.clone();
             let run = run.clone();
             move |db| {
-                assert_eq!(db.messages(chat["id"].as_str().unwrap())?.len(), 1);
+                let messages = db.messages(chat["id"].as_str().unwrap())?;
+                assert!(messages.iter().any(|m| m["text"] == "Keep this message"));
                 assert_eq!(
                     db.events_fixture(run["id"].as_str().unwrap(), 0, 100)?
                         .last()
@@ -163,17 +141,19 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
         })
         .await
         .unwrap();
-    let resumed = s
-        .worker
-        .resume(&s, run["id"].as_str().unwrap())
-        .await
-        .unwrap();
+    let run_id = run["id"].as_str().unwrap();
+    assert_eq!(
+        s.worker.resume(&s, run_id).await.unwrap_err().status,
+        StatusCode::CONFLICT
+    );
+    s.chat_restore(chat["id"].as_str().unwrap()).await.unwrap();
+    let resumed = s.worker.resume(&s, run_id).await.unwrap();
     assert_eq!(resumed["snapshot"]["agent"]["id"], MAIN_AGENT_ID);
     assert_eq!(resumed["snapshot"]["agent"]["provider"], "claude");
     let reopened = Service::new(common::config(root.path())).await.unwrap();
     assert_eq!(
         reopened
-            .mission_snapshot_fixture(task["id"].as_str().unwrap())
+            .conversation_boundary(chat["id"].as_str().unwrap())
             .await
             .unwrap()["agentId"],
         MAIN_AGENT_ID
@@ -198,11 +178,16 @@ async fn same_engine_merge_keeps_the_conversation_model_on_implicit_follow_up() 
     )
     .await
     .unwrap();
-    let task = task(&s, &source).await;
     let chat = s
         .chat_create(json!({ "agentId": source["id"] }))
         .await
         .unwrap();
+    let task = json!({
+        "id": chat["id"],
+        "name": "Existing task",
+        "prompt": "Inspect",
+        "agentId": source["id"],
+    });
     let mut run = s.snapshot(task, "chat").await.unwrap();
     run["taskId"] = chat["id"].clone();
     run["snapshot"]["task"]["id"] = chat["id"].clone();
@@ -246,9 +231,8 @@ async fn same_engine_merge_keeps_the_conversation_model_on_implicit_follow_up() 
 async fn merge_rejects_busy_recovering_and_unsettled_workers_without_mutation() {
     for state in ["queued", "running", "recovering", "settling"] {
         let (_root, s, source) = fixture().await;
-        let task = task(&s, &source).await;
-        let run = s
-            .enqueue(task["id"].as_str().unwrap(), "manual", None)
+        let (chat, run) = s
+            .chat_run_fixture(source["id"].as_str().unwrap(), None, "Inspect")
             .await
             .unwrap();
         s.store
@@ -281,7 +265,7 @@ async fn merge_rejects_busy_recovering_and_unsettled_workers_without_mutation() 
         assert_eq!(error.status, 409, "{state}");
         assert!(error.message.contains("active work"), "{state}: {error}");
         assert_eq!(
-            s.mission_snapshot_fixture(task["id"].as_str().unwrap())
+            s.conversation_boundary(chat["id"].as_str().unwrap())
                 .await
                 .unwrap()["agentId"],
             source["id"]
@@ -355,7 +339,10 @@ async fn merge_rejects_invalid_targets_permissions_credentials_and_delegations()
 #[tokio::test]
 async fn merge_keeps_preapproved_live_grants_and_rolls_back_a_failed_delete() {
     let (_root, s, source) = fixture().await;
-    let task = task(&s, &source).await;
+    let chat = s
+        .chat_create(json!({ "agentId": source["id"] }))
+        .await
+        .unwrap();
     let instance = id();
     s.store.transaction({
         let mut source = source.clone();
@@ -376,7 +363,7 @@ async fn merge_keeps_preapproved_live_grants_and_rolls_back_a_failed_delete() {
     }).await.unwrap();
     assert!(s.merge_agents_fixture(input(&source)).await.is_err());
     assert_eq!(
-        s.mission_snapshot_fixture(task["id"].as_str().unwrap())
+        s.conversation_boundary(chat["id"].as_str().unwrap())
             .await
             .unwrap()["agentId"],
         source["id"]
@@ -407,7 +394,10 @@ async fn merge_keeps_preapproved_live_grants_and_rolls_back_a_failed_delete() {
 async fn merge_http_is_owner_only_and_both_mcp_interfaces_have_the_same_effect() {
     for transport in ["http", "public", "installation"] {
         let (_root, s, source) = fixture().await;
-        let existing = task(&s, &source).await;
+        let existing = s
+            .chat_create(json!({ "agentId": source["id"] }))
+            .await
+            .unwrap();
         let args = input(&source);
         let response = if transport == "http" {
             let app = cairn_installation::http::router(s.clone()).await.unwrap();
@@ -455,9 +445,8 @@ async fn merge_http_is_owner_only_and_both_mcp_interfaces_have_the_same_effect()
                     )
                     .await
                     .unwrap();
-                let caller_task = task(&s, &main).await;
-                let caller = s
-                    .enqueue(caller_task["id"].as_str().unwrap(), "manual", None)
+                let (_caller_chat, caller) = s
+                    .chat_run_fixture(main["id"].as_str().unwrap(), None, "Inspect")
                     .await
                     .unwrap();
                 let caller = s
@@ -488,7 +477,7 @@ async fn merge_http_is_owner_only_and_both_mcp_interfaces_have_the_same_effect()
         };
         assert_eq!(response["deleted"], true, "{transport}: {response}");
         assert_eq!(
-            s.mission_snapshot_fixture(existing["id"].as_str().unwrap())
+            s.conversation_boundary(existing["id"].as_str().unwrap())
                 .await
                 .unwrap()["agentId"],
             MAIN_AGENT_ID
@@ -501,66 +490,4 @@ async fn merge_http_is_owner_only_and_both_mcp_interfaces_have_the_same_effect()
                 .is_none()
         );
     }
-}
-
-#[tokio::test]
-async fn merge_waits_for_scheduled_admission_instead_of_dropping_a_due_occurrence() {
-    use std::{future::Future, task::Poll};
-
-    let (_root, s, source) = fixture().await;
-    let mut task = task(&s, &source).await;
-    task["cron"] = "* * * * *".into();
-    task["nextRun"] = 1.into();
-    s.store.put_mission_fixture(task.clone()).await.unwrap();
-    let entered = Arc::new(tokio::sync::Semaphore::new(0));
-    let release = Arc::new(tokio::sync::Semaphore::new(0));
-    let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let origin = format!("http://{}", listener.local_addr().unwrap());
-    let app = axum::Router::new().route("/api/relay/fixture/task-authors", axum::routing::get({
-        let entered = entered.clone(); let release = release.clone();
-        move || { let entered=entered.clone(); let release=release.clone(); let first=first.clone(); async move {
-            if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                entered.add_permits(1); release.acquire().await.unwrap().forget();
-            }
-            axum::Json(json!({"owner":{"account_id":"fixture-owner","access_id":"fixture-owner"},"members":[]}))
-        } }
-    }));
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    tokio::fs::write(
-        s.config.data_dir.join("installation-relay/identity.json"),
-        json!({"origin":origin,"installationId":"fixture","token":"fixture-only"}).to_string(),
-    )
-    .await
-    .unwrap();
-    let scheduled = {
-        let service = s.clone();
-        tokio::spawn(async move { service.schedule().await })
-    };
-    entered.acquire().await.unwrap().forget();
-    let merging = s.merge_agents_fixture(input(&source));
-    tokio::pin!(merging);
-    std::future::poll_fn(|cx| {
-        assert!(merging.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
-    release.add_permits(1);
-    scheduled.await.unwrap().unwrap();
-    assert_eq!(merging.await.unwrap_err().status, 409);
-    server.abort();
-    let runs = s.store.read(|db| db.active()).await.unwrap();
-    assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0]["snapshot"]["agent"]["id"], source["id"]);
-    assert_eq!(runs[0]["taskId"], task["id"]);
-    assert!(
-        s.mission_snapshot_fixture(task["id"].as_str().unwrap())
-            .await
-            .unwrap()["nextRun"]
-            .as_i64()
-            .unwrap()
-            > 1
-    );
 }

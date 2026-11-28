@@ -294,20 +294,28 @@ fn snapshot(db: &Db<'_>, node: &ExecutionNode, mode: Mode) -> Result<ReviewSnaps
             }))?);
         }
     }
-    let tasks = db
-        .missions()?
-        .into_iter()
-        .filter(|task| {
-            agents
-                .iter()
-                .any(|agent| agent.id == task.settings.agent_id.to_string())
-        })
-        .map(|task| ReviewTask {
-            id: task.id.to_string(),
-            name: task.settings.name,
-            agent_id: task.settings.agent_id.to_string(),
-        })
-        .collect::<Vec<_>>();
+    let mut tasks = Vec::new();
+    for rule in db.hook_rules()? {
+        let Some(version) = db.hook_rule_version(&rule.id, rule.version)? else {
+            continue;
+        };
+        let mut started = Vec::new();
+        crate::rules::validation::visit_actions(&version.definition.steps, &mut |action| {
+            if let cairn_contracts::RuleAction::StartAgent { agent_id, .. } = action {
+                let id = agent_id.to_string();
+                if agents.iter().any(|agent| agent.id == id) && !started.contains(&id) {
+                    started.push(id);
+                }
+            }
+        });
+        for agent_id in started {
+            tasks.push(ReviewTask {
+                id: rule.id.clone(),
+                name: version.definition.name.clone(),
+                agent_id,
+            });
+        }
+    }
     Ok(ReviewSnapshot {
         node_id,
         node_revision: node.revision.clone(),

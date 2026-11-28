@@ -354,7 +354,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         Confirm(
             title = "Changer de node ?",
             description =
-                "Les fichiers de travail de cette conversation seront perdus. L’historique, les pièces jointes et les artefacts sont conservés. Le tour en cours s’arrête et les questions ouvertes sont closes. Les messages en file, les attentes planifiées et les missions actives reprennent sur la destination ; sinon, la conversation attend le prochain message.",
+                "Les fichiers de travail de cette conversation seront perdus. L’historique, les pièces jointes et les artefacts sont conservés. Le tour en cours s’arrête et les questions ouvertes sont closes. Les messages en file et les attentes planifiées reprennent sur la destination ; sinon, la conversation attend le prochain message.",
             busy = busy,
             error = error,
             dismiss = { confirmMove = false },

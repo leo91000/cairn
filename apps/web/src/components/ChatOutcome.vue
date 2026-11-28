@@ -15,7 +15,7 @@ const props = defineProps<{ outcome: TaskOutcome, agent: string }>()
 const expanded = ref(false)
 const evidenceId = useId()
 const attention = computed(() => props.outcome.status !== 'completed')
-const labels = { completed: 'Task completed', blocked: 'Blocked', needs_input: 'Your input needed' }
+const labels = { completed: 'Task completed', blocked: 'Blocked' }
 </script>
 
 <template>

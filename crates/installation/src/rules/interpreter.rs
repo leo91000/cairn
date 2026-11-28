@@ -63,6 +63,9 @@ pub(crate) trait Facts {
 
     /// Other triggerings of this rule by an author in the last minutes.
     fn author_triggerings(&self, author: &str, window_minutes: u32) -> Result<u32, String>;
+
+    /// Whether an active conversation started by this rule has a turn queued, running or waiting for a wakeup.
+    fn rule_conversation_working(&self) -> Result<bool, String>;
 }
 
 /// Facts for a tree that reads none.
@@ -77,6 +80,10 @@ impl Facts for NoFacts {
 
     fn author_triggerings(&self, _author: &str, _window_minutes: u32) -> Result<u32, String> {
         Ok(0)
+    }
+
+    fn rule_conversation_working(&self) -> Result<bool, String> {
+        Ok(false)
     }
 }
 
@@ -409,6 +416,7 @@ pub(crate) fn condition(
             }
             Ok(used < *limit)
         }
+        RuleCondition::RuleConversationWorking {} => context.facts.rule_conversation_working(),
     }
 }
 

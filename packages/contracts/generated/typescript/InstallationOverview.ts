@@ -7,7 +7,7 @@ export interface InstallationOverview {
   runsByStatus: { [key in string]: number }
   agents: number
   projects: number
-  missions: number
+  hookRules: number
   concurrency: number
 
 }

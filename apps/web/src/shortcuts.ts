@@ -12,7 +12,7 @@ export const shortcutGroups: Array<{ title: string, items: Array<{ keys: string[
       { keys: [modifier, 'K'], label: 'Search and run commands' },
       { keys: ['C'], label: 'New conversation' },
       { keys: ['G', 'F'], label: 'Go to the Fil' },
-      { keys: ['G', 'M'], label: 'Go to Missions' },
+      { keys: ['G', 'R'], label: 'Go to Rules' },
       { keys: ['G', 'A'], label: 'Go to the Atelier' },
       { keys: ['?'], label: 'Show these shortcuts' },
     ],

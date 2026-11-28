@@ -26,7 +26,6 @@ import Icon from './components/Icon.vue'
 import ShortcutSheet from './components/ShortcutSheet.vue'
 import ThemeControl from './components/ThemeControl.vue'
 import {
-  CalendarClock,
   Check,
   Inbox,
   Keyboard,
@@ -35,8 +34,8 @@ import {
   LogOut,
   Plus,
   Search,
+  Zap,
 } from './icons'
-import { useMissionRuns } from './mission-runs'
 import { localReads } from './reads'
 import { modifier, typingTarget } from './shortcuts'
 import { filOf, filViews } from './signal'
@@ -75,11 +74,10 @@ async function openTrash() {
   conversationView.value?.openTrash?.()
 }
 
-// The three places of « Signal »: the Fil (home and conversations), Missions and the Atelier.
-const atelierPaths = ['/atelier', '/agents', '/projects', '/skills', '/rules', '/mcps', '/connections', '/plugins', '/nodes', '/settings', '/runs']
+// The three places of « Signal »: the Fil (home and conversations), Rules and the Atelier.
+const atelierPaths = ['/atelier', '/agents', '/projects', '/skills', '/mcps', '/connections', '/plugins', '/nodes', '/settings', '/runs']
 const atelierSections = computed(() => [
   { to: '/agents', label: 'Agents' },
-  { to: '/rules', label: 'Rules' },
   { to: '/projects', label: 'Projects' },
   { to: '/skills', label: 'Skills' },
   { to: '/mcps', label: 'MCPs' },
@@ -89,7 +87,7 @@ const atelierSections = computed(() => [
   { to: '/nodes', label: 'Nodes' },
   { to: '/settings', label: 'Settings' },
 ].filter(item => state.installationRole === 'owner' || !ownerPage(item.to)))
-const atelierSection = computed(() => atelierSections.value.find(item => route.path === item.to || (item.to === '/plugins' && route.path.startsWith('/plugins/')) || (item.to === '/rules' && route.path.startsWith('/rules/')) || (item.to === '/settings' && route.path.startsWith('/settings/'))))
+const atelierSection = computed(() => atelierSections.value.find(item => route.path === item.to || (item.to === '/plugins' && route.path.startsWith('/plugins/')) || (item.to === '/settings' && route.path.startsWith('/settings/'))))
 const atelierOverview = computed(() => route.path === '/atelier')
 const places: Array<{
   to: string
@@ -104,10 +102,10 @@ const places: Array<{
     keys: 'G F',
   },
   {
-    to: '/tasks',
-    label: 'Missions',
-    icon: CalendarClock,
-    keys: 'G M',
+    to: '/rules',
+    label: 'Rules',
+    icon: Zap,
+    keys: 'G R',
   },
   {
     to: '/atelier',
@@ -121,13 +119,12 @@ watch(() => [state.installationRole, route.path], () => {
     void router.replace('/atelier')
 }, { immediate: true })
 
-// A mission opened from the Fil stays in the Fil, beside it as a conversation does.
-const filPage = computed(() => route.path === '/' || route.path.startsWith('/fil/'))
+const filPage = computed(() => route.path === '/')
 const filWorkspace = computed(() => filPage.value || route.path.startsWith('/chats'))
-const place = computed(() => filPage.value || route.path.startsWith('/chats') ? 0 : route.path.startsWith('/tasks') ? 1 : atelierPaths.some(path => route.path.startsWith(path)) ? 2 : -1)
+const place = computed(() => filPage.value || route.path.startsWith('/chats') ? 0 : route.path.startsWith('/rules') ? 1 : atelierPaths.some(path => route.path.startsWith(path)) ? 2 : -1)
 // Reading screens take the whole phone; the dock returns on the three places.
 // The agent page keeps its own save bar at the bottom.
-const reading = computed(() => route.path.startsWith('/chats') || route.path.startsWith('/agents/') || /^\/(?:fil\/)?runs\/./.test(route.path) || route.path === '/authorize' || route.path.startsWith('/settings/'))
+const reading = computed(() => route.path.startsWith('/chats') || route.path.startsWith('/agents/') || /^\/runs\/./.test(route.path) || route.path === '/authorize' || route.path.startsWith('/settings/') || route.path.startsWith('/rules/'))
 const chats = useChatList()
 const selectedChatId = computed(() => {
   if (!route.path.startsWith('/chats/'))
@@ -135,14 +132,12 @@ const selectedChatId = computed(() => {
   const id = route.params.id as string
   return chats.value.find(chat => chat.id === id || chat.slug === id)?.id ?? id
 })
-const runs = useMissionRuns({ eager: false })
-const fil = computed(() => filOf(chats.value, state.tasks, runs.value, localReads, undefined, state.usableAgents))
+const fil = computed(() => filOf(chats.value, localReads, undefined, state.usableAgents))
 const toRead = computed(() => filViews(fil.value).unread.length)
 const needsYou = computed(() => 0)
 // The Fil's badge: coral when something needs the user, the accent when work only waits to be read.
 const filBadge = computed(() => needsYou.value || toRead.value)
 const filBadgeLabel = computed(() => [needsYou.value ? `${needsYou.value} need you` : '', toRead.value ? `${toRead.value} to read` : ''].filter(Boolean).join(' · '))
-const missionRunning = computed(() => fil.value.live.some(item => item.taskId && item.kind === 'running'))
 
 // The owner may give or remove access to agents at any time: a member's open tab follows
 // within a short delay, and at once when it comes back into view.
@@ -202,7 +197,7 @@ function key(event: KeyboardEvent) {
   if (chord && Date.now() - chord < 1200) {
     chord = 0
     chordHint.value = false
-    const destination = { f: '/', m: '/tasks', a: '/atelier' }[letter]
+    const destination = { f: '/', r: '/rules', a: '/atelier' }[letter]
     if (destination) {
       event.preventDefault()
       void router.push(destination)
@@ -287,12 +282,6 @@ function openShortcuts() {
               aria-hidden="true"
               :title="filBadgeLabel"
             >{{ filBadge }}</span>
-            <span
-              v-if="index === 1 && missionRunning"
-              class="live-dot absolute -right-1.5 -top-1"
-              aria-hidden="true"
-              title="A mission is running"
-            />
           </span>
         </RouterLink>
       </div>
@@ -350,7 +339,7 @@ function openShortcuts() {
       class="page flex-1 min-h-0 min-w-0 overflow-auto overscroll-contain [scrollbar-width:thin] [&.page-default]:mx-auto [&.page-default]:w-full [&.page-default]:max-w-340 [&.page-default]:px-9 [&.page-default]:pt-8 [&.page-default]:pb-7 tablet:[&.page-default]:px-6 phone:[&.page-default]:px-3 phone:[&.page-default]:pt-[max(14px,env(safe-area-inset-top))] phone:[&.page-default]:pb-32 [&.page-tasks]:flex [&.page-tasks]:flex-col [&.page-tasks]:overflow-hidden phone:[&.page-tasks]:pb-24 [&.page-run]:flex [&.page-run]:flex-col [&.page-run]:overflow-hidden [&.page-fil]:overflow-hidden [&.page-flush]:pb-0!"
       :class="{
         'page-fil': filPage,
-        'page-tasks': route.path === '/tasks',
+        'page-tasks': route.path === '/rules',
         'page-run': /^\/runs\/./.test(route.path),
         'flex overflow-hidden': filWorkspace,
         'page-chat': route.path.startsWith('/chats'),
@@ -363,13 +352,12 @@ function openShortcuts() {
       <aside
         v-if="filWorkspace"
         class="w-88 shrink-0 border-r border-line bg-inset tablet:w-full tablet:border-0 tablet:bg-transparent"
-        :class="{ 'tablet:hidden': reading || route.path.startsWith('/fil/runs/') }"
+        :class="{ 'tablet:hidden': reading }"
         aria-label="Fil"
       >
         <FilColumn
           :chats="chats"
           :selected="selectedChatId"
-          :selected-run="route.path.startsWith('/fil/runs/') ? route.params.id as string : undefined"
         />
       </aside>
       <nav v-if="atelierSection || atelierOverview" class="atelier-sections -mx-1 mb-6 flex items-center gap-1 overflow-x-auto px-1 pb-1 [scrollbar-width:none] phone:mb-4" aria-label="Atelier sections">
@@ -431,7 +419,6 @@ function openShortcuts() {
             :class="needsYou ? 'bg-coral text-white' : 'bg-accent text-surface'"
             aria-hidden="true"
           >{{ filBadge }}</span>
-          <span v-if="index === 1 && missionRunning" class="live-dot absolute -right-2 -top-1" aria-hidden="true" />
         </span>
       </RouterLink>
       <RouterLink v-slot="{ href }" to="/chats" custom>
@@ -447,7 +434,7 @@ function openShortcuts() {
     </nav>
     <Transition name="signal-pop">
       <p v-if="chordHint" class="fixed bottom-6 left-1/2 z-40 m-0 flex -translate-x-1/2 items-center gap-2 rounded-full bg-bubble px-4 py-2 text-xs font-semibold text-on-bubble shadow-lift" role="status">
-        <kbd class="keycap">G</kbd> then <kbd class="keycap">F</kbd> Fil · <kbd class="keycap">M</kbd> Missions · <kbd class="keycap">A</kbd> Atelier
+        <kbd class="keycap">G</kbd> then <kbd class="keycap">F</kbd> Fil · <kbd class="keycap">R</kbd> Rules · <kbd class="keycap">A</kbd> Atelier
       </p>
     </Transition>
   </div>

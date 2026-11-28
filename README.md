@@ -162,11 +162,10 @@ See the [production release runbook](docs/PRODUCTION-CAIRN.md).
 
 Start a conversation from **Chats**, an agent, or a project. Project chats use Main agent by default. Steer a live response, queue and edit follow-ups, and resume conversations after a restart. See [chat behavior and architecture](docs/chats.md).
 
-On a successfully completed mission run, choose **Continue in chat** (Android:
-**Continuer en chat**) to ask follow-up questions in its saved session and
-workspace. The execution moves from the mission's run history into Chats;
-the mission and its schedule remain available for future runs. Conversion needs
-a saved session and workspace and starts no agent work until you send a message.
+From **Rules**, choose **Schedule an agent** to open a conversation at a
+specific date or on a recurring schedule. **Run now** opens a conversation
+immediately. Earlier mission runs appear as conversations with their history
+and files. See [Clock rules and the migration](docs/adr/0094-programmations-as-clock-hook-rules.md).
 
 ## Public artifact links
 

@@ -1,7 +1,7 @@
 use cairn_contracts::EventKind;
 use common::AgentFixture;
+use common::ChatRunFixture;
 use common::McpFixture;
-use common::MissionFixture;
 
 mod common;
 
@@ -47,18 +47,13 @@ async fn served(root: &TempDir) -> (Arc<Service>, String, JoinHandle<()>) {
     (s, origin, server)
 }
 
-/// Enqueues a manual run of a new task of the main agent.
-async fn manual_run(s: &Service, name: &str, prompt: &str) -> Value {
-    let task = json!({
-        "name": name,
-        "agentId": MAIN_AGENT_ID,
-        "prompt": prompt,
-        "worktree": false,
-    });
-    let task = s.task_fixture(task, None).await.unwrap();
-    s.enqueue(task["id"].as_str().unwrap(), "manual", None)
+/// Enqueues a conversation run of the main agent.
+async fn manual_run(s: &Service, _name: &str, prompt: &str) -> Value {
+    let (_chat, run) = s
+        .chat_run_fixture(MAIN_AGENT_ID, None, prompt)
         .await
-        .unwrap()
+        .unwrap();
+    run
 }
 
 fn tool_call(name: &str, arguments: &Value) -> Value {
@@ -222,6 +217,61 @@ async fn assert_large_metadata_is_chunked_consistently(
 }
 
 #[tokio::test]
+async fn run_and_chat_tools_report_the_same_current_wakeup() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let (s, origin, server) = served(&root).await;
+    let token = common::relay_fixture::grant(&s, &["read"]).await;
+    let run = manual_run(&s, "Waiting", "Wait for a check").await;
+    let run_id = run["id"].as_str().unwrap();
+    let chat_id = run["taskId"].as_str().unwrap().to_owned();
+    let wakeup = json!({
+        "id": "current-wait",
+        "messageId": run["chatExecution"]["messageId"],
+        "reason": "Wait for a check",
+        "seconds": 60,
+        "createdAt": 1,
+        "wakeAt": 60_001,
+        "condition": {
+            "type": "plugin",
+            "pluginId": "fixture",
+            "conditionType": "sample",
+            "input": { "opaque": "x".repeat(55_000) },
+        },
+    });
+    let chat = chat_id.clone();
+    let saved: cairn_contracts::ChatWakeup = serde_json::from_value(wakeup.clone()).unwrap();
+    s.store
+        .transaction(move |db| db.save_wakeup(true, &chat, Some(&saved)))
+        .await
+        .unwrap();
+    let mcp = Mcp {
+        http: reqwest::Client::new(),
+        endpoint: format!("{origin}/mcp"),
+        token,
+    };
+    let get_run = mcp.call("get_run", json!({ "runId": run_id })).await;
+    assert_eq!(result(&get_run)["run"]["run"]["wakeup"]["id"], wakeup["id"]);
+    assert_eq!(
+        result(&get_run)["run"]["run"]["wakeup"]["condition"],
+        wakeup["condition"]
+    );
+    let list_runs = mcp.call("list_runs", json!({ "taskId": chat_id })).await;
+    assert_eq!(result(&list_runs)[0]["wakeup"]["id"], wakeup["id"]);
+    let get_chat = mcp.call("get_chat", json!({ "chatId": chat_id })).await;
+    assert_eq!(result(&get_chat)["chat"]["wakeup"]["id"], wakeup["id"]);
+    assert!(result(&get_chat)["chat"]["wakeup"]["condition"].is_null());
+    let chat = chat_id.clone();
+    s.store
+        .transaction(move |db| db.save_wakeup(true, &chat, None))
+        .await
+        .unwrap();
+    let get_run = mcp.call("get_run", json!({ "runId": run_id })).await;
+    assert!(result(&get_run)["run"]["run"]["wakeup"].is_null());
+    server.abort();
+}
+
+#[tokio::test]
 async fn run_history_includes_the_engine_retries_limits_and_notices() {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
@@ -280,7 +330,7 @@ async fn run_history_includes_the_engine_retries_limits_and_notices() {
     assert_ne!(window["result"]["isError"], true);
     let page = result(&window);
     assert_eq!(page["history"], revision);
-    assert_eq!(page["events"].as_array().unwrap().len(), 4);
+    assert_eq!(page["events"].as_array().unwrap().len(), reports.len());
     let stale = mcp
         .call(
             "read_run_history",
@@ -747,20 +797,8 @@ async fn gateway_catalog_reuses_validated_tools_without_waiting_for_upstream_or_
         )
         .await
         .unwrap();
-    let task = s
-        .task_fixture(
-            json!({
-                "name": "Restricted discovery",
-                "agentId": agent["id"],
-                "prompt": "Fixture only",
-                "worktree": false,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let restricted = s
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+    let (_chat, restricted) = s
+        .chat_run_fixture(agent["id"].as_str().unwrap(), None, "Fixture only")
         .await
         .unwrap();
     let broad = manual_run(&s, "Broad discovery", "Fixture only").await;
@@ -1160,20 +1198,8 @@ async fn malformed_advertisement_scope(restricted: bool) {
     } else {
         json!(MAIN_AGENT_ID)
     };
-    let task = s
-        .task_fixture(
-            json!({
-                "name": "Malformed discovery",
-                "agentId": agent_id,
-                "prompt": "Fixture only",
-                "worktree": false,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run = s
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+    let (_chat, run) = s
+        .chat_run_fixture(agent_id.as_str().unwrap(), None, "Fixture only")
         .await
         .unwrap();
     let run_id = run["id"].as_str().unwrap();
@@ -1415,7 +1441,7 @@ for (const version of ['2026-07-28', '2025-11-25', '2025-06-18']) {
     if (catalog.tools.map(t => t.name).join(',') !== 'search,execute') throw Error('invalid compact tools');
     const agents = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.list_agents({});'} });
     if (agents.isError || agents.structuredContent.result.agents.length !== 1) throw Error('invalid result ' + JSON.stringify(agents));
-    const denied = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.create_task(input);', input: { name: 'Denied', prompt: 'No' }} });
+    const denied = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.create_chat(input);', input: {}} });
     if (!denied.isError || !denied._meta['mcp/www_authenticate']) throw Error('scope bypass');
     await client.close();
 }
@@ -1935,11 +1961,11 @@ async fn public_questionnaire_answers_preserve_choices_comments_and_withdrawal_a
         endpoint: format!("{origin}/mcp"),
         token: reader,
     };
-    let run = manual_run(&s, "Questionnaire", "Ask about platforms").await;
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = run["id"].clone();
+    let (chat, run) = s
+        .chat_run_fixture(MAIN_AGENT_ID, None, "Ask about platforms")
+        .await
+        .unwrap();
     let chat_id = chat["id"].as_str().unwrap().to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
     let question = "e".repeat(64);
     s.question_receive(
         run["id"].as_str().unwrap(),
@@ -2023,9 +2049,9 @@ async fn public_questionnaire_answers_preserve_choices_comments_and_withdrawal_a
     let repeated = mcp.call("answer_chat_question", input).await;
     assert_eq!(result(&answered), result(&repeated));
     let detail = s.chat_detail(&chat_id).await.unwrap();
-    assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(detail["messages"].as_array().unwrap().len(), 2);
     assert_eq!(
-        detail["messages"][0]["answers"]["platforms"],
+        detail["messages"][1]["answers"]["platforms"],
         json!({
             "selected": [
                 "android",
@@ -2067,7 +2093,7 @@ async fn public_questionnaire_answers_preserve_choices_comments_and_withdrawal_a
             .as_array()
             .unwrap()
             .len(),
-        1
+        2
     );
     server.abort();
 }

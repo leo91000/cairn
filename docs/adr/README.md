@@ -96,6 +96,7 @@ for current behavior.
 | 0091 | [Failed turns return unsent messages](0091-failed-turns-return-unsent-messages.md) |
 | 0092 | [Instant native environment start](0092-instant-native-environment-start.md) |
 | 0093 | [Side questions use each engine's own side mechanism, qualified per release](0093-engine-side-questions.md) |
+| 0094 | [Les programmations sont des règles de hook déclenchées par l’Horloge](0094-programmations-as-clock-hook-rules.md) |
 
 ## Renumbered collisions
 

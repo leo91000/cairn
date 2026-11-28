@@ -123,7 +123,6 @@ pub(crate) struct Accepted {
     profile: Profile,
     chat: Option<Conversation>,
     requester: Option<Requester>,
-    task: Option<(String, i64)>,
     native: Vec<(&'static str, Value)>,
     stop: CancellationToken,
 }
@@ -174,17 +173,6 @@ impl Accepted {
                         })
                     })
                     .transpose()?;
-                let task = if chat.is_none() {
-                    run["taskId"]
-                        .as_str()
-                        .map(|id| {
-                            let task = required(db.mission(id)?, "Initiating task removed")?;
-                            Ok::<_, Error>((id.to_owned(), task.created_at))
-                        })
-                        .transpose()?
-                } else {
-                    None
-                };
                 let agent = run["snapshot"]["agent"].clone();
                 let profile = Profile::capture(db, text(&agent, "id"))?;
                 let native = [
@@ -204,7 +192,6 @@ impl Accepted {
                     profile,
                     chat,
                     requester,
-                    task,
                     native,
                     stop: CancellationToken::new(),
                 }))
@@ -290,11 +277,6 @@ impl Accepted {
             {
                 return Err(revoked());
             }
-        }
-        if let Some((id, created)) = &self.task
-            && required(db.mission(id)?, "Initiating task removed")?.created_at != *created
-        {
-            return Err(revoked());
         }
         Ok(())
     }

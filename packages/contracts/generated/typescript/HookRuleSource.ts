@@ -3,4 +3,4 @@
 /**
  * How a version was saved.
  */
-export type HookRuleSource = 'app' | 'publicMcp' | 'installationAgent' | 'duplicate' | 'template'
+export type HookRuleSource = 'app' | 'publicMcp' | 'installationAgent' | 'duplicate' | 'template' | 'migration'

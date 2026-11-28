@@ -833,7 +833,7 @@ private fun AgentPage(
     if (deleting)
         Confirm(
             "Supprimer « ${baseline.name} » ?",
-            "Le serveur refusera la suppression si une mission utilise encore cet agent.",
+            "Les règles qui utilisent cet agent perdront leurs droits.",
             state.busy,
             state.error,
             { deleting = false },

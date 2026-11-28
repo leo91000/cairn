@@ -368,6 +368,7 @@ describe('delegated tasks', () => {
     slug: '',
     revision: '',
     lifecycle: 'active',
+    personParticipated: false,
     sessionRestartRequested: false,
     canRequestNewSession: false,
     unread: false,

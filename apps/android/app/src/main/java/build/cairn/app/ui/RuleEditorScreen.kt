@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import build.cairn.contracts.HookRuleCatalog
 import build.cairn.contracts.HookRuleProblem
+import build.cairn.contracts.HookRuleTrigger
 import build.cairn.contracts.RuleCatalogHook
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -105,6 +106,7 @@ fun RuleEditorScreen(
     var draft by retained.draft
     var original by retained.original
     var revision by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
+    var clockFieldsGeneration by rememberSaveable(cacheScope, ruleId) { mutableIntStateOf(0) }
     var loadedVersion by rememberSaveable(cacheScope, ruleId) { mutableIntStateOf(0) }
     var conflict by remember(cacheScope, ruleId) { mutableStateOf<JsonObject?>(null) }
     var comparingConflict by remember { mutableStateOf(false) }
@@ -388,6 +390,7 @@ fun RuleEditorScreen(
                         original = draft
                         revision = latest.text("revision")
                         loadedVersion = latest.text("version").toIntOrNull() ?: 0
+                        clockFieldsGeneration++
                         conflict = null
                         selected = ""
                     }
@@ -458,7 +461,9 @@ fun RuleEditorScreen(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         Text(
-                            hook?.title ?: definition.obj("trigger").text("hook"),
+                            hook?.title
+                                ?: describeTrigger(definition.obj("trigger"), currentCatalog)
+                                    .second,
                             style = MaterialTheme.typography.titleSmall,
                         )
                         Text(
@@ -492,7 +497,8 @@ fun RuleEditorScreen(
                                             it.title
                                     },
                                     triggerKey(definition.obj("trigger")),
-                                    definition.obj("trigger").text("hook"),
+                                    describeTrigger(definition.obj("trigger"), currentCatalog)
+                                        .second,
                                 ),
                                 enabled = canEdit,
                             ) { key ->
@@ -511,6 +517,24 @@ fun RuleEditorScreen(
                                     )
                                 )
                             }
+                            val clock =
+                                definition.obj("trigger")?.takeIf { it.text("type") == "clock" }
+                            if (clock != null)
+                                key(original, clockFieldsGeneration) {
+                                    ClockScheduleFields(
+                                        wireJson.decodeFromJsonElement<HookRuleTrigger.C>(clock),
+                                        vm.api,
+                                    ) {
+                                        update(
+                                            definition.patch(
+                                                "trigger" to
+                                                    wireJson.encodeToJsonElement<HookRuleTrigger>(
+                                                        it
+                                                    )
+                                            )
+                                        )
+                                    }
+                                }
                             if (hook?.description?.isNotBlank() == true)
                                 Text(hook.description, style = MaterialTheme.typography.bodySmall)
                             Choice(

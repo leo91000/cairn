@@ -1,31 +1,33 @@
-//! What each Cairn account has read. A conversation turn or a mission run that finished
-//! stays unread in the Fil until the account opens it. Marks belong to the
-//! account, so every device and the web share them, and each member reads on their own.
+//! What each Cairn account has read and snoozed (ADR-0094). A conversation turn that
+//! finished stays unread in the Fil until the account opens or marks it read. Marks
+//! belong to the account, so every device and the web share them, and each member reads
+//! on their own.
 //!
-//! A mission that reports it is blocked asks for attention until the account sets that outcome
-//! aside: dismissed for good, or snoozed until a time. Both last until the mission finishes again.
+//! A conversation started by a hook rule (including a clock schedule) surfaces in
+//! "For you" only when it needs someone: a pending question, a failure, or a `blocked`
+//! outcome. Once a person writes in it, it follows ordinary conversation rules.
+//! Any conversation can be snoozed until a later time (up to 30 days).
 use crate::{
     config::now,
     error::{Error, Result},
     http::Input,
-    run_status::RunStatus,
     service::Service,
     store::Db,
     validation::text,
 };
 use cairn_contracts::{
-    MarkReadInput, MarkReadOutput, OutcomeAsideAction, OutcomeDismissal, ReadTarget,
-    SetOutcomeAsideInput, SetOutcomeAsideOutput,
+    ConversationSnoozeAction, MarkReadInput, MarkReadOutput, ReadTarget,
+    SetConversationSnoozeInput, SetConversationSnoozeOutput,
 };
 use rusqlite::OptionalExtension;
 use serde_json::Value;
-use sql::{ReadKind, StoredDismissal};
+use sql::StoredSnooze;
 use std::collections::HashMap;
 
 pub mod sql;
 
 const MAX_ITEMS: usize = 200;
-/// The longest a blocked mission can be snoozed.
+/// The longest a conversation can be snoozed.
 const MAX_SNOOZE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const PREVIEW_CHARS: usize = 240;
 
@@ -56,12 +58,37 @@ pub(crate) async fn begin(s: &Service, account: &str) -> Result<()> {
         .await
 }
 
-/// One account's read marks and the mission outcomes it set aside. Without an account,
-/// nothing is unread and nothing is set aside: personal state is never shared.
+fn activity_at(chat: &Value) -> Option<i64> {
+    chat["readAt"]
+        .as_i64()
+        .or_else(|| chat["finishedAt"].as_i64())
+        .or_else(|| chat["updatedAt"].as_i64())
+}
+
+fn snooze_activity_at(chat: &Value) -> Option<i64> {
+    activity_at(chat).max(chat["lastActivityAt"].as_i64())
+}
+
+/// Opening a synchronized conversation acknowledges a due reminder, including
+/// one for an idle conversation that has never run.
+pub(crate) fn detail_reminder(db: &Db<'_>, account: &str, chat: &mut Value) -> Result<()> {
+    if chat["lifecycle"] == "active"
+        && let Some(activity_at) = snooze_activity_at(chat)
+        && let Some(until) = db.snoozed_until(account, text(chat, "id"), activity_at)?
+        && until <= now()
+    {
+        chat["readAt"] = until.into();
+    }
+    Ok(())
+}
+
+/// One account's read marks and snoozed conversations. Without an account,
+/// nothing is unread and nothing is snoozed: personal state is never shared.
 pub(crate) struct Reads {
     since: i64,
-    marks: HashMap<(ReadKind, String), i64>,
-    dismissals: HashMap<String, StoredDismissal>,
+    account: bool,
+    marks: HashMap<String, i64>,
+    snoozes: HashMap<String, StoredSnooze>,
 }
 
 impl Reads {
@@ -69,52 +96,97 @@ impl Reads {
         // Until `begin` records a start, nothing is unread.
         Ok(Self {
             since: db.read_start(account)?.unwrap_or(i64::MAX),
+            account: true,
             marks: db.read_marks(account)?,
-            dismissals: db.dismissals(account)?,
+            snoozes: db.snoozes(account)?,
         })
     }
 
     pub(crate) fn load_for(db: &Db<'_>, account: Option<&str>) -> Result<Self> {
         match account {
-            Some(account) => Self::load(db, account),
-            None => Ok(Self {
+            Some(account) if !account.is_empty() => Self::load(db, account),
+            _ => Ok(Self {
                 since: i64::MAX,
+                account: false,
                 marks: HashMap::new(),
-                dismissals: HashMap::new(),
+                snoozes: HashMap::new(),
             }),
         }
     }
 
-    fn unread(&self, kind: ReadKind, id: &str, finished_at: Option<i64>) -> bool {
-        let read_at = self
-            .marks
-            .get(&(kind, id.to_owned()))
-            .copied()
-            .unwrap_or(0)
-            .max(self.since);
-        finished_at.is_some_and(|finished| finished > read_at)
+    fn read_at_mark(&self, id: &str) -> i64 {
+        self.marks.get(id).copied().unwrap_or(0).max(self.since)
     }
 
-    /// Marks finished conversation turns the account has not opened since, with the agent's
-    /// last words as a preview. A plugin's conversations answer in their own channel, so their
-    /// replies wait on nobody here.
+    fn unread(&self, id: &str, finished_at: Option<i64>, needs_acknowledgement: bool) -> bool {
+        let mark = if needs_acknowledgement {
+            self.marks.get(id).copied().unwrap_or(0)
+        } else {
+            self.read_at_mark(id)
+        };
+        self.account && finished_at.is_some_and(|finished| finished > mark)
+    }
+
+    /// Marks conversations the account has not acknowledged since their latest relevant
+    /// activity, and attaches snooze deadlines until their reminder is acknowledged.
+    ///
+    /// A plugin's ordinary replies stay in its own channel. Blocked outcomes
+    /// and explicit reminders still reach the account. A rule-started conversation
+    /// without human participation only asks
+    /// for attention on a pending question, a failure or a `blocked` outcome (ADR-0094).
     pub(crate) fn chats(&self, db: &Db<'_>, chats: &mut [Value]) -> Result<()> {
+        let at = now();
         for chat in chats {
-            let id = text(chat, "id");
+            let id = text(chat, "id").to_owned();
             let question = chat["pendingQuestions"].as_u64().unwrap_or(0) > 0;
-            let finished = matches!(
-                chat["status"].as_str(),
-                Some("succeeded" | "failed" | "interrupted")
-            ) && chat["requestedBy"].is_null()
+            let status = chat["status"].as_str();
+            let preparation_failed = chat["paused"] == true && chat["error"].is_string();
+            let failed = matches!(status, Some("failed" | "interrupted")) || preparation_failed;
+            let blocked = status == Some("succeeded") && chat["outcome"]["status"] == "blocked";
+            let quiet_rule = !chat["originRule"].is_null() && chat["personParticipated"] != true;
+            let finished = matches!(status, Some("succeeded" | "failed" | "interrupted"))
+                && chat["requestedBy"].is_null()
                 && chat["paused"] != true;
-            let unread = (question || finished)
-                && db.kv(&format!("plugin-conversation:{id}"))?.is_none()
+            let wants_attention = question || failed || blocked || (finished && !quiet_rule);
+
+            let activity_at = activity_at(chat);
+            let matching_snooze = self.snoozes.get(&id).copied().filter(|snooze| {
+                snooze_activity_at(chat).is_some_and(|observed| observed <= snooze.finished_at)
+            });
+            chat["snoozedUntil"] =
+                matching_snooze.map_or(Value::Null, |snooze| snooze.until.into());
+
+            if let Some(snooze) = matching_snooze
+                && snooze.until > at
+            {
+                // The row must acknowledge the exact observation that was snoozed,
+                // including a reminder that was snoozed again.
+                chat["readAt"] = snooze.finished_at.into();
+                chat["unread"] = false.into();
+                continue;
+            }
+
+            // An expired snooze surfaces the conversation again until acknowledged
+            // after its deadline.
+            let expired_snooze_at = matching_snooze
+                .filter(|snooze| snooze.until <= at)
+                .map(|snooze| snooze.until);
+            let effective_at = activity_at.max(expired_snooze_at);
+            if let Some(snoozed_at) = expired_snooze_at
+                && chat["readAt"].as_i64().is_none_or(|r| snoozed_at > r)
+            {
+                chat["readAt"] = snoozed_at.into();
+            }
+
+            let reminder_due = expired_snooze_at.is_some();
+            let attention = blocked
+                || reminder_due
+                || (wants_attention && db.kv(&format!("plugin-conversation:{id}"))?.is_none());
+            let unread = attention
                 && self.unread(
-                    ReadKind::Chat,
-                    id,
-                    chat["readAt"]
-                        .as_i64()
-                        .or_else(|| chat["finishedAt"].as_i64()),
+                    &id,
+                    effective_at,
+                    blocked || preparation_failed || reminder_due,
                 );
             chat["unread"] = unread.into();
             if unread {
@@ -122,49 +194,6 @@ impl Reads {
             }
         }
         Ok(())
-    }
-
-    /// Marks mission runs that finished after the account last opened their mission, and the
-    /// outcomes it set aside.
-    pub(crate) fn runs(&self, db: &Db<'_>, runs: &mut [Value]) -> Result<()> {
-        for run in runs {
-            let mission = run["trigger"] != "chat"
-                && matches!(
-                    run["status"].as_str(),
-                    Some("succeeded" | "failed" | "interrupted")
-                );
-            let task = text(run, "taskId").to_owned();
-            let unread =
-                mission && self.unread(ReadKind::Mission, &task, run["finishedAt"].as_i64());
-            run["unread"] = unread.into();
-            if unread {
-                run["preview"] = summary_preview(db, text(run, "id"))?;
-            }
-            run["dismissal"] = serde_json::to_value(self.dismissal(&task, run))?;
-        }
-        Ok(())
-    }
-
-    /// How the account set this run's outcome aside, if it still applies. A later finish asks
-    /// again, and input the agent asked for can only be snoozed.
-    fn dismissal(&self, task: &str, run: &Value) -> Option<OutcomeDismissal> {
-        let waiting = run["trigger"] != "chat"
-            && run["status"] == RunStatus::Succeeded
-            && run["outcome"]["status"]
-                .as_str()
-                .is_some_and(|status| status != "completed");
-        let dismissal = self.dismissals.get(task).filter(|dismissal| {
-            waiting
-                && run["finishedAt"]
-                    .as_i64()
-                    .is_some_and(|finished| finished <= dismissal.finished_at)
-        })?;
-        if dismissal.until.is_none() && run["outcome"]["status"] == "needs_input" {
-            return None;
-        }
-        Some(OutcomeDismissal {
-            until: dismissal.until,
-        })
     }
 }
 
@@ -224,7 +253,8 @@ pub(crate) fn preview(summary: &str) -> String {
 }
 
 /// Records the completion the account actually saw, so opening an older run or a delayed
-/// request cannot consume newer work.
+/// request cannot consume newer work. A read acknowledges a due reminder or the active
+/// snooze whose deadline the caller explicitly observed.
 pub(crate) async fn mark(
     s: &Service,
     account: &str,
@@ -241,17 +271,22 @@ pub(crate) async fn mark(
     {
         return Err(Error::bad("Include the finish time of the work you read."));
     }
+    if input.items.iter().any(|item| {
+        item.snoozed_until
+            .is_some_and(|until| until <= 0 || until > read_at + MAX_SNOOZE_MS)
+    }) {
+        return Err(Error::bad("Include the observed reminder deadline."));
+    }
     let read = input.items.len() as u32;
     let account = account.to_owned();
     s.store
         .transaction(move |db| {
             db.start_reading(&account, read_at)?;
             for item in &input.items {
-                let (kind, id) = match &item.target {
-                    ReadTarget::Chat { chat_id } => (ReadKind::Chat, chat_id.to_string()),
-                    ReadTarget::Mission { task_id } => (ReadKind::Mission, task_id.to_string()),
-                };
-                db.mark_read(&account, kind, &id, item.finished_at)?;
+                let ReadTarget::Chat { chat_id } = &item.target;
+                let id = chat_id.to_string();
+                db.mark_read(&account, &id, item.finished_at)?;
+                db.acknowledge_snooze(&account, &id, item.finished_at, item.snoozed_until)?;
             }
             Ok(())
         })
@@ -259,47 +294,65 @@ pub(crate) async fn mark(
     Ok(MarkReadOutput { read, read_at })
 }
 
-/// Sets a blocked mission outcome aside for the account, or brings it back.
-pub(crate) async fn set_aside(
+/// Snoozes a conversation until a later time (up to 30 days), or brings it back early.
+pub(crate) async fn snooze(
     s: &Service,
     account: &str,
-    input: SetOutcomeAsideInput,
-) -> Result<SetOutcomeAsideOutput> {
+    input: SetConversationSnoozeInput,
+) -> Result<SetConversationSnoozeOutput> {
     let at = now();
-    let finished = |finished_at: i64| {
-        if finished_at <= 0 || finished_at > at {
-            return Err(Error::bad(
-                "Include the finish time of the outcome you set aside.",
-            ));
-        }
-        Ok(finished_at)
-    };
-    let dismissal = match input.action {
-        OutcomeAsideAction::Restore => None,
-        OutcomeAsideAction::Dismiss { finished_at } => Some(StoredDismissal {
-            finished_at: finished(finished_at)?,
-            until: None,
-        }),
-        OutcomeAsideAction::Snooze { finished_at, until } => {
-            if until <= at || until > at + MAX_SNOOZE_MS {
-                return Err(Error::bad("Snooze a mission for up to 30 days."));
+    let snooze = match input.action {
+        ConversationSnoozeAction::Restore => None,
+        ConversationSnoozeAction::Snooze { finished_at, until } => {
+            if finished_at <= 0 || finished_at > at {
+                return Err(Error::bad(
+                    "Include the observed activity time of the conversation you snooze.",
+                ));
             }
-            Some(StoredDismissal {
-                finished_at: finished(finished_at)?,
-                until: Some(until),
-            })
+            if until <= at || until > at + MAX_SNOOZE_MS {
+                return Err(Error::bad("Snooze a conversation for up to 30 days."));
+            }
+            Some(StoredSnooze { finished_at, until })
         }
     };
     let account = account.to_owned();
-    let task = input.task_id.to_string();
-    s.store
-        .transaction(move |db| db.set_dismissal(&account, &task, dismissal))
+    let chat = input.chat_id.to_string();
+    let snoozed_until = s
+        .store
+        .transaction(move |db| {
+            db.start_reading(&account, at)?;
+            if let Some(snooze) = snooze {
+                let conversation = crate::chats::conversation(db, &chat)?;
+                let finished_at = conversation
+                    .run_id
+                    .as_deref()
+                    .map(|run| db.conversation_run(run))
+                    .transpose()?
+                    .flatten()
+                    .and_then(|run| run["finishedAt"].as_i64());
+                let (_, question_at) = db.pending_question_summary(&chat)?;
+                let failure_at =
+                    crate::chats::preparation_failure(db, &conversation)?.map(|failure| failure.at);
+                let activity_at = question_at
+                    .max(finished_at)
+                    .max(failure_at)
+                    .unwrap_or(conversation.updated_at)
+                    .max(conversation.last_activity_at.unwrap_or(0));
+                if snooze.finished_at >= activity_at {
+                    db.set_snooze(&account, &chat, Some(snooze))?;
+                }
+                Ok(db
+                    .snoozed_until(&account, &chat, activity_at)?
+                    .filter(|until| *until > at))
+            } else {
+                db.restore_snooze(&account, &chat, at)?;
+                Ok(None)
+            }
+        })
         .await?;
-    Ok(SetOutcomeAsideOutput {
-        task_id: input.task_id,
-        dismissal: dismissal.map(|dismissal| OutcomeDismissal {
-            until: dismissal.until,
-        }),
+    Ok(SetConversationSnoozeOutput {
+        chat_id: input.chat_id,
+        snoozed_until,
     })
 }
 
@@ -335,8 +388,6 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         connection.execute_batch(&format!("ALTER TABLE runs RENAME TO retained_runs; CREATE VIEW runs AS SELECT {columns} FROM retained_runs;")).unwrap();
-        // SQLite retargets dependent views when the physical table is renamed.
-        // Rebind the wire view so this probe also guards its snapshot access.
         connection.execute_batch("DROP VIEW run_views").unwrap();
         connection
             .execute_batch(crate::runs::PROJECTION_SCHEMA)

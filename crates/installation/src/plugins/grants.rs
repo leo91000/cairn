@@ -548,7 +548,7 @@ pub(crate) async fn replace(
     // The person of an eligible conversation, observed before publication is held.
     let bearer = authority.bearer.clone();
     let authors = match &bearer {
-        Some(_) if reduce_only => Some(s.missions.authors.lock().await),
+        Some(_) if reduce_only => Some(s.memberships.authors.lock().await),
         _ => None,
     };
     let eligibility = match &authors {

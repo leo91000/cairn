@@ -13,6 +13,7 @@ import { deleteHookRule } from '../../../../packages/contracts/generated/deleteH
 import { duplicateHookRule } from '../../../../packages/contracts/generated/duplicateHookRule'
 import { liftHookRuleBudget } from '../../../../packages/contracts/generated/liftHookRuleBudget'
 import { listHookRuleVersions } from '../../../../packages/contracts/generated/listHookRuleVersions'
+import { runHookRule } from '../../../../packages/contracts/generated/runHookRule'
 import { setHookRuleEmergencyPause } from '../../../../packages/contracts/generated/setHookRuleEmergencyPause'
 import { setHookRuleEnabled } from '../../../../packages/contracts/generated/setHookRuleEnabled'
 import { api, notify, state } from '../api'
@@ -53,6 +54,7 @@ const emit = defineEmits<{ changed: [rule: HookRule | null], close: [] }>()
 const router = useRouter()
 
 const tab = ref<'flow' | 'history' | 'versions'>('flow')
+const latestTriggering = ref('')
 const busy = ref(false)
 const error = ref('')
 const deleting = ref(false)
@@ -89,6 +91,15 @@ async function act(work: () => Promise<HookRule | null>, done: string) {
 const toggle = () => act(() => setHookRuleEnabled(api, { ruleId: props.rule.id, enabled: !!props.rule.blocks.some(block => block.kind === 'disabled') }), props.rule.blocks.some(block => block.kind === 'disabled') ? 'Rule enabled' : 'Rule disabled')
 const pause = (paused: boolean) => act(() => setHookRuleEmergencyPause(api, { ruleId: props.rule.id, paused }), paused ? 'Rule paused' : 'Rule resumed')
 const lift = () => act(() => liftHookRuleBudget(api, { ruleId: props.rule.id }), 'Rule resumed')
+
+async function runNow() {
+  await act(async () => {
+    const triggering = await runHookRule(api, { ruleId: props.rule.id })
+    latestTriggering.value = triggering.id
+    tab.value = 'history'
+    return props.rule
+  }, 'Schedule triggered')
+}
 
 async function duplicate() {
   await act(async () => {
@@ -128,6 +139,7 @@ const sources: Record<string, string> = {
   installationAgent: 'by an agent',
   duplicate: 'as a duplicate',
   template: 'from a template',
+  migration: 'from a migrated mission',
 }
 </script>
 
@@ -165,6 +177,9 @@ const sources: Record<string, string> = {
         <span class="min-w-0">
           <span class="block text-2xs font-bold tracking-wide text-muted uppercase">When</span>
           <span class="block truncate text-sm font-semibold">{{ trigger.source }} · {{ trigger.title }}</span>
+          <span v-if="rule.nextRun != null" class="block text-xs text-muted">
+            Next run <time aria-label="Next run" :datetime="new Date(rule.nextRun).toISOString()">{{ new Date(rule.nextRun).toLocaleString() }}</time>
+          </span>
         </span>
         <Icon :name="Webhook" :size="15" class="ml-auto text-muted" />
       </div>
@@ -231,6 +246,9 @@ const sources: Record<string, string> = {
     </p>
 
     <div class="flex flex-wrap gap-2">
+      <UiButton v-if="rule.allowed.runNow" :disabled="busy" @click="runNow">
+        <Icon :name="Play" :size="15" />Run now
+      </UiButton>
       <UiButton v-if="rule.allowed.edit" variant="primary" @click="router.push(`/rules/${rule.id}/edit`)">
         <Icon :name="Pencil" :size="15" />Edit
       </UiButton>
@@ -271,6 +289,7 @@ const sources: Record<string, string> = {
     />
     <RuleHistory
       v-if="tab === 'history'"
+      :key="latestTriggering"
       :rule-id="rule.id"
       :version="rule.version"
       :definition="rule.definition"

@@ -23,6 +23,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import build.cairn.contracts.HookRuleCatalog
+import build.cairn.contracts.HookRuleInput
+import build.cairn.contracts.runHookRule
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
@@ -138,7 +140,14 @@ fun RulesScreen(
                     if (entry.text("id") != saved.text("id")) entry
                     else
                         entry.patch(
-                            *listOf("revision", "version", "blocks", "allowed", "updatedAt")
+                            *listOf(
+                                    "revision",
+                                    "version",
+                                    "blocks",
+                                    "allowed",
+                                    "updatedAt",
+                                    "nextRun",
+                                )
                                 .map { it to saved[it] }
                                 .toTypedArray()
                         )
@@ -146,6 +155,13 @@ fun RulesScreen(
         detail = saved
         selected = saved.text("id")
     }
+    var scheduling by rememberSaveable { mutableStateOf(false) }
+    val scheduleCatalog = catalog
+    if (scheduling && scheduleCatalog != null && scheduleCatalog.agents.isNotEmpty())
+        ScheduleAgentDialog(vm, state, scheduleCatalog, agentFilter, { scheduling = false }) {
+            scheduling = false
+            changed(it)
+        }
     val visible = rules.filter { rule ->
         (filter != "mine" || rule.text("creatorAccountId") == state.session.account?.id) &&
             (filter != "blocked" || rule.list("blocks").isNotEmpty()) &&
@@ -167,6 +183,13 @@ fun RulesScreen(
                             Text("+ Créer")
                         }
                     }
+                    if (instanceFilter.isBlank() || scopeCleared)
+                        OutlinedButton(
+                            onClick = { scheduling = true },
+                            enabled = catalog?.agents?.isNotEmpty() == true,
+                        ) {
+                            Text("Programmer un agent")
+                        }
                     if (
                         !scopeCleared && (agentFilter.isNotBlank() || instanceFilter.isNotBlank())
                     ) {
@@ -253,6 +276,12 @@ fun RulesScreen(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
+                                rule["nextRun"]?.jsonPrimitive?.longOrNull?.let { next ->
+                                    Text(
+                                        "Prochaine exécution ${upcomingStamp(next)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
                             }
                         }
                     }
@@ -347,6 +376,7 @@ internal fun RuleDetailPanel(
 ) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable(rule.text("id")) { mutableStateOf("flow") }
+    var latestTriggering by rememberSaveable(rule.text("id")) { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     var deleting by remember { mutableStateOf(false) }
@@ -406,6 +436,12 @@ internal fun RuleDetailPanel(
                     "${trigger.first} · ${trigger.second}",
                     style = MaterialTheme.typography.titleSmall,
                 )
+                rule["nextRun"]?.jsonPrimitive?.longOrNull?.let { next ->
+                    Text(
+                        "Prochaine exécution ${upcomingStamp(next)}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 Text(
                     "Avec les droits de ${ruleAgentName(state, definition.text("executionAgentId"))}",
                     style = MaterialTheme.typography.bodySmall,
@@ -452,6 +488,27 @@ internal fun RuleDetailPanel(
             }
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (rule.allowed("runNow"))
+                OutlinedButton(
+                    enabled = !busy,
+                    onClick = {
+                        scope.launch {
+                            busy = true
+                            error = ""
+                            try {
+                                latestTriggering = vm.api.runHookRule(HookRuleInput(id)).id
+                                tab = "history"
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                error = e.message.orEmpty()
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    },
+                ) {
+                    Text("Lancer maintenant")
+                }
             if (rule.allowed("edit"))
                 Button(onClick = { edit(id) }, enabled = !busy) { Text("Modifier") }
             val disabled = blocks.any { it.text("kind") == "disabled" }
@@ -521,7 +578,7 @@ internal fun RuleDetailPanel(
                     catalog,
                     { ruleAgentName(state, it) },
                 )
-            "history" -> RuleHistoryPanel(vm, id)
+            "history" -> key(latestTriggering) { RuleHistoryPanel(vm, id, openConversation) }
             "versions" ->
                 RuleVersionsPanel(vm, id, catalog, { ruleAgentName(state, it) }, openConversation)
         }
@@ -595,6 +652,7 @@ private fun RuleVersionsPanel(
                             "publicMcp" -> "depuis le MCP public"
                             "duplicate" -> "par duplication"
                             "template" -> "depuis un modèle"
+                            "migration" -> "depuis une mission migrée"
                             else -> "depuis les applications"
                         }
                     Text("Enregistrée $source", style = MaterialTheme.typography.bodySmall)
@@ -613,7 +671,11 @@ private fun RuleVersionsPanel(
 }
 
 @Composable
-internal fun RuleHistoryPanel(vm: CairnViewModel, ruleId: String) {
+internal fun RuleHistoryPanel(
+    vm: CairnViewModel,
+    ruleId: String,
+    openConversation: (String) -> Unit,
+) {
     var entries by remember(ruleId) { mutableStateOf<List<JsonElement>>(emptyList()) }
     var quiet by remember(ruleId) { mutableLongStateOf(0) }
     var refused by remember(ruleId) { mutableLongStateOf(0) }
@@ -740,6 +802,21 @@ internal fun RuleHistoryPanel(vm: CairnViewModel, ruleId: String) {
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         else {
+                            val event = loaded.obj("event")
+                            val migrated =
+                                event
+                                    ?.takeIf {
+                                        it.text("hook") == "clock" &&
+                                            it.text("instanceId").isBlank()
+                                    }
+                                    ?.obj("payload")
+                                    ?.obj("migratedConversation")
+                            val conversationId = migrated.text("id")
+                            if (conversationId.isNotBlank()) {
+                                TextButton(onClick = { openConversation(conversationId) }) {
+                                    Text("Ouvrir la conversation · ${migrated.text("title")}")
+                                }
+                            }
                             loaded.list("steps").forEachIndexed { index, step ->
                                 Text(
                                     "${index + 1}. ${step.text("label").ifBlank { step.text("nodeId") }} · ${triggeringStatusTitles[step.text("status")] ?: step.text("status")}",
@@ -759,10 +836,23 @@ internal fun RuleHistoryPanel(vm: CairnViewModel, ruleId: String) {
                                         step.text("error"),
                                         color = MaterialTheme.colorScheme.error,
                                     )
+                                val started = step.obj("result").text("conversationId")
+                                if (
+                                    step.text("kind") == "startAgent" &&
+                                        step.text("status") == "completed" &&
+                                        started.isNotBlank()
+                                ) {
+                                    TextButton(onClick = { openConversation(started) }) {
+                                        Text("Ouvrir la conversation")
+                                    }
+                                }
                                 RuleDataDisclosure("Entrée", step.jsonObject["input"])
                                 RuleDataDisclosure("Résultat", step.jsonObject["result"])
                             }
-                            RuleDataDisclosure("Événement reçu", loaded["event"])
+                            RuleDataDisclosure(
+                                if (migrated == null) "Événement reçu" else "Exécution d’origine",
+                                loaded["event"],
+                            )
                         }
                     }
                 }

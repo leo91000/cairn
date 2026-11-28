@@ -5,4 +5,9 @@ import type { PluginInstanceId } from './PluginInstanceId'
 /**
  * What a rule listens to.
  */
-export type HookRuleTrigger = { type: 'plugin', instanceId: PluginInstanceId, hook: string } | { type: 'cairn', hook: CairnHookKind }
+export type HookRuleTrigger = { type: 'plugin', instanceId: PluginInstanceId, hook: string } | { type: 'cairn', hook: CairnHookKind } | {
+  type: 'clock'
+  cron?: string | null
+  at?: number | null
+  timezone: string
+}

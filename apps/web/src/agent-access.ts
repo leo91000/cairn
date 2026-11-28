@@ -595,7 +595,7 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
   if (backendOf(draft.access) !== 'firecracker' && backendOf(saved.access) === 'firecracker')
     lines.push({ kind: 'power', section: 'nodes', text: `Added: native execution. ${nativeHelp}` })
   if (draft.access.installation && !saved.access.installation)
-    lines.push({ kind: 'power', section: 'powers', text: 'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.' })
+    lines.push({ kind: 'power', section: 'powers', text: 'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections and conversations on your behalf.' })
   if (draft.access.delegation && !saved.access.delegation)
     lines.push({ kind: 'power', section: 'powers', text: 'Added: task delegation. This agent will be able to start conversations that report back to it, on any coding agent and model, as itself or as an agent whose access it covers.' })
   for (const id of listChanges(saved.plugins ?? [], draft.plugins ?? []).added)

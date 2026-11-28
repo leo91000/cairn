@@ -20,6 +20,12 @@ pub(crate) const MAX_CONDITION_DEPTH: usize = 6;
 pub(crate) const MAX_LITERAL: usize = 16_384;
 /// Fits the apps' request limit, so a saved rule can always be saved again.
 pub(crate) const MAX_DEFINITION: usize = 120_000;
+pub(crate) const MAX_PROMPT_CHARS: usize = 50_000;
+// An escaped JSON character can occupy six bytes. Keep room for the action's
+// key and author while preserving the full size of a legacy mission brief.
+pub(crate) const MAX_START_AGENT_INPUT: usize = MAX_PROMPT_CHARS * 6 + 4096;
+const MAX_CLOCK_DEFINITION: usize = 320_000;
+pub(crate) const MAX_RULE_WRITE_BYTES: usize = 340_000;
 pub(crate) const MAX_WAIT_SECONDS: u32 = 7 * 86_400;
 pub(crate) const MAX_TRIGGERINGS_PER_HOUR: u32 = 600;
 pub(crate) const MAX_CONVERSATIONS_PER_HOUR: u32 = 100;
@@ -123,10 +129,18 @@ impl Checker {
         if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
             self.problem("/name", "Enter a name of 1 to 100 characters.");
         }
-        if serde_json::to_vec(definition).map_or(true, |bytes| bytes.len() > MAX_DEFINITION) {
+        let definition_limit = if matches!(definition.trigger, HookRuleTrigger::Clock { .. }) {
+            MAX_CLOCK_DEFINITION
+        } else {
+            MAX_DEFINITION
+        };
+        if serde_json::to_vec(definition).map_or(true, |bytes| bytes.len() > definition_limit) {
             self.problem(
                 "",
-                "A rule has at most 120 KB: shorten its texts or split it.",
+                &format!(
+                    "A rule has at most {} KB: shorten its texts or split it.",
+                    definition_limit / 1000
+                ),
             );
         }
         if definition.description.chars().count() > 2000 {
@@ -150,6 +164,7 @@ impl Checker {
     }
 
     fn tree(&mut self, definition: &HookRuleDefinition, payload: Option<&Value>) {
+        self.clock = matches!(definition.trigger, HookRuleTrigger::Clock { .. });
         let mut scope = Scope::default();
         for name in RESERVED {
             scope.names.insert((*name).to_owned());
@@ -218,6 +233,14 @@ pub(crate) fn check(db: &Db<'_>, request: &Request<'_>) -> Result<Checked> {
                 agent_id: agent.clone(),
                 instance_id: String::new(),
                 name: hook.key().to_owned(),
+            });
+        }
+        HookRuleTrigger::Clock { .. } => {
+            uses.insert(Use {
+                kind: "clock",
+                agent_id: agent.clone(),
+                instance_id: String::new(),
+                name: String::new(),
             });
         }
     }
@@ -322,7 +345,9 @@ pub(crate) fn warnings(
     definition: &HookRuleDefinition,
     creator: &str,
 ) -> Result<Vec<HookRuleWarning>> {
-    if tests_author(&definition.steps) {
+    if matches!(definition.trigger, HookRuleTrigger::Clock { .. })
+        || tests_author(&definition.steps)
+    {
         return Ok(Vec::new());
     }
     let mut started = BTreeSet::new();
@@ -379,7 +404,8 @@ pub(crate) fn tests_author(nodes: &[RuleNode]) -> bool {
             RuleCondition::AuthorIn { .. }
             | RuleCondition::AuthorStartedConversation { .. }
             | RuleCondition::AuthorQuota { .. } => true,
-            RuleCondition::ConversationExists { .. } => false,
+            RuleCondition::ConversationExists { .. }
+            | RuleCondition::RuleConversationWorking {} => false,
         }
     }
     nodes.iter().any(|node| match node {
@@ -402,6 +428,38 @@ fn trigger_payload(
 ) -> Result<Option<Value>> {
     match &request.definition.trigger {
         HookRuleTrigger::Cairn { hook } => Ok(Some(catalog::cairn_payload(*hook))),
+        HookRuleTrigger::Clock { cron, at, timezone } => {
+            if timezone.trim().is_empty() || timezone.parse::<chrono_tz::Tz>().is_err() {
+                checker.problem("/trigger/timezone", "Choose a valid IANA timezone.");
+            }
+            match (cron.as_deref(), *at) {
+                (Some(pattern), None) => {
+                    if let Err(error) =
+                        crate::service::next_occurrences(pattern, timezone, crate::config::now(), 1)
+                    {
+                        checker.problem("/trigger/cron", &error.message);
+                    }
+                }
+                (None, Some(target)) => {
+                    if !(1..=cairn_contracts::MAX_CLOCK_DATE_MILLIS).contains(&target) {
+                        checker.problem("/trigger/at", "Choose a valid date and time.");
+                    }
+                }
+                (Some(_), Some(_)) => {
+                    checker.problem(
+                        "/trigger",
+                        "Choose either a 5-field cron schedule or a single date, not both.",
+                    );
+                }
+                (None, None) => {
+                    checker.problem(
+                        "/trigger",
+                        "Enter a 5-field cron schedule or a single date.",
+                    );
+                }
+            }
+            Ok(Some(catalog::clock_payload()))
+        }
         HookRuleTrigger::Plugin { instance_id, hook } => {
             let instance = instance_id.to_string();
             let Some((connection, manifest)) = request.instances.manifest(&instance) else {
@@ -575,6 +633,7 @@ struct Checker {
     problems: Vec<HookRuleProblem>,
     ids: BTreeSet<String>,
     nodes: usize,
+    clock: bool,
 }
 
 impl Checker {
@@ -716,15 +775,36 @@ impl Checker {
                 author,
                 ..
             } => {
-                self.value(prompt, &format!("{path}/prompt"), scope);
+                let prompt_path = format!("{path}/prompt");
+                if let RuleValue::Literal {
+                    value: Value::String(brief),
+                } = prompt
+                {
+                    if brief.chars().count() > MAX_PROMPT_CHARS {
+                        self.problem(&prompt_path, "The brief has at most 50,000 characters.");
+                    }
+                } else {
+                    self.value(prompt, &prompt_path, scope);
+                }
                 if let Some(key) = key {
-                    self.key(key, &format!("{path}/key"), scope);
+                    let key_path = format!("{path}/key");
+                    if self.clock {
+                        self.problem(
+                            &key_path,
+                            "Clock rules start a new conversation without a key.",
+                        );
+                    } else {
+                        self.key(key, &key_path, scope);
+                    }
                 }
                 if let Some(author) = author {
                     self.author(author, &format!("{path}/author"), scope);
                 }
             }
             RuleAction::SteerConversation { key, message } => {
+                if self.clock {
+                    self.problem(path, "Clock rules cannot steer an existing conversation.");
+                }
                 self.key(key, &format!("{path}/key"), scope);
                 self.value(message, &format!("{path}/message"), scope);
             }
@@ -930,6 +1010,7 @@ impl Checker {
                     );
                 }
             }
+            RuleCondition::RuleConversationWorking {} => {}
         }
     }
 }

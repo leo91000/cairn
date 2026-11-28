@@ -1230,7 +1230,7 @@ async fn installation_access_is_opt_in_and_complete_profile_replacements_preserv
 }
 
 #[tokio::test]
-async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
+async fn installation_catalog_exposes_clock_rules_and_conversation_controls() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let main = enabled_main(&s).await;
@@ -1266,13 +1266,32 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         offset = next;
     }
     for name in [
-        "create_task",
-        "list_tasks",
+        "run_hook_rule",
+        "preview_schedule",
+        "snooze_chat",
         "get_run",
-        "run_task",
         "delete_agent",
     ] {
-        assert!(tools.iter().any(|tool| tool["name"] == name));
+        assert!(tools.iter().any(|tool| tool["name"] == name), "{name}");
+    }
+    for removed in [
+        "list_tasks",
+        "get_task",
+        "create_task",
+        "update_task",
+        "replace_task",
+        "set_task_state",
+        "delete_task",
+        "list_task_activity",
+        "run_task",
+        "retry_run",
+        "convert_run_to_chat",
+        "set_outcome_aside",
+    ] {
+        assert!(
+            !tools.iter().any(|tool| tool["name"] == removed),
+            "{removed}"
+        );
     }
     let public: Value =
         serde_json::from_str(include_str!("../../schemas/mcp-operations.json")).unwrap();
@@ -1298,8 +1317,6 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "cancel_mcp_connection",
     ]);
     public_names.extend([
-        "run_task",
-        "retry_run",
         "cancel_run",
         "cleanup_run",
         "list_runs",
@@ -1316,7 +1333,6 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "list_chats",
         "get_chat",
         "create_chat",
-        "convert_run_to_chat",
         "send_chat_message",
         "edit_chat_message",
         "delete_chat_message",
@@ -1380,14 +1396,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "get_agent_avatar_configuration",
         "list_agent_accounts",
         "generate_agent_avatar",
-        "list_tasks",
-        "get_task",
-        "create_task",
-        "replace_task",
-        "set_task_state",
-        "delete_task",
         "preview_schedule",
-        "list_task_activity",
         "list_projects",
         "get_project",
         "save_project",
@@ -1417,7 +1426,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     ]);
     public_names.extend([
         "mark_read",
-        "set_outcome_aside",
+        "snooze_chat",
         "get_installation_settings",
         "get_coding_agent_configuration",
         "preview_coding_agent_configuration",
@@ -1455,6 +1464,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "set_hook_rule_enabled",
         "set_hook_rule_emergency_pause",
         "lift_hook_rule_budget",
+        "run_hook_rule",
         "duplicate_hook_rule",
         "list_hook_rule_templates",
         "install_hook_rule_template",
@@ -1469,49 +1479,18 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     assert_eq!(deletion["annotations"]["destructiveHint"], true);
     assert_eq!(deletion["annotations"]["readOnlyHint"], false);
 
-    let created = call(
-        &s,
-        &configuration,
-        "create_task",
-        json!({ "settings": {
-            "name": "Weekly audit", "prompt": "Audit", "agentId": MAIN_AGENT_ID,
-            "cron": "0 9 * * 1", "timezone": "UTC", "worktree": false,
-        } }),
-    )
-    .await;
-    let task = result(&created);
-    assert!(task["nextRun"].is_number());
-    assert_eq!(task["authorId"], "fixture-owner");
-    let tasks = call(&s, &configuration, "list_tasks", json!({})).await;
-    assert!(
-        result(&tasks)["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["id"] == task["id"])
-    );
-    let mut update = task.clone();
-    update["enabled"] = false.into();
-    let updated = call(
-        &s,
-        &configuration,
-        "replace_task",
-        json!({ "taskId": task["id"], "revision": task["revision"], "settings": mission_settings(&update) }),
-    )
-    .await;
-    assert_eq!(result(&updated)["nextRun"], Value::Null);
-    let queued = call(
-        &s,
-        &configuration,
-        "run_task",
-        json!({ "taskId": task["id"] }),
-    )
-    .await;
-    let queued_id = result(&queued)["id"].clone();
-    // The mission remembers which agent work started it, so it can wait on that work.
-    let requested_by = &s.store.run(queued_id.as_str().unwrap()).await.unwrap()["requestedBy"];
-    assert_eq!(requested_by["runId"], run["id"]);
-    assert_eq!(requested_by["taskId"], run["taskId"]);
+    let (target, _) = active_run(&s, &main).await;
+    let queued_id = target["id"].clone();
+    s.store
+        .change_run(
+            queued_id.as_str().unwrap(),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Queued),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     let cancelled = call(
         &s,
         &configuration,
@@ -1614,9 +1593,6 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
         )
         .await
         .unwrap();
-    s.remove_mission_fixture(run["taskId"].as_str().unwrap())
-        .await
-        .unwrap();
     s.store
         .transaction({
             let id = id.to_owned();
@@ -1703,33 +1679,8 @@ async fn delete_agent_rejects_main_task_references_and_active_work() {
         .await
         .unwrap();
     let id = agent["id"].as_str().unwrap();
-    let task = s
-        .task_fixture(
-            json!({
-                "name": "Archived maintenance",
-                "prompt": "Maintain",
-                "agentId": id,
-                "archived": true,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let assigned = call(&s, &configuration, "delete_agent", json!({ "id": id })).await;
-    assert_eq!(assigned["result"]["isError"], true);
-    assert_eq!(
-        assigned["result"]["content"][0]["text"],
-        "This item is used by a task. Update or remove that task first."
-    );
-    s.remove_mission_fixture(task["id"].as_str().unwrap())
-        .await
-        .unwrap();
 
-    let (run, _) = active_run(&s, &agent).await;
-    let task_id = run["taskId"].as_str().unwrap();
-    let mut task = s.mission_snapshot_fixture(task_id).await.unwrap();
-    task["agentId"] = MAIN_AGENT_ID.into();
-    s.task_fixture(task, Some(task_id)).await.unwrap();
+    let (_run, _) = active_run(&s, &agent).await;
     let busy = call(&s, &configuration, "delete_agent", json!({ "id": id })).await;
     assert_eq!(busy["result"]["isError"], true);
     assert_eq!(
@@ -1951,39 +1902,6 @@ async fn installation_access_manages_resources_and_other_agents_work() {
     let connections = call(&s, &configuration, "list_mcps", json!({})).await;
     assert!(result(&connections)["mcps"].as_array().unwrap().is_empty());
 
-    let created = call(
-        &s,
-        &configuration,
-        "create_task",
-        json!({ "settings": {
-            "name": "Delegate",
-            "prompt": "Inspect",
-            "agentId": MAIN_AGENT_ID,
-            "worktree": false
-        } }),
-    )
-    .await;
-    assert_eq!(result(&created)["agentId"], MAIN_AGENT_ID);
-    let own_default = call(
-        &s,
-        &configuration,
-        "create_task",
-        json!({ "settings": {
-            "name": "Continue",
-            "prompt": "Continue",
-            "worktree": false
-        } }),
-    )
-    .await;
-    assert_eq!(result(&own_default)["agentId"], manager["id"]);
-    let tasks = call(&s, &configuration, "list_tasks", json!({})).await;
-    assert!(
-        result(&tasks)["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["id"] == foreign["taskId"])
-    );
     let runs = call(&s, &configuration, "list_runs", json!({})).await;
     assert!(
         result(&runs)
@@ -1996,20 +1914,6 @@ async fn installation_access_manages_resources_and_other_agents_work() {
         let read = call(&s, &configuration, name, json!({ "runId": foreign["id"] })).await;
         result(&read);
     }
-    let mut task = result(&created).clone();
-    task["name"] = "Updated delegated task".into();
-    let updated = call(
-        &s,
-        &configuration,
-        "replace_task",
-        json!({
-            "taskId": task["id"],
-            "revision": task["revision"],
-            "settings": mission_settings(&task)
-        }),
-    )
-    .await;
-    result(&updated);
     let cancelled = call(
         &s,
         &configuration,
@@ -2018,14 +1922,6 @@ async fn installation_access_manages_resources_and_other_agents_work() {
     )
     .await;
     assert_eq!(result(&cancelled)["cancelled"], true);
-    let queued = call(
-        &s,
-        &configuration,
-        "run_task",
-        json!({ "taskId": foreign["taskId"] }),
-    )
-    .await;
-    result(&queued);
 }
 
 #[tokio::test]

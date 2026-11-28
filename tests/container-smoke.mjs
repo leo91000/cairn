@@ -109,7 +109,7 @@ async function main() {
     const expectedCommit = process.env.SMOKE_COMMIT || process.env.GITHUB_SHA
     if (expectedCommit)
       assert.equal(version.commit, expectedCommit)
-    assert.equal((await fetch(`${url}/api/tasks`)).status, 401)
+    assert.equal((await fetch(`${url}/api/hook-rules`)).status, 401)
     assert.equal((await fetch(`${url}/api/setup`, { method: 'POST' })).status, 401)
     const headers = beacon.headers
     let installations

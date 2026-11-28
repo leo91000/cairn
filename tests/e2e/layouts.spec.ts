@@ -31,7 +31,7 @@ async function screenshotLayout(page: Page, testInfo: TestInfo, name: string, co
   await page.evaluate(() => document.fonts.ready)
   await fits(page)
   if (colorScheme === 'dark') {
-    const brightSurfaces = await page.locator('.run-facts, .settings-section, .resource-card, .mission-card, .skill-card, .connection-card, dialog[open], .vs-popup:popover-open').evaluateAll(elements => elements.filter((el) => {
+    const brightSurfaces = await page.locator('.run-facts, .settings-section, .resource-card, .skill-card, .connection-card, dialog[open], .vs-popup:popover-open').evaluateAll(elements => elements.filter((el) => {
       const color = getComputedStyle(el).backgroundColor.match(/[\d.]+/g)?.map(Number)
       return color && color.length >= 3 && (color[3] ?? 1) > 0.5 && Math.min(...color.slice(0, 3)) > 180
     }).map(el => el.className))
@@ -53,7 +53,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   const runs = await page.request.get(`/api/installations/${workspace.installationId}/api/runs`).then(response => response.json())
   const run = runs.find((item: { status: string }) => item.status === 'succeeded')
 
-  // The rail (desktop) or the dock (phone) leads to the Fil, Missions and the Atelier.
+  // The rail (desktop) or the dock (phone) leads to the Fil, Rules and the Atelier.
   async function navigate(url: string) {
     const documentIdentity = randomUUID()
     await page.evaluate((identity) => {
@@ -62,7 +62,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     }, documentIdentity)
 
     const destination = url.startsWith('/runs/') ? '/runs' : url === '/settings/installation' ? '/settings' : url
-    const place = destination === '/' ? 'Fil' : destination === '/tasks' ? 'Missions' : 'Atelier'
+    const place = destination === '/' ? 'Fil' : destination === '/rules' ? 'Rules' : 'Atelier'
     const navigation = page.getByRole('navigation', { name: /^(Workspace|Quick) navigation$/ }).filter({ visible: true })
     if (!await navigation.count()) {
       // Phone reading screens hide the dock. Return through their SPA controls:
@@ -90,7 +90,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
 
     const headings: Record<string, string> = {
       '/': 'Fil',
-      '/tasks': 'Missions',
+      '/rules': 'Rules',
       '/runs': 'Run history',
       '/agents': 'Agents',
       '/projects': 'Projects',
@@ -119,7 +119,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
 
   const screens = [
     ['overview', '/', '.fil'],
-    ['tasks', '/tasks', '.mission-card'],
+    ['rules', '/rules', '[aria-label="Rule list"]'],
     ['runs', '/runs', 'tbody tr'],
     ['agents', '/agents', '.resource-card'],
     ['projects', '/projects', '.resource-card'],
@@ -135,9 +135,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       await navigate(url)
       await expect(page.locator(ready).first()).toBeVisible()
       await screenshot(`${viewport.width}-${name}`)
-      if (name === 'tasks')
-        await page.getByRole('button', { name: 'Search missions', exact: true }).click()
-      if (name === 'tasks' || name === 'skills') {
+      if (name === 'skills') {
         const geometry = await page.locator('.search-field').evaluate((field) => {
           const icon = field.querySelector('.ui-icon')!.getBoundingClientRect()
           const input = field.querySelector('input')!.getBoundingClientRect()
@@ -231,7 +229,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     await expect(viewer).not.toBeVisible()
     await expect(page.getByRole('button', { name: 'Open activity fullscreen' })).toBeFocused()
     await expect(page.getByTestId('agent-step').first()).toBeVisible()
-    await page.getByRole('button', { name: 'Mission brief', exact: true }).click()
+    await page.getByRole('button', { name: 'Run details', exact: true }).click()
     await screenshot(`${viewport.width}-brief`)
 
     // Agents are edited on their own page rather than in a dialog.
@@ -242,7 +240,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     await openAgentSection(page, 'Nodes')
     await screenshot(`${viewport.width}-agent-editor-nodes`)
     for (const [name, url, button] of [
-      ['task-editor', '/tasks', 'New mission'],
+      ['task-editor', '/rules', 'Schedule an agent'],
       ['project-editor', '/projects', 'Add project'],
       ['skill-editor', '/skills', 'New skill'],
       ['skill-files', '/skills', 'Edit review'],
@@ -260,8 +258,12 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
         if (await select.isDisabled())
           continue
         expect((await select.boundingBox())!.width).toBeGreaterThan(80)
+        if (await select.getAttribute('aria-autocomplete') !== 'list')
+          continue
+
+        const label = (await select.getAttribute('aria-label'))!
         await select.click()
-        const list = page.getByRole('listbox')
+        const list = dialog.getByRole('listbox', { name: label, exact: true })
         await expect(list).toBeVisible()
         const popup = page.locator('.vs-popup:popover-open')
         const bounds = await popup.boundingBox()
@@ -269,7 +271,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
         expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width)
         expect(bounds!.y).toBeGreaterThanOrEqual(0)
         expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height)
-        await screenshot(`${viewport.width}-${name}-${await select.getAttribute('aria-label')}-select`)
+        await screenshot(`${viewport.width}-${name}-${label}-select`)
         await page.keyboard.press('Escape')
         await expect(list).not.toBeVisible()
         await expect(dialog).toBeVisible()
@@ -304,10 +306,10 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   await dock.getByRole('link', { name: 'Atelier', exact: true }).click()
   await page.getByRole('button', { name: 'Sign out' }).scrollIntoViewIfNeeded()
   await expect(page.getByRole('button', { name: 'Sign out' })).toBeInViewport()
-  await dock.getByRole('link', { name: 'Missions', exact: true }).focus()
+  await dock.getByRole('link', { name: 'Rules', exact: true }).focus()
   await page.keyboard.press('Enter')
-  await expect(dock.getByRole('link', { name: 'Missions', exact: true })).toHaveAttribute('aria-current', 'page')
-  await expect(page.locator('.mission-card').first()).toBeVisible()
+  await expect(dock.getByRole('link', { name: 'Rules', exact: true })).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('region', { name: 'Rule list' })).toBeVisible()
 
   const outcomeRun = workspace.service.store.addRun({
     ...workspace.service.store.run(run.id),
@@ -430,37 +432,33 @@ test('large agent selector layouts', async ({ page, workspace }, testInfo) => {
       sandbox: 'yolo',
     },
   }))
-  await page.route('**/api/agents', route => route.fulfill({ json: { agents } }))
-  await page.goto(workspacePath('/tasks'))
+  await page.route('**/api/hook-rules/catalog', async (route) => {
+    const response = await route.fetch()
+    const catalog = await response.json()
+    await route.fulfill({ json: { ...catalog, agents: agents.map(agent => ({ agentId: agent.id, name: agent.name, native: false })) } })
+  })
+  await page.goto(workspacePath('/rules'))
   await workspace.signIn(page)
-  await expect(page.locator('.shell')).toBeVisible()
-  await page.getByRole('button', { name: 'New mission', exact: true }).click()
-  const agentSelect = page.getByRole('combobox', { name: 'Agent', exact: true })
-  await agentSelect.click()
-  await expect(page.getByRole('option').first()).toBeVisible()
-  expect(await page.getByRole('option').count()).toBeLessThan(20)
-  await agentSelect.press('End')
-  await expect(page.getByRole('option', { name: 'Agent 09999', exact: true })).toBeVisible()
-  expect(await page.getByRole('option').count()).toBeLessThan(20)
-  await screenshotLayout(page, testInfo, 'select-10000-options', colorScheme)
-  await agentSelect.press('Enter')
-  await expect(agentSelect).toHaveValue('Agent 09999')
+  await page.getByRole('button', { name: 'Schedule an agent', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Schedule an agent' })
+  const agent = dialog.getByRole('combobox', { name: 'Agent', exact: true })
+  const list = dialog.getByRole('listbox', { name: 'Agent', exact: true })
+  const options = list.getByRole('option')
+  await agent.click()
+  await expect(options.first()).toBeVisible()
+  expect(await options.count()).toBeLessThan(20)
+  await agent.press('End')
+  await expect(list.getByRole('option', { name: 'Agent 09999', exact: true })).toBeVisible()
+  await agent.press('Enter')
+  await expect(agent).toHaveValue('Agent 09999')
+  await agent.click()
+  await agent.fill('equipe')
+  await expect(options).toHaveCount(1)
+  await expect(options).toHaveText('Équipe sécurité')
+  await agent.press('Enter')
+  await expect(agent).toHaveValue('Équipe sécurité')
   await expect(page.getByRole('dialog')).toBeVisible()
-  await agentSelect.click()
-  await agentSelect.fill('equipe')
-  await expect(page.getByRole('option')).toHaveCount(1)
-  await agentSelect.press('Enter')
-  await expect(agentSelect).toHaveValue('Équipe sécurité')
-  await agentSelect.click()
-  await agentSelect.fill('does-not-exist')
-  await expect(page.getByText('No matches found', { exact: true })).toBeVisible()
-  await screenshotLayout(page, testInfo, 'select-no-results', colorScheme)
-  await agentSelect.press('Escape')
-  await expect(agentSelect).toHaveValue('Équipe sécurité')
-  await agentSelect.click()
-  await agentSelect.press('Tab')
-  await expect(page.getByRole('listbox')).not.toBeVisible()
-  await expect(page.getByRole('textbox', { name: /^Tags/ })).toBeFocused()
+  await screenshotLayout(page, testInfo, 'schedule-agent-large-catalog', colorScheme)
   await page.keyboard.press('Escape')
 
   expect(errors).toEqual([])

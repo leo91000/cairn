@@ -4,6 +4,7 @@ import type { ChatCompaction } from './ChatCompaction'
 import type { ChatMessage } from './ChatMessage'
 import type { ChatQuestion } from './ChatQuestion'
 import type { ChatRequester } from './ChatRequester'
+import type { ChatRuleOrigin } from './ChatRuleOrigin'
 import type { ChatSideQuestion } from './ChatSideQuestion'
 import type { ChatWakeup } from './ChatWakeup'
 import type { CodingAgentPreferences } from './CodingAgentPreferences'
@@ -57,6 +58,22 @@ export interface Chat {
   environmentError?: string | null
   requestedBy?: ConversationRequester | null
   requester?: ChatRequester | null
+  /**
+   * The hook rule (including a clock schedule) that started this conversation.
+   */
+  originRule?: ChatRuleOrigin | null
+  /**
+   * True once any person has written in this conversation.
+   */
+  personParticipated: boolean
+  /**
+   * Reported outcome of the conversation's latest turn (`completed` or `blocked`).
+   */
+  outcome?: import('../../contracts').TaskOutcome | null
+  /**
+   * The calling account's snooze deadline, in epoch milliseconds, until it is acknowledged.
+   */
+  snoozedUntil?: number | null
   provider?: AgentProvider | null
   contextUsage?: ContextUsage | null
   compaction?: ChatCompaction | null

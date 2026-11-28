@@ -69,13 +69,11 @@ class NativeParityPreviewTest {
         MockWebServer().use { server ->
             val now = System.currentTimeMillis()
             val task =
-                Task(
-                    "85aac3c3-27f5-5b76-a34d-d59120d410eb",
-                    "Revue hebdomadaire du projet",
-                    "Vérifier les changements et préparer le compte rendu.",
-                    MAIN_AGENT_ID,
-                    cron = "0 9 * * 1",
-                    nextRun = now + 86400000,
+                build.cairn.contracts.RunTaskSnapshot(
+                    id = "85aac3c3-27f5-5b76-a34d-d59120d410eb",
+                    name = "Revue hebdomadaire du projet",
+                    prompt = "Vérifier les changements et préparer le compte rendu.",
+                    agentId = MAIN_AGENT_ID,
                 )
             val agent =
                 Agent(
@@ -111,8 +109,7 @@ class NativeParityPreviewTest {
                     taskId = task.id,
                     status = "succeeded",
                     taskName = task.name,
-                    snapshot =
-                        Snapshot(task = task.runTaskSnapshot(), agent = agent, project = project),
+                    snapshot = Snapshot(task = task, agent = agent, project = project),
                     outcome = outcome,
                 )
             val chat =
@@ -259,22 +256,6 @@ class NativeParityPreviewTest {
                                     wireJson.encodeToString(
                                         build.cairn.contracts.ListProjectsOutput(listOf(project))
                                     )
-                                "/api/installations/fixture/api/tasks" ->
-                                    wireJson.encodeToString(
-                                        build.cairn.contracts.ListMissionsOutput(
-                                            listOf(
-                                                task,
-                                                task.copy(
-                                                    id = "00000000-0000-4000-8000-000000000099",
-                                                    name = "Préparer la prochaine version",
-                                                    cron = null,
-                                                    nextRun = null,
-                                                ),
-                                            )
-                                        )
-                                    )
-                                "/api/installations/fixture/api/tasks/activity" ->
-                                    wireJson.encodeToString(listOf(run))
                                 "/api/installations/fixture/api/runs" ->
                                     wireJson.encodeToString(listOf(run))
                                 "/api/installations/fixture/api/schedule/preview" ->
@@ -372,45 +353,7 @@ class NativeParityPreviewTest {
                     compose.onNode(hasText("Rapporté par", substring = true)).performScrollTo()
                     capture("chat-evidence-phone-dark")
                     compose.runOnIdle { activity.onBackPressedDispatcher.onBackPressed() }
-                    waitDescription("Missions")
-                }
-                // Phone dock tabs are named by their icon; the large-window rail shows its labels.
-                compose
-                    .onAllNodes(
-                        (hasContentDescription("Missions") or hasText("Missions")) and
-                            hasClickAction()
-                    )
-                    .onFirst()
-                    .performClick()
-                waitText(task.name)
-                // Missions state their schedule in words and show recent run history.
-                compose.onNodeWithText("Chaque lundi · 09:00", substring = true).assertExists()
-                waitDescription("réussies", substring = true)
-                capture(if (wide) "missions-tablet-dark" else "missions-phone-dark")
-                if (wide) {
-                    // The detail pane shows the first mission next to the list.
-                    compose.onNodeWithText("09:00").assertIsDisplayed()
-                    compose.onNodeWithText("Lancer maintenant").assertIsDisplayed()
-                } else {
-                    compose.onNodeWithText(task.name).performClick()
-                    compose.onNodeWithTag("mission-sheet").assertIsDisplayed()
-                    compose.waitUntil(15000) {
-                        compose
-                            .onAllNodesWithText("100 % de réussite")
-                            .fetchSemanticsNodes()
-                            .isNotEmpty()
-                    }
-                    compose.onNodeWithText("Lancer maintenant").assertIsDisplayed()
-                    capture("mission-sheet-phone-dark")
-                    compose.onNodeWithContentDescription("Fermer").performClick()
-                    compose.waitUntil(15000) {
-                        compose.onAllNodesWithTag("mission-sheet").fetchSemanticsNodes().isEmpty()
-                    }
-                    compose.onNodeWithContentDescription("Créer une mission").performClick()
-                    compose
-                        .onNode(hasText("Agent principal") and hasClickAction())
-                        .assertIsDisplayed()
-                    capture("mission-editor-phone-dark")
+                    waitDescription("Règles")
                 }
             } finally {
                 vm.api.closeStreams()

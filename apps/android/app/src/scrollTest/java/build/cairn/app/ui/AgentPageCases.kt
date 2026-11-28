@@ -590,7 +590,7 @@ abstract class AgentPageCases {
                             nodeWireFixture(request.path, wireJson.encodeToString(updated))
                         )
                     }
-                    if (path == "/tasks" && failRefresh.get())
+                    if (path == "/skills" && failRefresh.get())
                         return response
                             .setResponseCode(409)
                             .setBody(

@@ -6,7 +6,7 @@
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
 use common::AgentFixture;
-use common::MissionFixture;
+use common::ChatRunFixture;
 
 mod common;
 
@@ -49,14 +49,8 @@ fn restricted(name: &str) -> Value {
 }
 
 async fn run(s: &Service, agent: &str) -> Value {
-    let task = s
-        .task_fixture(
-            json!({ "name": "Probe", "agentId": agent, "prompt": "Hello" }),
-            None,
-        )
-        .await
-        .unwrap();
-    s.enqueue(text(&task, "id"), "manual", None).await.unwrap()
+    let (_chat, run) = s.chat_run_fixture(agent, None, "Hello").await.unwrap();
+    run
 }
 
 fn run_directory(s: &Service, run: &Value) -> std::path::PathBuf {

@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS hook_rule_versions(
  version INTEGER NOT NULL CHECK(version>=1),
  definition TEXT NOT NULL CHECK(json_valid(definition) AND json_type(definition)='object' AND length(CAST(definition AS BLOB))<=524288),
  saved_by TEXT NOT NULL CHECK(length(saved_by) BETWEEN 1 AND 100),
- source TEXT NOT NULL CHECK(source IN ('app','publicMcp','installationAgent','duplicate','template')),
+ source TEXT NOT NULL CHECK(source IN ('app','publicMcp','installationAgent','duplicate','template','migration')),
  conversation_id TEXT CHECK(conversation_id IS NULL OR length(conversation_id) BETWEEN 1 AND 100),
  native_grant TEXT NOT NULL CHECK(json_valid(native_grant) AND json_type(native_grant)='object'),
  saved_at INTEGER NOT NULL CHECK(saved_at BETWEEN 0 AND 9007199254740991),
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS hook_rule_versions(
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS hook_rule_uses(
  rule_id TEXT NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
- kind TEXT NOT NULL CHECK(kind IN ('executionAgent','startedAgent','hook','tool','cairnHook')),
+ kind TEXT NOT NULL CHECK(kind IN ('executionAgent','startedAgent','hook','tool','cairnHook','clock')),
  agent_id TEXT NOT NULL,
  instance_id TEXT NOT NULL,
  name TEXT NOT NULL CHECK(length(name)<=200),
@@ -42,7 +42,24 @@ CREATE TABLE IF NOT EXISTS hook_rule_uses(
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS hook_rule_uses_agent ON hook_rule_uses(agent_id,kind);
 CREATE INDEX IF NOT EXISTS hook_rule_uses_instance ON hook_rule_uses(instance_id,kind);
+CREATE TABLE IF NOT EXISTS hook_rule_schedules(
+ rule_id TEXT PRIMARY KEY NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
+ next_run INTEGER CHECK(next_run BETWEEN 0 AND 9007199254740991),
+ last_scheduled_for INTEGER CHECK(last_scheduled_for BETWEEN 0 AND 9007199254740991),
+ fired_at INTEGER CHECK(fired_at BETWEEN 0 AND 9007199254740991),
+ legacy_chain_depth INTEGER NOT NULL DEFAULT 0 CHECK(legacy_chain_depth BETWEEN 0 AND 8)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS hook_rule_schedules_due ON hook_rule_schedules(next_run) WHERE next_run IS NOT NULL;
 ";
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ScheduleRow {
+    pub rule_id: String,
+    pub next_run: Option<i64>,
+    pub last_scheduled_for: Option<i64>,
+    pub fired_at: Option<i64>,
+    pub legacy_chain_depth: u32,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RuleRow {
@@ -120,6 +137,7 @@ fn source_key(source: HookRuleSource) -> &'static str {
         HookRuleSource::InstallationAgent => "installationAgent",
         HookRuleSource::Duplicate => "duplicate",
         HookRuleSource::Template => "template",
+        HookRuleSource::Migration => "migration",
     }
 }
 
@@ -147,6 +165,18 @@ fn version(row: &rusqlite::Row<'_>) -> rusqlite::Result<VersionRow> {
 }
 
 impl Db<'_> {
+    pub(crate) fn hook_rule_identity_claimed(&self, id: &str) -> Result<bool> {
+        Ok(self.0.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM hook_rules WHERE id=?1
+               UNION ALL
+               SELECT 1 FROM hook_rule_conversations WHERE rule_id=?1
+             )",
+            [id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub(crate) fn hook_rule(&self, id: &str) -> Result<Option<RuleRow>> {
         Ok(self
             .0
@@ -274,6 +304,58 @@ impl Db<'_> {
                     },
                 ))
             })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(crate) fn hook_rule_schedule(&self, rule_id: &str) -> Result<Option<ScheduleRow>> {
+        Ok(self
+            .0
+            .prepare_cached(
+                "SELECT rule_id,next_run,last_scheduled_for,fired_at,legacy_chain_depth FROM hook_rule_schedules WHERE rule_id=?",
+            )?
+            .query_row([rule_id], |row| {
+                Ok(ScheduleRow {
+                    rule_id: row.get(0)?,
+                    next_run: row.get(1)?,
+                    last_scheduled_for: row.get(2)?,
+                    fired_at: row.get(3)?,
+                    legacy_chain_depth: row.get(4)?,
+                })
+            })
+            .optional()?)
+    }
+
+    pub(crate) fn save_hook_rule_schedule(&self, row: &ScheduleRow) -> Result<()> {
+        self.0
+            .prepare_cached(
+                "INSERT INTO hook_rule_schedules(rule_id,next_run,last_scheduled_for,fired_at,legacy_chain_depth) VALUES(?1,?2,?3,?4,?5)
+                 ON CONFLICT(rule_id) DO UPDATE SET next_run=excluded.next_run,last_scheduled_for=excluded.last_scheduled_for,fired_at=excluded.fired_at,legacy_chain_depth=excluded.legacy_chain_depth",
+            )?
+            .execute(params![
+                row.rule_id,
+                row.next_run,
+                row.last_scheduled_for,
+                row.fired_at,
+                row.legacy_chain_depth,
+            ])?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_hook_rule_schedule(&self, rule_id: &str) -> Result<()> {
+        self.0
+            .prepare_cached("DELETE FROM hook_rule_schedules WHERE rule_id=?")?
+            .execute([rule_id])?;
+        Ok(())
+    }
+
+    pub(crate) fn due_clock_rules(&self, at: i64) -> Result<Vec<(String, i64)>> {
+        Ok(self
+            .0
+            .prepare_cached(
+                "SELECT rule_id,next_run FROM hook_rule_schedules
+                 WHERE next_run<=? ORDER BY next_run,rule_id",
+            )?
+            .query_map([at], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?)
     }
 }

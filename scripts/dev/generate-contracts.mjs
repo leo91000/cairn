@@ -15,7 +15,6 @@ const CLIENT_GROUPS = [
   'chat-clients.json',
   'project-clients.json',
   'agent-clients.json',
-  'mission-clients.json',
   'rule-clients.json',
   'mcp-clients.json',
   'plugin-clients.json',

@@ -332,9 +332,9 @@ async fn run_resume_selection_authorizes_before_catalog_discovery_over_http_and_
 }
 
 #[tokio::test]
-async fn public_mcp_resumes_native_missions_with_verified_owner_authority() {
+async fn public_mcp_resumes_native_conversations_with_verified_owner_authority() {
     let f = Fixture::new().await;
-    let run = saved_native_mission(&f).await;
+    let run = saved_native_conversation(&f).await;
     let run_id = text(&run, "id");
     let args = json!({ "runId": run_id });
     for (account, scopes) in [(OTHER, vec!["run"]), (TRUSTED, vec!["read"])] {
@@ -354,7 +354,7 @@ async fn public_mcp_resumes_native_missions_with_verified_owner_authority() {
 #[tokio::test]
 async fn resume_run_preserves_native_human_and_delegated_provenance() {
     let f = Fixture::new().await;
-    let run = saved_native_mission(&f).await;
+    let run = saved_native_conversation(&f).await;
     let run_id = text(&run, "id");
     let path = format!("/api/runs/{run_id}/resume");
     let (status, _) = f.call(&f.other, "POST", &path, json!({})).await;
@@ -410,7 +410,7 @@ async fn resume_run_preserves_native_human_and_delegated_provenance() {
 async fn resume_run_rechecks_grant_and_cancellation_after_native_preparation() {
     for revoke in [true, false] {
         let f = Fixture::new().await;
-        let target = saved_native_mission(&f).await;
+        let target = saved_native_conversation(&f).await;
         let (caller, configuration) = resume_coordinator(&f, true).await;
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
@@ -604,8 +604,10 @@ async fn installation_can_direct_its_own_native_run_without_widening_authority_o
         .unwrap();
     let mut run = f.run();
     run["status"] = "running".into();
-    run["requiredTags"] = json!([]);
-    common::add_run(&f.service.store, &run).await;
+    run["chatExecution"] = json!({
+        "messageId": id(), "text": "Continue the native work", "attachments": [],
+    });
+    add_conversation_run_fixture(&f.service.store, &mut run).await;
     let configuration = f
         .service
         .mcps

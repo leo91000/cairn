@@ -1011,14 +1011,10 @@ async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletio
     .await
     .unwrap();
     f.s.chat_tick(&HashSet::new()).await.unwrap();
-    let error =
-        f.s.store
-            .kv(&format!("chat-error:{child}"))
-            .await
-            .unwrap()
-            .unwrap();
+    let detail = f.s.chat_detail(child).await.unwrap();
+    let error = detail["error"].clone();
     assert!(!error.as_str().unwrap().is_empty());
-    assert!(f.s.chat_detail(child).await.unwrap()["run"].is_null());
+    assert!(detail["run"].is_null());
 
     let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
         .await

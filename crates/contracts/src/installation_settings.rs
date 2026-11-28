@@ -103,7 +103,7 @@ pub struct InstallationOverview {
     pub runs_by_status: std::collections::BTreeMap<String, u32>,
     pub agents: u32,
     pub projects: u32,
-    pub missions: u32,
+    pub hook_rules: u32,
     pub concurrency: u32,
 }
 

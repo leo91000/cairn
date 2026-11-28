@@ -206,45 +206,6 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
             .await?;
         return Ok(Some(output));
     }
-    let mission_command = match route {
-        ("GET", ["tasks"]) => Some(("list_tasks", json!({}))),
-        ("GET", ["tasks", "activity"]) => Some(("list_task_activity", json!({}))),
-        ("GET", ["tasks", id]) => Some(("get_task", json!({ "taskId": id }))),
-        ("POST", ["tasks"]) => Some(("create_task", input.body.clone())),
-        ("PUT", ["tasks", id]) | ("POST", ["tasks", id, "state"]) => {
-            if input.body["taskId"] != *id {
-                return Err(Error::bad("Mission identity does not match the path."));
-            }
-            Some((
-                if route.0 == "PUT" {
-                    "replace_task"
-                } else {
-                    "set_task_state"
-                },
-                input.body.clone(),
-            ))
-        }
-        ("DELETE", ["tasks", id]) => Some(("delete_task", json!({ "taskId": id }))),
-        ("POST", ["schedule", "preview"]) => Some(("preview_schedule", input.body.clone())),
-        _ => None,
-    };
-    if let Some((name, body)) = mission_command {
-        let operation = crate::capabilities::mission_operation(name).expect("mission operation");
-        let identity = input
-            .identity
-            .as_ref()
-            .ok_or_else(|| Error::unauthorized("A verified identity is required."))?;
-        let result = if identity.mcp_scopes.is_some() {
-            operation
-                .invoke(s, body, crate::capabilities::ResumeContext::http(input)?)
-                .await?
-        } else {
-            operation
-                .invoke_as(s, body, crate::missions::Actor::Human(identity.clone()))
-                .await?
-        };
-        return Ok(Some(result));
-    }
     if let Some(result) = rule_routes(s, input, route).await? {
         return Ok(Some(result));
     }
@@ -262,17 +223,6 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
         ("POST", ["task-authors", "refresh"]) => {
             s.synchronize_task_authors().await?;
             json!({ "updated": true })
-        }
-        ("POST", ["tasks", id, "run"]) => {
-            crate::capabilities::run_operation("run_task")
-                .unwrap()
-                .invoke(
-                    s,
-                    json!({ "taskId": id }),
-                    crate::capabilities::ResumeContext::http(input)?,
-                    crate::capabilities::member_account(input.identity.as_ref()),
-                )
-                .await?
         }
         _ => return Ok(None),
     };
@@ -303,9 +253,6 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
             crate::live::content(s, kind, id, input).await?
         }
         ("GET", ["runs", id]) => s.store.run(id).await?,
-        ("POST", ["runs", id, "chat"]) => {
-            chat_command(s, input, "convert_run_to_chat", json!({ "runId": id })).await?
-        }
         ("GET", ["runs", id, "events"]) => {
             s.store.run(id).await?;
             let after = input.number("after", 0, 0, i64::MAX)?;
@@ -371,6 +318,7 @@ async fn rule_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
             json!({ "agentId": query("agentId") }),
         ),
         ("POST", ["hook-rules", "validate"]) => ("validate_hook_rule", input.body.clone()),
+        ("POST", ["hook-rules", "schedule", "preview"]) => ("preview_schedule", input.body.clone()),
         ("GET", ["hook-rules", "templates"]) => (
             "list_hook_rule_templates",
             json!({ "instanceId": query("instanceId") }),
@@ -396,6 +344,7 @@ async fn rule_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
             ("set_hook_rule_emergency_pause", same("ruleId", id)?)
         }
         ("POST", ["hook-rules", id, "budget"]) => ("lift_hook_rule_budget", same("ruleId", id)?),
+        ("POST", ["hook-rules", id, "run"]) => ("run_hook_rule", json!({ "ruleId": id })),
         ("POST", ["hook-rules", id, "duplicate"]) => ("duplicate_hook_rule", same("ruleId", id)?),
         ("DELETE", ["hook-rules", id]) => ("delete_hook_rule", json!({ "ruleId": id })),
         _ => return Ok(None),
@@ -716,7 +665,7 @@ async fn settings_routes(
         ("GET", ["overview"]) => ("get_installation_overview", json!({})),
         ("GET", ["audit"]) => ("list_audit", json!({})),
         ("POST", ["reads"]) => ("mark_read", input.body.clone()),
-        ("POST", ["dismissals"]) => ("set_outcome_aside", input.body.clone()),
+        ("POST", ["snoozes"]) => ("snooze_chat", input.body.clone()),
         ("GET", ["settings", "conversations"]) => {
             return Ok(Some(
                 chat_command(s, input, "get_conversation_retention", json!({})).await?,

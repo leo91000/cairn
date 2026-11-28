@@ -30,6 +30,10 @@ export interface HookRule {
    * The conversation in which an agent wrote this version.
    */
   conversationId?: string | null
+  /**
+   * Next scheduled occurrence for an active clock rule, in epoch milliseconds.
+   */
+  nextRun?: number | null
   createdAt: number
   updatedAt: number
 }

@@ -17,4 +17,4 @@ export type RuleCondition = { type: 'all', conditions: Array<RuleCondition> } | 
   author: RuleValue
   limit: number
   windowMinutes: number
-}
+} | { type: 'ruleConversationWorking' }

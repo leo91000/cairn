@@ -944,16 +944,16 @@ async fn check_background_deadline(case: DeadlineCase) {
         "background job ended before advancing the fixture clock: {outcome:?}"
     );
 
-    tokio::time::timeout(Duration::from_secs(10), state.activity.notified())
+    tokio::time::timeout(WORKER_FIXTURE_TIMEOUT, state.activity.notified())
         .await
-        .unwrap();
+        .expect("worker fixture did not observe the retained controller's activity");
     if matches!(
         case,
         DeadlineCase::ShutdownDuringWait | DeadlineCase::ShutdownDuringWaitWithFlushFailure
     ) {
         let mut clock = fixture.clock.take().unwrap();
         let release_close = async {
-            tokio::time::timeout(Duration::from_secs(10), state.close_started.notified())
+            tokio::time::timeout(WORKER_FIXTURE_TIMEOUT, state.close_started.notified())
                 .await
                 .unwrap();
             clock.advance(deadline - clock.millis + 1);
@@ -991,7 +991,7 @@ async fn check_background_deadline(case: DeadlineCase) {
         disconnect.cancel();
     }
     if let Some(hold) = &state.hold_close {
-        tokio::time::timeout(Duration::from_secs(10), state.close_started.notified())
+        tokio::time::timeout(WORKER_FIXTURE_TIMEOUT, state.close_started.notified())
             .await
             .unwrap();
         let recovering = fixture.service.store.run(&run).await.unwrap();

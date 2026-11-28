@@ -478,9 +478,6 @@ pub async fn poll_once(s: &Service) -> Result<()> {
             for record in db.conversations()? {
                 owners.push(crate::waits::Owner::conversation(record));
             }
-            for record in db.waiting_run_records()? {
-                owners.push(crate::waits::Owner::mission(record));
-            }
             for owner in owners {
                 let Some(run) = db.run(owner.run_id())? else {
                     continue;
@@ -649,7 +646,7 @@ fn record(
         } else if let Some(result) = result {
             db.event(
                 text(&run, "id"),
-                &EventKind::from_adapter(owner.event("wait_ready")),
+                &EventKind::ChatWaitReady,
                 "Wait condition resolved",
                 Some(&serde_json::to_value(result)?),
             )?;

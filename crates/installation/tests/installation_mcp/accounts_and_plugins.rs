@@ -1057,10 +1057,7 @@ async fn eventless_side_question_stays_on_its_reply_after_item_id_reuse() {
         .unwrap();
     let (run, _) = active_run(&s, &claude).await;
     let run_id = run["id"].as_str().unwrap();
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = run["id"].clone();
-    let chat_id = chat["id"].as_str().unwrap().to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
+    let chat_id = text(&run, "taskId").to_owned();
     s.side_questions_available(run_id, true).await.unwrap();
     let item = |text: &str| {
         json!({
@@ -1128,10 +1125,7 @@ async fn oversized_numeric_reply_identities_are_refused_on_http_and_both_tools()
         .unwrap();
     let (run, _) = active_run(&s, &claude).await;
     let run_id = run["id"].as_str().unwrap();
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = run["id"].clone();
-    let chat_id = chat["id"].as_str().unwrap().to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
+    let chat_id = text(&run, "taskId").to_owned();
     s.side_questions_available(run_id, true).await.unwrap();
     s.store
         .event(
@@ -1241,10 +1235,7 @@ async fn pruned_side_question_ids_cannot_be_replayed_or_reused() {
         .unwrap();
     let (run, _) = active_run(&s, &claude).await;
     let run_id = run["id"].as_str().unwrap();
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = run["id"].clone();
-    let chat_id = chat["id"].as_str().unwrap().to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
+    let chat_id = text(&run, "taskId").to_owned();
     s.side_questions_available(run_id, true).await.unwrap();
     let old_id = uuid::Uuid::new_v4().to_string();
     for index in 0..31 {
@@ -1304,10 +1295,7 @@ async fn automatic_compaction_closes_side_questions_on_http_and_both_mcp_surface
         .unwrap();
     let (target, _) = active_run(&s, &claude).await;
     let run_id = target["id"].as_str().unwrap();
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = target["id"].clone();
-    let chat_id = chat["id"].as_str().unwrap().to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
+    let chat_id = text(&target, "taskId").to_owned();
     s.side_questions_available(run_id, true).await.unwrap();
     let app = common::relay_fixture::router(s.clone()).await.unwrap();
     let owner = common::RelayContext::new(&common::relay_fixture::context(&s).await);
@@ -1419,10 +1407,7 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
         .unwrap();
     let (target, _) = active_run(&s, &claude).await;
     let run_id = target["id"].as_str().unwrap().to_owned();
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = target["id"].clone();
-    let chat_id = chat["id"].as_str().unwrap().to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
+    let chat_id = text(&target, "taskId").to_owned();
     s.store.event(
         &run_id,
         &cairn_contracts::EventKind::ItemCompleted,
@@ -1851,13 +1836,7 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     // A Codex release before `thread/sample` declines them, and the reason names Codex.
     let codex_id = codex["id"].as_str().unwrap();
     s.side_questions_available(codex_id, false).await.unwrap();
-    let mut codex_chat = s.chat_create(json!({})).await.unwrap();
-    codex_chat["runId"] = codex["id"].clone();
-    let codex_chat_id = codex_chat["id"].as_str().unwrap().to_owned();
-    s.store
-        .save_conversation_boundary(codex_chat)
-        .await
-        .unwrap();
+    let codex_chat_id = text(&codex, "taskId");
     let refused = call(
         &s,
         &configuration,
@@ -1906,10 +1885,7 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     // A conversation moved to trash fails the side questions its stopped turn left.
     let (trashed_run, _) = active_run(&s, &claude).await;
     let trashed_run_id = trashed_run["id"].as_str().unwrap().to_owned();
-    let mut trashed = s.chat_create(json!({})).await.unwrap();
-    trashed["runId"] = trashed_run["id"].clone();
-    let trashed_id = trashed["id"].as_str().unwrap().to_owned();
-    s.store.save_conversation_boundary(trashed).await.unwrap();
+    let trashed_id = text(&trashed_run, "taskId");
     s.side_questions_available(&trashed_run_id, true)
         .await
         .unwrap();
@@ -1934,7 +1910,7 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
         )
         .await
         .unwrap();
-    s.chat_trash(&trashed_id, true).await.unwrap();
+    s.chat_trash(trashed_id, true).await.unwrap();
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();

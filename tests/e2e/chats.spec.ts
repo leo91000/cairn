@@ -1128,10 +1128,8 @@ test('same-provider quota resume submits the changed model default and unchanged
 // Each Chromium and WebKit journey starts with its own account read budget.
 test('starts project chats, steers, edits the queue and preserves a compact mobile composer', async ({ page, workspace }) => {
   initializeRepository(workspace.projectPath)
-  await page.goto(workspacePath('/tasks'))
-  await authenticateWorkspace(page)
-  await expect(page.locator('.task-focus-detail')).toBeVisible()
   await page.goto(workspacePath('/projects'))
+  await authenticateWorkspace(page)
   await page.getByRole('link', { name: 'Start chat' }).first().click()
   await expect(page.getByRole('group', { name: 'Agent', exact: true }).getByRole('radio', { name: 'Main agent', exact: true })).toBeChecked()
   await expect(page.getByRole('group', { name: 'Project', exact: true }).getByRole('radio', { name: 'Design system', exact: true })).toBeChecked()

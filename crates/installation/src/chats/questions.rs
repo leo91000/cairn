@@ -145,7 +145,7 @@ fn cancel(db: &Db<'_>, chat_id: &str, id: &str) -> Result<Question> {
 pub fn ask_tool() -> Value {
     json!({
         "name": "ask_questions",
-        "description": "Ask the user a questionnaire in this conversation. Returns immediately with questionId; answers arrive later as a user message with separate selected options and comment. Reuse requestId only when retrying the same questionnaire. Choose single or multiple selection per question, optional bounds and recommended options (never preselected). Free text is always available. Keep the complete questionnaire within 64 KiB of encoded JSON. Continue independent work or report needs_input and end the turn when a reply is required. Use this tool instead of native question tools.",
+        "description": "Ask the user a questionnaire in this conversation. Returns immediately with questionId; answers arrive later as a user message with separate selected options and comment. Reuse requestId only when retrying the same questionnaire. Choose single or multiple selection per question, optional bounds and recommended options (never preselected). Free text is always available. Keep the complete questionnaire within 64 KiB of encoded JSON. Continue independent work or report blocked and end the turn when a reply is required. Use this tool instead of native question tools.",
         "inputSchema": cairn_contracts::schema_for::<AskQuestionsInput>(cairn_contracts::Contract::Deserialize),
         "outputSchema": cairn_contracts::schema_for::<AskQuestionsOutput>(cairn_contracts::Contract::Serialize),
     })

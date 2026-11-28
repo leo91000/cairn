@@ -44,7 +44,7 @@ selected, error, warning, and disabled states distinguishable.
 `pnpm check` covers lint, TypeScript, unit tests, and the production build.
 `pnpm test:e2e` exercises the real production server and fixture worker.
 
-The screenshot matrix covers the Fil, Missions, Runs, Agents, Projects, Skills,
+The screenshot matrix covers the Fil, Rules, Runs, Agents, Projects, Skills,
 Connections, Settings, and run Result/Activity/Brief. It opens all six editors,
 search, virtual selects, fullscreen activity, source/Markdown views, operation
 cards, structured data, and historical output. Chromium and WebKit both run dark

@@ -52,6 +52,7 @@ function chat(id: string, values: Partial<ChatView> = {}): ChatView {
     slug: '',
     revision: '',
     lifecycle: 'active',
+    personParticipated: false,
     sessionRestartRequested: false,
     canRequestNewSession: false,
     unread: false,
@@ -370,7 +371,7 @@ describe('scheduled waits', () => {
     const fil = filOf([
       chat('sooner', { wakeup: wakeup({ wakeAt: 5000 }) }),
       chat('answered', { wakeup: wakeup({ wakeAt: 9000, condition: checks, observation: { state: 'completed' } }) }),
-    ], [], [])
+    ])
     expect(fil.waiting.map(item => [item.title, item.resolved])).toEqual([['answered', true], ['sooner', false]])
   })
 
@@ -449,7 +450,7 @@ describe('scheduled waits', () => {
       chat('sooner', { wakeup: wakeup({ wakeAt: 5000 }) }),
       chat('paused', { paused: true, wakeup: wakeup() }),
       chat('done'),
-    ], [], [])
+    ])
     expect(fil.waiting.map(item => [item.title, item.kind, item.subtitle, item.condition])).toEqual([
       ['sooner', 'waiting', expect.stringMatching(/^Resumes at /), false],
       ['later', 'waiting', 'PR #193 checks', true],

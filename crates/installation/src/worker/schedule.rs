@@ -49,7 +49,7 @@ impl Worker {
             .collect::<HashSet<_>>();
         let provider_active = self.provider_active(&active).await;
         crate::chats::coding_agent::tick(s, &active).await?;
-        // Parked missions must release any pre-crash execution independently
+        // Parked turns must release any pre-crash execution independently
         // of their wakeup and of admission capacity for new processes.
         for state in s.store.read(|db| db.active_run_states()).await? {
             let run_id = state.id.as_str();
@@ -71,7 +71,6 @@ impl Worker {
         }
         crate::waits::tick_groups(s, &provider_active).await?;
         s.chat_tick(&provider_active).await?;
-        crate::waits::tick_missions(s, &provider_active).await?;
         if s.shutdown.is_cancelled() || s.store.kv("deployment-lease").await?.is_some() {
             return Ok(());
         }
@@ -1384,29 +1383,10 @@ fn finish_recovery_in(
                 }
                 message => message,
             };
-            let waiting = current.trigger != "chat" && record.wakeup.is_some();
-            let fresh_wait = record.boundary["environmentState"] == "expired"
-                && record.boundary["sessionHandoff"].is_string();
-            if waiting && current.session_id.is_none() && !fresh_wait {
-                db.change_run(id,crate::runs::RunChanges {
-                    status: Some(RunStatus::Failed),
-                    finished_at: Some(Some(now())),
-                    recovery_pending: Some(false),
-                    account_wait_reason: Some(None),
-                    error: Some(Some("Cannot wait without a saved agent session. Working files were preserved.".into())),
-                    wakeup: Some(None),
-                    ..Default::default()
-                })?;
-                return Ok(false);
-            }
             let mut patch = crate::runs::RunChanges {
-                status: Some(if waiting {
-                    RunStatus::Waiting
-                } else {
-                    RunStatus::Succeeded
-                }),
-                finished_at: Some(if waiting { None } else { Some(now()) }),
-                resume_available: Some(waiting),
+                status: Some(RunStatus::Succeeded),
+                finished_at: Some(Some(now())),
+                resume_available: Some(false),
                 account_wait_reason: Some(None),
                 recovery_pending: Some(false),
                 error: Some(None),
@@ -1415,12 +1395,8 @@ fn finish_recovery_in(
                 boundary: Some(json!({})),
                 ..Default::default()
             };
-            if waiting {
-                patch.boundary.as_mut().unwrap()["outcome"] = Value::Null;
-            } else {
-                // A compaction completed before the restart settles like one that did not.
-                crate::chats::keep_reply_after_compaction(&record.boundary, &mut patch)?;
-            }
+            // A compaction completed during restart preserves the preceding reply.
+            crate::chats::keep_reply_after_compaction(&record.boundary, &mut patch)?;
             db.change_run(id, patch)?;
             return Ok(false);
         }

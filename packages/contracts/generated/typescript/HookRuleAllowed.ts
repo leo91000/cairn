@@ -12,6 +12,10 @@ export interface HookRuleAllowed {
   emergencyPause: boolean
   liftBudget: boolean
   /**
+   * Trigger this clock rule immediately without waiting for its next occurrence.
+   */
+  runNow: boolean
+  /**
    * Whether the triggering history shows payloads and action results.
    */
   viewDetails: boolean

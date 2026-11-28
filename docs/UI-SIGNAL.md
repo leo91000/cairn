@@ -1,35 +1,29 @@
 # « Signal » web interface
 
-Since 0.35.0 the web app follows the Android « Signal » design: three places, one
-accent and motion that only means an agent is working.
+The web and Android apps share three places, a common accent, and motion for
+agents at work.
 
 ## Places
 
-- **Fil** (`/`): what needs you (questions, failed conversations, failed missions,
-  missions blocked or waiting for input, then finished work you have not read), live work (running and queued
-  conversations and missions) and recent conversations. `apps/web/src/signal.ts` groups
-  them; only the latest run of each mission counts and chat runs stay with their
-  conversation. On wide screens the Fil stays beside the open conversation, like a
-  mail client. A mission opens the same way (`/fil/runs/:id`): its latest run beside the
-  Fil, with a **Mission** tab holding the mission's schedule, history and actions. Runs it
-  starts stay beside the Fil; `/runs/:id` remains the Atelier's run page.
-- **Missions** (`/tasks`): scheduled and one-off tasks with their runs.
-- **Atelier** (`/atelier`): agents, projects, skills, MCP servers, connections,
-  the run journal and settings. Its pages share a section bar.
+- **Fil** (`/`) groups questions, failures, blocked outcomes, unread results and
+  live or recent conversations. On wide screens it stays beside the open conversation.
+- **Rules** (`/rules`) contains hook rules and their histories. **Schedule an agent**
+  creates a rule that uses the Clock to start a conversation.
+- **Atelier** (`/atelier`) contains agents, projects, skills, MCP servers,
+  connections, the run journal and settings. Its pages share a section bar.
 
 Desktop and tablet use a rail with a sliding indicator, badges (coral count of
-what needs you, a live dot while a mission runs), the new-conversation button,
+what needs you, a live dot while a conversation runs), the new-conversation button,
 search, shortcuts, appearance and sign-out. Phones use a floating dock that hides
-while reading a conversation or a run; conversations and missions opened from the Fil go
-back to it.
+while reading a conversation or a run. Conversations opened from the Fil return to it.
 
 ## Keyboard
 
 | Keys | Action |
 | --- | --- |
-| ⌘K / Ctrl+K | Search and commands: conversations, missions (open or run now), agents, projects, skills, places, theme |
+| ⌘K / Ctrl+K | Search for conversations, agents, projects, skills, places, and commands |
 | C | New conversation |
-| G then F / M / A | Fil / Missions / Atelier |
+| G then F / R / A | Fil / Rules / Atelier |
 | J / K, Enter, E, / | Move in the Fil, open, mark finished work as read, filter |
 | R, Esc | Reply in the open conversation, leave the field |
 | Enter, Shift+Enter, Alt+Enter | Send (steering while the agent works), new line, queue for the next turn |
@@ -39,27 +33,22 @@ Single keys never fire while typing or while a dialog is open (`apps/web/src/sho
 
 ## Unread work
 
-A conversation turn or a mission run that succeeded stays **unread** for each Cairn account until
-that account opens it. It waits in For you, below what needs an answer, as a card with an accent
-edge, an unread dot, a « Finished » or « Mission finished » label and the opening of the agent's
-final message. « Read » opens it; « Mark as read », E on the selection and « Mark all read » in the
-For you header clear it without opening. The rail badge stays coral while something needs an
-answer and turns to the accent when work only waits to be read.
+The **À lire** view shows unread results, errors, blocked outcomes and pending
+questions for the signed-in account. A conversation started by a rule stays quiet
+until someone participates or the conversation needs attention. **Mark as read**,
+E on the selection and **Mark all as read** acknowledge the displayed activity.
 
-Read marks live on the installation, per account (`crates/installation/src/reads.rs`): opening work
-on the phone clears it on the web, and each member reads on their own. The generated `mark_read`
-command (`POST /api/reads`) records `{ target: { kind: "chat", chatId } | { kind: "mission", taskId },
-finishedAt }` items for the completion actually displayed, with monotonic marks. Bulk actions use
-batches of at most 200 items. A public MCP grant reads and marks for the account that authorized
-it; an execution has no account delegation, so it is refused and its listings carry no personal state. Reading an older mission run leaves newer work unread. The conversation list, its live stream and `/api/tasks/activity`
-carry `unread` and `preview` for the caller. An account's first read starts its history, so earlier
-work is not unread. Failed, stopped and paused work is never unread, nor are plugin
-conversations, which answer in their own channel; a turn that finishes while its conversation is
-open and visible is read as it happens. Finished work opened from For you stays
-there, read, until the user moves on, then joins Recent. Android shows the same rows in « Pour
-vous », with « Tout lire », and reads the page settled in the Fil pager while the app is in the
-foreground, after its output has loaded and caught up with the server. Local optimistic marks
-are cleared when the account or installation changes.
+Read marks live on the installation per account. The generated `mark_read`
+operation at `POST /api/reads` takes items shaped as
+`{ target: { kind: "chat", chatId }, finishedAt }`, up to 200 at a time. The
+conversation list and its stream carry the account's `unread`, `readAt` and
+`preview` values. Public MCP uses the account that authorized the grant.
+
+**Snooze until…** gives a conversation a per-account reminder. Its deadline
+or **Restore** returns it to attention. Later activity clears a snooze tied
+to an older observation. Android follows the same behavior with native
+controls. Both clients mark a synchronized conversation read when it is open
+and visible.
 
 ## Motion
 
@@ -88,6 +77,6 @@ are cleared when the account or installation changes.
 identity colours shared with Android. `crates/installation/tests/reads.rs` covers read marks per
 account, previews and the live list. `tests/e2e/unread.spec.ts` reads finished work on the desktop
 and the phone; `FilUnreadJourneyTest` covers the Android Fil. `tests/e2e/signal.spec.ts` drives the real
-server: Fil sections and badges, J/Enter, G chords, the shortcut sheet, the
-palette running a mission, the conversation beside the Fil with its live step,
-R/Escape/C, and the phone dock with full-screen reading.
+server across Fil sections and badges, keyboard shortcuts, the palette,
+conversation reminders, and full-screen phone reading. The schedule journeys
+in `tests/e2e/task-focus.spec.ts` cover rule creation and Run now.

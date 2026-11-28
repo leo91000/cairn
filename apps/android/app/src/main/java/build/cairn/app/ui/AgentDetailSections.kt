@@ -709,7 +709,7 @@ internal fun PowersSection(
         Text("Droits élevés", color = content, style = MaterialTheme.typography.titleSmall)
         SwitchRow(
             "Gérer l’installation Cairn",
-            "Créer et modifier les agents (y compris leurs permissions), projets, skills, connexions MCP, missions et exécutions de toute l’installation, au nom du propriétaire. S’applique même si les accès ci-dessus sont restreints.",
+            "Créer et modifier les agents (y compris leurs permissions), projets, skills, connexions MCP et conversations de toute l’installation au nom du propriétaire. S’applique même si les accès ci-dessus sont restreints. Vous gardez le contrôle des réservations exclusives et des accès aux plugins.",
             access.installation,
             power = true,
         ) { on ->

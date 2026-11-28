@@ -19,27 +19,23 @@ test('keeps activity scrolling inside the workspace and gives tabs breathing roo
     }
   }
 
-  await page.goto(workspacePath('/tasks'))
+  await page.goto(workspacePath('/rules'))
   await authenticateWorkspace(page)
-  await expect(page.getByRole('heading', { name: 'Missions', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Rules', exact: true })).toBeVisible()
   const runs = await page.request.get(`/api/installations/${workspace.installationId}/api/runs`).then(response => response.json())
   for (const theme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme: theme })
     for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }, { width: 390, height: 664 }, { width: 320, height: 568 }, { width: 844, height: 390 }]) {
       await page.setViewportSize(viewport)
-      // Missions: the list scrolls on its own and the mission's actions stay reachable.
-      await page.goto(workspacePath('/tasks'))
-      await expect(page.getByTestId('missions')).toBeVisible()
+      // Schedule creation stays inside the viewport.
+      await page.goto(workspacePath('/rules'))
+      await page.getByRole('button', { name: 'Schedule an agent' }).click()
+      const dialog = page.getByRole('dialog', { name: 'Schedule an agent' })
+      await expect(dialog).toBeVisible()
+      await dialog.getByRole('button', { name: 'Create schedule' }).scrollIntoViewIfNeeded()
+      await expect(dialog.getByRole('button', { name: 'Create schedule' })).toBeInViewport()
+      await page.keyboard.press('Escape')
       await expectSingleScroll(page)
-      if (viewport.width <= 900)
-        await page.locator('.mission-card button').first().click()
-      const detail = page.getByTestId('mission-detail')
-      await detail.getByRole('button', { name: 'Mission actions', exact: true }).click()
-      await expect(detail.getByRole('menuitem').last()).toBeInViewport({ ratio: 1 })
-      await detail.getByRole('button', { name: 'Mission actions', exact: true }).click()
-      await detail.getByRole('button', { name: 'Run now', exact: true }).scrollIntoViewIfNeeded()
-      await expect(detail.getByRole('button', { name: 'Run now', exact: true })).toBeInViewport()
-      await page.screenshot({ path: testInfo.outputPath(`${theme}-${viewport.width}-tasks.png`), animations: 'disabled' })
       // A run: its conversation owns the scrolling below the title and tabs.
       await page.goto(workspacePath(`/runs/${runs[0].id}`))
       await page.getByRole('button', { name: /^Conversation/ }).click()
@@ -80,7 +76,7 @@ test('keeps activity scrolling inside the workspace and gives tabs breathing roo
           element.blur()
       })
       await page.screenshot({ path: testInfo.outputPath(`${theme}-${viewport.width}-run.png`), animations: 'disabled' })
-      await page.getByRole('button', { name: 'Mission brief', exact: true }).click()
+      await page.getByRole('button', { name: 'Run details', exact: true }).click()
       await expectSingleScroll(page)
       await page.getByRole('button', { name: 'Result', exact: true }).click()
       await expectSingleScroll(page)
@@ -91,7 +87,7 @@ test('keeps activity scrolling inside the workspace and gives tabs breathing roo
 test('a tab click survives completion of the cached run refresh', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto(workspacePath('/tasks'))
+  await page.goto(workspacePath('/rules'))
   await authenticateWorkspace(page)
   await expect(page.locator('.shell')).toBeVisible()
   const runs = await workspace.api('/api/runs')

@@ -9,4 +9,4 @@ fun beaconInstallationsFixture(): String =
 
 /** The installation overview the apps also read as their connection probe. */
 fun installationOverviewFixture(): String =
-    """{"runsByStatus":{},"agents":0,"projects":0,"missions":0,"concurrency":1}"""
+    """{"runsByStatus":{},"agents":0,"projects":0,"hookRules":0,"concurrency":1}"""

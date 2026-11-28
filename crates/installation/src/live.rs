@@ -209,6 +209,10 @@ impl ConversationLists {
 #[serde(rename_all = "camelCase")]
 struct State {
     plan_turns_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_conversation_paused: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_cleanup_blocked_by_input: Option<bool>,
     run: Value,
     chat: Value,
     artifacts: Vec<Value>,
@@ -458,11 +462,21 @@ fn read_page(
     // this conversation must not hold up another tab's durable event delivery.
     drop(list_permit);
     let chat = if scope.single_chat() {
-        crate::chats::public_stream_detail(db, &scope.id, window)?
+        let mut chat = crate::chats::public_stream_detail(db, &scope.id, window)?;
+        crate::reads::detail_reminder(db, &scope.account, &mut chat)?;
+        chat
     } else {
         Value::Null
     };
-    let run = scoped_run(db, scope, &chat)?;
+    let mut run = scoped_run(db, scope, &chat)?;
+    // Older single-project runs store their worktree in the workspace field.
+    if !scope.chat
+        && run["snapshot"]["task"]["worktree"] == true
+        && !run["workspaces"].is_array()
+        && let Some(worktree) = crate::worker::control::legacy_worktree(&run)
+    {
+        run["workspaces"] = Value::Array(vec![worktree]);
+    }
     let run_id = text(&run, "id");
     let (first, max) = event_bounds(db, run_id)?;
     // Events are append-only and IDs are AUTOINCREMENT. The retained first
@@ -534,8 +548,20 @@ fn read_page(
     {
         chat.remove("run");
     }
+    let pending_work =
+        !scope.chat && !run_id.is_empty() && db.conversation_has_pending_work(run_id)?;
+    let paused_wait = !scope.chat
+        && run["wakeup"].is_object()
+        && db
+            .0
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE run_id=? AND paused=1)",
+            )?
+            .query_row([run_id], |row| row.get::<_, bool>(0))?;
     let state = State {
         plan_turns_enabled: crate::chat_plan_settings::view(db)?.enabled,
+        run_conversation_paused: paused_wait.then_some(true),
+        workspace_cleanup_blocked_by_input: pending_work.then_some(true),
         artifacts: artifacts(db, run_id)?,
         run,
         chat,

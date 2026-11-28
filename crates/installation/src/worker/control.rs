@@ -11,10 +11,16 @@ use crate::{
 use cairn_contracts::{ChatExecution, EventKind, MessageStatus, ResumeExecutionSelection};
 use serde_json::{Value, json};
 use std::{
+    ffi::OsStr,
+    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
+    process::Stdio,
     sync::Arc,
     time::Duration,
 };
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+const CLEANUP_RESERVATION_PREFIX: &str = "workspace-cleanup-reservation:";
 
 impl Worker {
     pub async fn cancel(&self, s: &Service, id: &str) -> Result<()> {
@@ -213,10 +219,12 @@ impl Worker {
             .store
             .read(move |db| {
                 proof.authorize(db)?;
-                required(db.run_record(&run_id)?, "Run not found")
+                let run = required(db.run_record(&run_id)?, "Run not found")?;
+                require_cleanup_ready(db, &run)?;
+                Ok(run)
             })
             .await?;
-        if run.state.status.is_active() || active.contains_key(id) {
+        if active.contains_key(id) {
             return Err(Error::conflict(
                 "Wait for this run to finish before cleaning up.",
             ));
@@ -236,6 +244,19 @@ impl Worker {
                 "This run has no managed worktree to clean up.",
             ));
         }
+        if managed.iter().any(|workspace| workspace["kind"] == "clone") {
+            return Err(Error::conflict(
+                "This run has a Git clone with its own history. Preserve it before discarding the working environment.",
+            ));
+        }
+        if managed
+            .iter()
+            .any(|workspace| workspace["kind"] != "worktree")
+        {
+            return Err(Error::conflict(
+                "This run contains workspace copies whose changes cannot be checked before cleanup.",
+            ));
+        }
         let generation = RunCheckpoint::load(&s.store, id)
             .await?
             .and_then(|checkpoint| checkpoint.generation);
@@ -245,21 +266,61 @@ impl Worker {
             .join("runs")
             .join(id)
             .join(generation.map_or_else(|| "workspace".into(), |g| format!("workspace-{g}")));
-        let env = std::env::vars().collect();
+        let mut env: Environment = std::env::vars().collect();
+        env.insert("LC_ALL".into(), "C".into());
         for workspace in &managed {
             ensure_clean(workspace, &root, &env).await?;
+            ensure_removable_worktree(&run, workspace, &env).await?;
         }
         authorize.recheck().await?;
         let proof = authorize.clone();
-        s.store.read(move |db| proof.authorize(db)).await?;
+        let run_id = id.to_owned();
+        let (cleaned_at, resume_available) = s
+            .store
+            .transaction(move |db| {
+                proof.authorize(db)?;
+                let current = required(db.run_record(&run_id)?, "Run not found")?;
+                require_cleanup_ready(db, &current)?;
+                reserve_workspace_cleanup(db, &current.state)?;
+                Ok((
+                    current.state.workspace_cleaned_at,
+                    current.state.resume_available,
+                ))
+            })
+            .await?;
+        let mut removed = false;
         for workspace in &managed {
-            authorize.recheck().await?;
-            remove_workspace(&run, workspace, &env).await?;
+            let removal = remove_workspace(s, &run, workspace, &root, &env, &authorize).await;
+            match removal {
+                Ok(deleted) => removed |= deleted,
+                Err(WorktreeRemovalError::Refused(error)) if !removed => {
+                    // No files were removed. Restore the state that the claim replaced.
+                    let run_id = id.to_owned();
+                    s.store
+                        .transaction(move |db| {
+                            db.delete(&format!("{CLEANUP_RESERVATION_PREFIX}{run_id}"))?;
+                            db.change_run(
+                                &run_id,
+                                crate::runs::RunChanges {
+                                    workspace_cleaned_at: Some(cleaned_at),
+                                    resume_available: Some(resume_available),
+                                    ..Default::default()
+                                },
+                            )?;
+                            Ok(())
+                        })
+                        .await?;
+                    return Err(error);
+                }
+                Err(
+                    WorktreeRemovalError::Refused(error) | WorktreeRemovalError::Uncertain(error),
+                ) => {
+                    return Err(error);
+                }
+            }
         }
         let patch = crate::runs::RunChanges {
             workspace: Some(None),
-            resume_available: Some(false),
-            workspace_cleaned_at: Some(Some(now())),
             ..Default::default()
         };
         let id = id.to_owned();
@@ -267,12 +328,85 @@ impl Worker {
         s.store
             .transaction(move |db| {
                 authorize.authorize(db)?;
+                db.delete(&format!("{CLEANUP_RESERVATION_PREFIX}{id}"))?;
                 db.change_run(&id, patch)?;
                 db.audit("run.workspace.cleaned", &json!({ "id": id }))
             })
             .await?;
         Ok(json!({ "cleaned": true }))
     }
+
+    pub(crate) async fn recover_workspace_cleanup_reservations(&self, s: &Service) -> Result<()> {
+        s.store
+            .transaction(|db| {
+                let prefix = format!("{CLEANUP_RESERVATION_PREFIX}*");
+                let reservations =
+                    db.json_rows("SELECT data FROM kv WHERE key GLOB ?", [prefix])?;
+                for reservation in reservations {
+                    let run = text(&reservation, "runId");
+                    if let Some(state) = db.run_state(run)?
+                        && state.workspace_cleaned_at == reservation["reservedAt"].as_i64()
+                    {
+                        db.change_run(
+                            run,
+                            crate::runs::RunChanges {
+                                workspace_cleaned_at: Some(None),
+                                resume_available: reservation["resumeAvailable"].as_bool(),
+                                ..Default::default()
+                            },
+                        )?;
+                    }
+                    db.delete(&format!("{CLEANUP_RESERVATION_PREFIX}{run}"))?;
+                }
+                Ok(())
+            })
+            .await
+    }
+}
+
+fn reserve_workspace_cleanup(db: &Db<'_>, state: &cairn_contracts::RunState) -> Result<()> {
+    // The claim excludes new input without clearing the path. Startup can safely
+    // undo a first claim until a destructive command has been admitted.
+    let reserved_at = state.workspace_cleaned_at.unwrap_or_else(now);
+    if state.workspace_cleaned_at.is_none() {
+        db.set(
+            &format!("{CLEANUP_RESERVATION_PREFIX}{}", state.id),
+            &json!({
+                "runId": state.id,
+                "reservedAt": reserved_at,
+                "resumeAvailable": state.resume_available,
+            }),
+            None,
+        )?;
+    }
+    db.change_run(
+        &state.id,
+        crate::runs::RunChanges {
+            workspace_cleaned_at: Some(Some(reserved_at)),
+            resume_available: Some(false),
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+fn require_cleanup_ready(db: &Db<'_>, run: &crate::runs::RunRecord) -> Result<()> {
+    if run.state.status.is_active() || run.state.recovery_pending {
+        return Err(Error::conflict(
+            "Wait for this run to finish before cleaning up.",
+        ));
+    }
+    if run.wakeup.is_some() {
+        return Err(Error::conflict(
+            "Finish or cancel the scheduled continuation before cleaning up.",
+        ));
+    }
+    if db.conversation_has_pending_work(&run.state.id)? {
+        return Err(Error::conflict(
+            "Resolve pending questions and messages and finish any coding agent change before cleaning up.",
+        ));
+    }
+    Ok(())
 }
 
 /// Pauses queued follow-ups and requests the chat's current turn to stop, in the
@@ -286,7 +420,7 @@ pub(crate) fn stop_chat_in(
     if let Some(run_id) = chat["runId"].as_str() {
         crate::chats::coding_agent::cancel_in(db, run_id)?;
         crate::environment_expiration::cancel_continuation_in(db, run_id)?;
-        crate::chats::continuation::cancel_for_run(db, run_id)?;
+        crate::chats::continuation::stop_for_run(db, run_id)?;
         let run = required(db.run_state(run_id)?, "Run not found")?;
         if can_cancel(db, &run, executing.contains(run_id))? {
             request_cancel(db, run_id, executing.contains(run_id))?;
@@ -332,7 +466,7 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
     crate::environment_expiration::cancel_continuation_in(db, id)?;
     crate::chats::coding_agent::cancel_in(db, id)?;
     let run = required(db.run_state(id)?, "Run not found")?;
-    let waiting = crate::chats::continuation::cancel_for_run(db, id)?;
+    let waiting = crate::chats::continuation::stop_for_run(db, id)?;
     if !can_cancel(db, &run, is_active)? {
         if waiting || crate::environment_expiration::pending(db, id)? {
             pause_conversation(db, id)?;
@@ -392,8 +526,10 @@ pub(crate) fn requeue(
         })
     } else {
         expected_turn_id.is_some_and(|expected| {
-            run["chatExecution"]["messageId"].as_str() != Some(expected)
-                && run["missionTurnId"].as_str() != Some(expected)
+            run["chatExecution"]["messageId"]
+                .as_str()
+                .or_else(|| run["missionTurnId"].as_str())
+                != Some(expected)
         })
     };
     if turn_mismatch {
@@ -402,6 +538,7 @@ pub(crate) fn requeue(
         ));
     }
     crate::conversation_lifecycle::require_active_run(db, id)?;
+    crate::chats::require_workspace_not_cleaned(&run)?;
     let replay_refused = db.conversations_boundary()?.iter().any(|chat| {
         chat["runId"] == id
             && (chat["cancelledByDeletion"] == true
@@ -425,7 +562,6 @@ pub(crate) fn requeue(
     // probe fails. Require evidence from that same attempt before retrying it.
     let antigravity_retry = if status == RunStatus::Failed
         && state.session_id.is_none()
-        && state.workspace_cleaned_at.is_none()
         && crate::provider::Provider::of_run(&run).ok()
             == Some(crate::provider::Provider::Antigravity)
         && let Some(progress) = checkpoint.as_ref().and_then(|saved| {
@@ -459,8 +595,7 @@ pub(crate) fn requeue(
         && (checkpoint.as_ref().is_none_or(|c| !c.launched()) || antigravity_probe_failed);
     let resumable = status.is_resumable()
         && state.resume_available
-        && checkpoint.as_ref().is_some_and(|c| c.prepared().is_some())
-        && state.workspace_cleaned_at.is_none();
+        && checkpoint.as_ref().is_some_and(|c| c.prepared().is_some());
     if !before_launch && !resumable {
         return Err(Error::conflict(
             "This run has no saved conversation available to resume.",
@@ -509,10 +644,6 @@ pub(crate) fn requeue(
     {
         return Err(Error::conflict("This task already has an active run."));
     }
-    // A parked mission completed its provider turn. Explicitly continuing it
-    // creates a new turn, while recovery of interrupted turns keeps its identity.
-    let completed_mission =
-        state.trigger != "chat" && checkpoint.as_ref().is_some_and(RunCheckpoint::completed);
     // A manual resume may arrive before chat_tick observes the terminal turn.
     // Its scheduled continuation must not survive into the resumed execution.
     crate::chats::continuation::cancel_for_run(db, id)?;
@@ -601,10 +732,6 @@ pub(crate) fn requeue(
         execution.recovery = false;
         patch.boundary.as_mut().unwrap()["chatExecution"] = serde_json::to_value(execution)?;
     }
-    if completed_mission {
-        patch.boundary.as_mut().unwrap()["missionTurnId"] = crate::config::id().into();
-        patch.boundary.as_mut().unwrap()["waitContinuation"] = Value::Null;
-    }
     db.change_run(id, patch)?;
     let result = required(db.run(id)?, "Run not found")?;
     let previous_turn = json!({
@@ -673,22 +800,27 @@ fn antigravity_retry_input(
     Ok((message, execution))
 }
 
-/// Worktrees and clones the run created; direct workspaces belong to the user.
+/// Workspaces the run created; direct workspaces belong to the user.
 fn managed_workspaces(run: &Value) -> Vec<Value> {
-    let workspaces = run["workspaces"].as_array().cloned().unwrap_or_else(|| {
-        if !run["workspace"].is_string() || !run["snapshot"]["project"].is_object() {
-            return Vec::new();
-        }
-        vec![json!({
-            "projectId": run["snapshot"]["project"]["id"],
-            "path": run["workspace"],
-            "kind": "worktree",
-        })]
-    });
+    let workspaces = run["workspaces"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| legacy_worktree(run).into_iter().collect());
     workspaces
         .into_iter()
         .filter(|workspace| workspace["kind"] != "direct")
         .collect()
+}
+
+pub(crate) fn legacy_worktree(run: &Value) -> Option<Value> {
+    if !run["workspace"].is_string() || !run["snapshot"]["project"].is_object() {
+        return None;
+    }
+    Some(json!({
+        "projectId": run["snapshot"]["project"]["id"],
+        "path": run["workspace"],
+        "kind": "worktree",
+    }))
 }
 
 async fn ensure_clean(workspace: &Value, root: &PathBuf, env: &Environment) -> Result<()> {
@@ -731,7 +863,20 @@ async fn ensure_clean(workspace: &Value, root: &PathBuf, env: &Environment) -> R
         return Ok(());
     }
     let target = target.to_string_lossy().into_owned();
-    let output = git(&["-C", &target, "status", "--porcelain", "--ignored"], env).await?;
+    verify_worktree_index(&target, env).await?;
+    let output = git(
+        &[
+            "-C",
+            &target,
+            "status",
+            "--porcelain",
+            "--ignored",
+            "--ignore-submodules=none",
+            "--untracked-files=all",
+        ],
+        env,
+    )
+    .await?;
     if !output.success || !output.stdout.trim().is_empty() {
         return Err(Error::conflict(
             "This worktree contains changes or untracked files. Commit or move them before cleanup.",
@@ -740,29 +885,344 @@ async fn ensure_clean(workspace: &Value, root: &PathBuf, env: &Environment) -> R
     Ok(())
 }
 
-async fn remove_workspace(run: &Value, workspace: &Value, env: &Environment) -> Result<()> {
+async fn verify_worktree_index(target: &str, env: &Environment) -> Result<()> {
+    let args = ["-C", target, "ls-files", "-v", "-z"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut child = command("git", &args, env, None)
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut entries = BufReader::new(child.stdout.take().unwrap());
+    let scan = async {
+        let mut entry = Vec::new();
+        while entries.read_until(0, &mut entry).await? != 0 {
+            let tag = entry[0];
+            if tag.is_ascii_lowercase() {
+                return Ok(false);
+            }
+            if tag == b'S' && entry.len() > 3 {
+                let name = OsStr::from_bytes(&entry[2..entry.len() - 1]);
+                match tokio::fs::symlink_metadata(Path::new(target).join(name)).await {
+                    Ok(_) => return Ok(false),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            entry.clear();
+        }
+        Ok(child.wait().await?.success())
+    };
+    let verified = tokio::time::timeout(Duration::from_secs(10), scan)
+        .await
+        .map_err(|_| Error::conflict("Git could not check the worktree index in time."))??;
+    if !verified {
+        return Err(Error::conflict(
+            "Git cannot verify all files in this worktree. Preserve them before cleaning up.",
+        ));
+    }
+    Ok(())
+}
+
+enum WorktreeRemovalError {
+    Refused(Error),
+    Uncertain(Error),
+}
+
+async fn remove_workspace(
+    s: &Service,
+    run: &Value,
+    workspace: &Value,
+    root: &PathBuf,
+    env: &Environment,
+    authorize: &crate::authorization::Authorization,
+) -> std::result::Result<bool, WorktreeRemovalError> {
+    ensure_clean(workspace, root, env)
+        .await
+        .map_err(WorktreeRemovalError::Refused)?;
+    ensure_removable_worktree(run, workspace, env)
+        .await
+        .map_err(WorktreeRemovalError::Refused)?;
     let path = text(workspace, "path");
     match tokio::fs::symlink_metadata(path).await {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(WorktreeRemovalError::Refused(error.into())),
         Ok(_) => {}
     }
-    if workspace["kind"] == "clone" {
-        tokio::fs::remove_dir_all(path).await?;
+    let project = cleanup_project_path(run, workspace).map_err(WorktreeRemovalError::Refused)?;
+    authorize
+        .recheck()
+        .await
+        .map_err(WorktreeRemovalError::Refused)?;
+    let proof = authorize.clone();
+    let key = format!("{CLEANUP_RESERVATION_PREFIX}{}", text(run, "id"));
+    s.store
+        .transaction(move |db| {
+            proof.authorize(db)?;
+            // Once Git can modify the directory, startup preserves the exclusion.
+            db.delete(&key)
+        })
+        .await
+        .map_err(WorktreeRemovalError::Refused)?;
+    let output = git(
+        &[
+            "-C",
+            &project,
+            "-c",
+            "status.showUntrackedFiles=all",
+            "worktree",
+            "remove",
+            path,
+        ],
+        env,
+    )
+    .await
+    .map_err(WorktreeRemovalError::Uncertain)?;
+    if output.success {
+        return Ok(true);
+    }
+    let error = Error::conflict("Git could not remove this worktree.");
+    let first_error = output.stderr.lines().next().unwrap_or("");
+    // These C-locale diagnostics come from Git's validation before deletion.
+    let refused = first_error.starts_with("fatal: cannot remove a locked working tree")
+        || first_error == "fatal: working trees containing submodules cannot be moved or removed"
+        || first_error.starts_with("fatal: validation failed, cannot remove working tree:")
+        || first_error.starts_with(&format!(
+            "fatal: '{path}' contains modified or untracked files,"
+        ));
+    if output.exit_code == Some(128) && refused {
+        return Err(WorktreeRemovalError::Refused(error));
+    }
+    Err(WorktreeRemovalError::Uncertain(error))
+}
+
+fn cleanup_project_path(run: &Value, workspace: &Value) -> Result<String> {
+    run_projects(run)
+        .into_iter()
+        .find(|project| project["id"] == workspace["projectId"])
+        .map(|project| text(&project, "path").to_owned())
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| Error::bad("Project not found"))
+}
+
+async fn ensure_removable_worktree(
+    run: &Value,
+    workspace: &Value,
+    env: &Environment,
+) -> Result<()> {
+    let target = text(workspace, "path");
+    if !tokio::fs::try_exists(target).await? {
         return Ok(());
     }
-    let project = run_projects(run)
-        .into_iter()
-        .find(|p| p["id"] == workspace["projectId"])
-        .ok_or_else(|| Error::bad("Project not found"))?;
-    let output = git(
-        &["-C", text(&project, "path"), "worktree", "remove", path],
+    let project = cleanup_project_path(run, workspace)?;
+    let common = git(&["-C", &project, "rev-parse", "--git-common-dir"], env).await?;
+    let directory = git(&["-C", target, "rev-parse", "--absolute-git-dir"], env).await?;
+    if !common.success || !directory.success {
+        return Err(Error::conflict(
+            "Git could not verify this linked worktree.",
+        ));
+    }
+    let common =
+        tokio::fs::canonicalize(Path::new(&project).join(common.stdout.trim_end())).await?;
+    let directory = tokio::fs::canonicalize(directory.stdout.trim_end()).await?;
+    if directory.parent() != Some(common.join("worktrees").as_path()) {
+        return Err(Error::conflict(
+            "Git could not verify this linked worktree.",
+        ));
+    }
+    if tokio::fs::try_exists(directory.join("locked")).await? {
+        return Err(Error::conflict("Unlock this worktree before cleaning up."));
+    }
+    // Git also refuses removal after deinit if the worktree retains submodule metadata.
+    match tokio::fs::metadata(directory.join("modules")).await {
+        Ok(metadata) if metadata.is_dir() => {
+            return Err(Error::conflict(
+                "This worktree retains submodule data. Preserve its files before cleaning up.",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let submodules = git(&["-C", target, "submodule", "status"], env).await?;
+    if !submodules.success {
+        return Err(Error::conflict(
+            "Git could not verify the worktree's submodules.",
+        ));
+    }
+    if submodules
+        .stdout
+        .lines()
+        .any(|line| !line.is_empty() && !line.starts_with('-'))
+    {
+        return Err(Error::conflict(
+            "This worktree has initialized submodules. Preserve their files before cleaning up.",
+        ));
+    }
+    verify_worktree_history(target, &directory, env).await
+}
+
+async fn verify_worktree_history(target: &str, directory: &Path, env: &Environment) -> Result<()> {
+    // These refs disappear with the linked checkout. Shared branches and tags remain.
+    let local = git(
+        &[
+            "-C",
+            target,
+            "for-each-ref",
+            "--count=1",
+            "refs/bisect/",
+            "refs/worktree/",
+            "refs/rewritten/",
+        ],
         env,
     )
     .await?;
-    if !output.success {
-        return Err(Error::conflict("Git could not remove this worktree."));
+    if !local.success || !local.stdout.is_empty() {
+        return Err(Error::conflict(
+            "Save this worktree's private Git references before cleaning it up.",
+        ));
     }
+    let mut entries = tokio::fs::read_dir(directory).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let name = name.as_encoded_bytes();
+        let private_ref = !matches!(
+            name,
+            b"HEAD" | b"ORIG_HEAD" | b"COMMIT_EDITMSG" | b"TAG_EDITMSG"
+        ) && name
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_');
+        if private_ref || matches!(name, b"rebase-apply" | b"rebase-merge" | b"sequencer") {
+            return Err(Error::conflict(
+                "Save or finish the worktree's Git operation before cleaning it up.",
+            ));
+        }
+    }
+    let mut logs = match tokio::fs::read_dir(directory.join("logs")).await {
+        Ok(logs) => Some(logs),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(logs) = &mut logs {
+        while let Some(entry) = logs.next_entry().await? {
+            if entry.file_name() != "HEAD" {
+                return Err(Error::conflict(
+                    "Save this worktree's private Git logs before cleaning it up.",
+                ));
+            }
+        }
+    }
+    let format = git(
+        &[
+            "-C",
+            target,
+            "config",
+            "--local",
+            "--get",
+            "extensions.refStorage",
+        ],
+        env,
+    )
+    .await?;
+    if format.exit_code != Some(1) && !(format.success && format.stdout.trim() == "files") {
+        return Err(Error::conflict(
+            "Git could not verify this worktree's reference storage format. Preserve the workspace before cleanup.",
+        ));
+    }
+    let log = git(&["-C", target, "rev-parse", "--git-path", "logs/HEAD"], env).await?;
+    if !log.success || log.stdout.trim_end().is_empty() {
+        return Err(Error::conflict(
+            "Git could not locate this worktree's HEAD log.",
+        ));
+    }
+    let log = Path::new(target).join(log.stdout.trim_end());
+    let mut revisions = vec![
+        "-C",
+        target,
+        "--no-replace-objects",
+        "rev-list",
+        "--max-count=1",
+        "HEAD",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    if tokio::fs::try_exists(directory.join("ORIG_HEAD")).await? {
+        let original = git(
+            &["-C", target, "rev-parse", "--verify", "ORIG_HEAD^{commit}"],
+            env,
+        )
+        .await?;
+        if !original.success {
+            return Err(Error::conflict(
+                "Git could not verify the worktree's original HEAD.",
+            ));
+        }
+        revisions.push(original.stdout.trim().to_owned());
+    }
+    revisions.extend(["--not", "--glob=refs/*", "--stdin"].map(str::to_owned));
+    let mut check = command("git", &revisions, env, None)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdin = check.stdin.take().unwrap();
+    let mut stdout = check.stdout.take().unwrap();
+    let ((), unique_commits, status) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::try_join! {
+            write_worktree_reflog(&log, stdin),
+            async { Ok::<_, Error>(stdout.read(&mut [0]).await? != 0) },
+            async { Ok::<_, Error>(check.wait().await?) },
+        }
+    })
+    .await
+    .map_err(|_| Error::conflict("Git could not verify this worktree's history in time."))??;
+    if !status.success() || unique_commits {
+        return Err(Error::conflict(
+            "Save this worktree's commits on a shared branch before cleaning it up.",
+        ));
+    }
+    Ok(())
+}
+
+async fn write_worktree_reflog(log: &Path, mut stdin: tokio::process::ChildStdin) -> Result<()> {
+    let log = match tokio::fs::File::open(log).await {
+        Ok(log) => log,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut history = BufReader::new(log);
+    let mut entry = Vec::new();
+    while (&mut history)
+        .take(256 * 1024)
+        .read_until(b'\n', &mut entry)
+        .await?
+        != 0
+    {
+        if entry.last() != Some(&b'\n') {
+            return Err(Error::conflict(
+                "Git could not verify an entry in this worktree's HEAD log.",
+            ));
+        }
+        let mut fields = entry.splitn(3, |byte| *byte == b' ');
+        // Git's formatted reflog lists the new commit only. The old commit can
+        // remain the sole reference after a reflog expiration without rewriting.
+        for endpoint in [fields.next(), fields.next()] {
+            let Some(oid) = endpoint.filter(|oid| {
+                matches!(oid.len(), 40 | 64) && oid.iter().all(u8::is_ascii_hexdigit)
+            }) else {
+                return Err(Error::conflict(
+                    "Git could not verify an entry in this worktree's HEAD log.",
+                ));
+            };
+            if oid.iter().any(|byte| *byte != b'0') {
+                stdin.write_all(oid).await?;
+                stdin.write_all(b"\n").await?;
+            }
+        }
+        entry.clear();
+    }
+    stdin.shutdown().await?;
     Ok(())
 }
 
@@ -786,12 +1246,11 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
         .split('/')
         .collect::<Vec<_>>();
     let result = match segments.as_slice() {
-        ["runs", id, action @ ("cancel" | "cleanup" | "retry")] => {
+        ["runs", id, action @ ("cancel" | "cleanup")] => {
             async {
                 let name = match *action {
                     "cancel" => "cancel_run",
-                    "cleanup" => "cleanup_run",
-                    _ => "retry_run",
+                    _ => "cleanup_run",
                 };
                 crate::capabilities::run_operation(name)
                     .expect("run operation")
@@ -851,30 +1310,32 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn manual_resume_cannot_resubmit_an_unconfirmed_antigravity_mission() {
+    async fn manual_resume_cannot_resubmit_an_unconfirmed_antigravity_turn() {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
         store
             .transaction(|db| {
-                for turn in [None, Some("wakeup")] {
-                    let id = turn.unwrap_or("initial-mission");
+                for turn in ["initial", "wakeup"] {
+                    let run = format!("run-{turn}");
+                    let chat = format!("chat-{turn}");
                     db.add_run_fixture(
                         &json!({
-                            "id": id, "taskId": id, "trigger": "manual", "status": "failed",
+                            "id": run, "taskId": chat, "trigger": "chat", "status": "failed",
                             "sessionId": "saved-session", "resumeAvailable": true,
-                            "missionTurnId": turn,
+                            "chatExecution": { "messageId": turn, "text": "Review work", "attachments": [] },
                             "snapshot": { "agent": { "provider": "antigravity" } },
                         }),
                         None,
                     )?;
+                    db.save_conversation_boundary(&json!({ "id": chat, "runId": run }))?;
                     let saved = RunCheckpoint {
-                        antigravity_paid_turn: Some(id.into()),
+                        antigravity_paid_turn: Some(turn.into()),
                         ..Default::default()
                     };
-                    saved.store_in(db, id)?;
-                    let error = requeue(db, id, None, None, None, None).unwrap_err();
+                    saved.store_in(db, &run)?;
+                    let error = requeue(db, &run, None, None, None, None).unwrap_err();
                     assert_eq!(error.message, crate::antigravity::FRESH_INPUT_MESSAGE);
-                    assert_eq!(db.run(id)?.unwrap()["status"], "failed");
+                    assert_eq!(db.run(&run)?.unwrap()["status"], "failed");
                 }
                 Ok(())
             })
@@ -1390,8 +1851,386 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_can_retry_after_revocation_between_managed_directories() {
+    async fn worktree_refusals_are_identified_before_cleanup_claims_the_run() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let module = root.path().join("module");
+        let target = root.path().join("worktree");
+        let source = source.to_str().unwrap();
+        let module = module.to_str().unwrap();
+        let target = target.to_str().unwrap();
+        let env = std::env::vars().collect();
+        for command in [
+            vec!["init", "-q", source],
+            vec!["init", "-q", module],
+            vec![
+                "-C",
+                module,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Module",
+            ],
+            vec![
+                "-C",
+                source,
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                module,
+                "nested",
+            ],
+            vec![
+                "-C",
+                source,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "-qm",
+                "Project",
+            ],
+            vec!["-C", source, "worktree", "add", "-q", "--detach", target],
+        ] {
+            assert!(git(&command, &env).await.unwrap().success, "{command:?}");
+        }
+        let run = json!({ "snapshot": { "projects": [{ "id": "project", "path": source }] } });
+        let workspace = json!({ "kind": "worktree", "projectId": "project", "path": target });
+        assert!(
+            git(
+                &["-C", source, "config", "status.showUntrackedFiles", "no"],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let untracked = Path::new(target).join("untracked.txt");
+        tokio::fs::write(&untracked, "Keep this file")
+            .await
+            .unwrap();
+        let dirty = ensure_clean(&workspace, &root.path().to_path_buf(), &env)
+            .await
+            .unwrap_err();
+        assert!(dirty.message.contains("untracked files"));
+        assert!(untracked.is_file());
+        tokio::fs::remove_file(untracked).await.unwrap();
+        let tracked = Path::new(target).join(".gitmodules");
+        let original = tokio::fs::read(&tracked).await.unwrap();
+        for (hide, restore) in [
+            ("--assume-unchanged", "--no-assume-unchanged"),
+            ("--skip-worktree", "--no-skip-worktree"),
+        ] {
+            assert!(
+                git(&["-C", target, "update-index", hide, ".gitmodules"], &env)
+                    .await
+                    .unwrap()
+                    .success
+            );
+            tokio::fs::write(&tracked, "# Keep this local change\n")
+                .await
+                .unwrap();
+            let hidden_change = ensure_clean(&workspace, &root.path().to_path_buf(), &env)
+                .await
+                .unwrap_err();
+            assert!(hidden_change.message.contains("cannot verify all files"));
+            assert_eq!(
+                tokio::fs::read(&tracked).await.unwrap(),
+                b"# Keep this local change\n"
+            );
+            tokio::fs::write(&tracked, &original).await.unwrap();
+            assert!(
+                git(
+                    &["-C", target, "update-index", restore, ".gitmodules"],
+                    &env
+                )
+                .await
+                .unwrap()
+                .success
+            );
+        }
+        ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap();
+        assert!(
+            git(
+                &[
+                    "-C",
+                    target,
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.test",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "Detached work"
+                ],
+                &env,
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let detached = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(detached.message.contains("shared branch"));
+        let detached_tip = git(&["-C", target, "rev-parse", "HEAD"], &env)
+            .await
+            .unwrap();
+        assert!(detached_tip.success);
+        assert!(
+            git(
+                &["-C", target, "update-ref", "refs/worktree/private", "HEAD"],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let private = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(private.message.contains("private Git references"));
+        assert!(
+            git(
+                &["-C", target, "update-ref", "-d", "refs/worktree/private"],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        assert!(
+            git(&["-C", target, "switch", "--detach", "HEAD~1"], &env)
+                .await
+                .unwrap()
+                .success
+        );
+        let reflog_only = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(reflog_only.message.contains("shared branch"));
+        let current = git(&["-C", target, "rev-parse", "HEAD"], &env)
+            .await
+            .unwrap();
+        let current = current.stdout.trim();
+        let detached_oid = detached_tip.stdout.trim();
+        let log = git(
+            &["-C", target, "rev-parse", "--git-path", "logs/HEAD"],
+            &env,
+        )
+        .await
+        .unwrap();
+        let log = Path::new(target).join(log.stdout.trim());
+        let entries = format!(
+            "{current} {detached_oid} Fixture <fixture@example.test> 1700000000 +0000\tcommit\n\
+             {detached_oid} {current} Fixture <fixture@example.test> 1750000000 +0000\treset\n"
+        );
+        tokio::fs::write(&log, entries).await.unwrap();
+        assert!(
+            git(
+                &[
+                    "-C",
+                    target,
+                    "reflog",
+                    "expire",
+                    "--expire=2024-01-01",
+                    "--expire-unreachable=never",
+                    "HEAD",
+                ],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let remaining = git(
+            &["-C", target, "reflog", "show", "--format=%H", "HEAD"],
+            &env,
+        )
+        .await
+        .unwrap();
+        assert_eq!(remaining.stdout.trim(), current);
+        let old_endpoint = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(old_endpoint.message.contains("shared branch"));
+        assert!(
+            git(
+                &["-C", target, "reflog", "expire", "--expire=all", "HEAD"],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        assert!(
+            git(
+                &["-C", target, "update-ref", "ORIG_HEAD", detached_oid],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let original_head = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(original_head.message.contains("shared branch"));
+        assert!(
+            git(
+                &[
+                    "-C",
+                    target,
+                    "branch",
+                    "saved-work",
+                    detached_tip.stdout.trim()
+                ],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap();
+        let head = git(&["-C", target, "rev-parse", "HEAD"], &env)
+            .await
+            .unwrap();
+        let head = head.stdout.trim();
+        let log = git(
+            &["-C", target, "rev-parse", "--git-path", "logs/HEAD"],
+            &env,
+        )
+        .await
+        .unwrap();
+        let log = Path::new(target).join(log.stdout.trim());
+        let mut entries = tokio::fs::read(&log).await.unwrap();
+        // Each Git log record is valid and refers to the same retained commit.
+        let entry =
+            format!("{head} {head} Fixture <fixture@example.test> 1700000000 +0000\tFixture\n");
+        entries.extend_from_slice(entry.repeat(2502).as_bytes());
+        tokio::fs::write(log, entries).await.unwrap();
+        ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap();
+
+        assert!(
+            git(&["-C", source, "worktree", "lock", target], &env)
+                .await
+                .unwrap()
+                .success
+        );
+        let locked = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(locked.message.contains("Unlock this worktree"));
+        assert!(
+            git(&["-C", source, "worktree", "unlock", target], &env)
+                .await
+                .unwrap()
+                .success
+        );
+        assert!(
+            git(
+                &[
+                    "-C",
+                    target,
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "update",
+                    "--init"
+                ],
+                &env,
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let initialized = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(initialized.message.contains("submodule"));
+        assert!(Path::new(target).join("nested/.git").is_file());
+        assert!(
+            git(&["-C", target, "submodule", "deinit", "--all"], &env)
+                .await
+                .unwrap()
+                .success
+        );
+        assert!(!Path::new(target).join("nested/.git").exists());
+        let retained = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(retained.message.contains("retains submodule data"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_preserves_the_workspace_needed_to_answer_a_question() {
         let f = crate::plugin_grant_fixture::Fixture::new().await;
+        let running = f.s.store.run(&f.run).await.unwrap();
+        f.s.chat_acknowledge(&f.run, text(&running["chatExecution"], "messageId"))
+            .await
+            .unwrap();
+        let run = f.run.clone();
+        f.s.store
+            .transaction(move |db| {
+                let chat = db.conversation_for_run(&run)?.unwrap();
+                db.change_run(
+                    &run,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Succeeded),
+                        workspace: Some(Some("/saved/workspace".into())),
+                        ..Default::default()
+                    },
+                )?;
+                db.save_question(&cairn_contracts::ChatQuestion {
+                    id: crate::config::id(),
+                    chat_id: chat.id,
+                    run_id: run,
+                    blocking: true,
+                    source: String::new(),
+                    status: crate::chats::QuestionStatus::Pending,
+                    fields: vec![serde_json::from_value(json!({
+                        "id": "review",
+                        "title": "What should I review next?",
+                    }))?],
+                    created_at: Some(now()),
+                    message_id: None,
+                })
+            })
+            .await
+            .unwrap();
+        let refused = f.s.worker.cleanup(&f.s, &f.run).await.unwrap_err();
+        assert_eq!(refused.status, 409);
+        assert!(refused.message.contains("pending questions and messages"));
+        let run = f.s.store.run(&f.run).await.unwrap();
+        assert_eq!(run["workspace"], "/saved/workspace");
+        assert!(run["workspaceCleanedAt"].is_null());
+        f.s.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn cleanup_can_retry_after_revocation_between_managed_directories() {
+        use crate::common::ProjectFixture;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let f = crate::plugin_grant_fixture::Fixture::new().await;
+        let running = f.s.store.run(&f.run).await.unwrap();
+        f.s.chat_acknowledge(&f.run, text(&running["chatExecution"], "messageId"))
+            .await
+            .unwrap();
         let root =
             f.s.config
                 .data_dir
@@ -1400,18 +2239,52 @@ mod tests {
                 .join("workspace");
         let first = root.join("first");
         let second = root.join("second");
+        let source = f._root.path().join("cleanup-source");
+        let source_path = source.to_str().unwrap();
         let env = std::env::vars().collect();
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        for args in [
+            vec!["init", "-q", source_path],
+            vec![
+                "-C",
+                source_path,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Project",
+            ],
+        ] {
+            assert!(git(&args, &env).await.unwrap().success);
+        }
+        let project =
+            f.s.project_fixture(json!({ "name": "Cleanup source", "path": source }), None)
+                .await
+                .unwrap();
         for path in [&first, &second] {
-            tokio::fs::create_dir_all(path).await.unwrap();
             assert!(
-                git(&["-C", path.to_str().unwrap(), "init"], &env)
-                    .await
-                    .unwrap()
-                    .success
+                git(
+                    &[
+                        "-C",
+                        source_path,
+                        "worktree",
+                        "add",
+                        "--detach",
+                        path.to_str().unwrap()
+                    ],
+                    &env
+                )
+                .await
+                .unwrap()
+                .success
             );
         }
         let mut snapshot = f.s.store.run(&f.run).await.unwrap()["snapshot"].clone();
         snapshot["task"]["worktree"] = true.into();
+        snapshot["projects"] = json!([project]);
         f.s.store
             .change_run(
                 &f.run,
@@ -1419,11 +2292,12 @@ mod tests {
                     status: Some(RunStatus::Cancelled),
                     snapshot: Some(serde_json::from_value(snapshot).unwrap()),
                     workspace: Some(Some(root.to_string_lossy().into_owned())),
+                    resume_available: Some(true),
                     boundary: Some(json!({
                         "isolated": false,
                         "workspaces": [
-                            { "path": first, "kind": "clone" },
-                            { "path": second, "kind": "clone" },
+                            { "path": first, "kind": "worktree", "projectId": project["id"] },
+                            { "path": second, "kind": "worktree", "projectId": project["id"] },
                         ],
                     })),
                     ..Default::default()
@@ -1431,6 +2305,91 @@ mod tests {
             )
             .await
             .unwrap();
+        let reserved_run = f.run.clone();
+        f.s.store
+            .transaction(move |db| {
+                let run = db.run_state(&reserved_run)?.unwrap();
+                reserve_workspace_cleanup(db, &run)
+            })
+            .await
+            .unwrap();
+        let reserved = f.s.store.run(&f.run).await.unwrap();
+        assert!(crate::chats::require_workspace_not_cleaned(&reserved).is_err());
+
+        // A restart before authorizing the first Git removal leaves both paths intact.
+        let restarted = Service::new(f.s.config.clone()).await.unwrap();
+        let recovered = restarted.store.run(&f.run).await.unwrap();
+        assert!(first.exists() && second.exists());
+        assert!(recovered["workspaceCleanedAt"].is_null());
+        assert_eq!(recovered["resumeAvailable"], true);
+        crate::chats::require_workspace_not_cleaned(&recovered).unwrap();
+        restarted.shutdown.cancel();
+
+        let claimed_run = f.run.clone();
+        let revoke_before_removal = crate::authorization::Authorization::new(&f.s, move |db| {
+            let state = db.run_state(&claimed_run)?.unwrap();
+            if state.workspace_cleaned_at.is_some() {
+                return Err(Error::forbidden("Revoked before removal."));
+            }
+            Ok(())
+        });
+        let error =
+            f.s.worker
+                .cleanup_live(&f.s, &f.run, revoke_before_removal)
+                .await
+                .unwrap_err();
+        assert_eq!(error.status, 403);
+        assert!(first.exists() && second.exists());
+        let untouched = f.s.store.run(&f.run).await.unwrap();
+        assert!(untouched["workspaceCleanedAt"].is_null());
+        assert_eq!(untouched["resumeAvailable"], true);
+
+        let claimed_run = f.run.clone();
+        let lock_source = source.clone();
+        let locked_target = first.clone();
+        let locked = AtomicBool::new(false);
+        let lock_after_claim = crate::authorization::Authorization::new(&f.s, move |db| {
+            let state = db.run_state(&claimed_run)?.unwrap();
+            if state.workspace_cleaned_at.is_some() && !locked.swap(true, Ordering::SeqCst) {
+                assert!(
+                    std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&lock_source)
+                        .args(["worktree", "lock"])
+                        .arg(&locked_target)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            Ok(())
+        });
+        let error =
+            f.s.worker
+                .cleanup_live(&f.s, &f.run, lock_after_claim)
+                .await
+                .unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(first.exists() && second.exists());
+        let untouched = f.s.store.run(&f.run).await.unwrap();
+        assert!(untouched["workspaceCleanedAt"].is_null());
+        assert_eq!(untouched["resumeAvailable"], true);
+        assert!(
+            git(
+                &[
+                    "-C",
+                    source_path,
+                    "worktree",
+                    "unlock",
+                    first.to_str().unwrap()
+                ],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
+        );
+
         let watched = first.clone();
         let authorize = crate::authorization::Authorization::new(&f.s, move |_| {
             if !watched.exists() {
@@ -1484,35 +2443,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manual_mission_resume_changes_completed_turn_identity_but_keeps_interrupted_turns() {
+    async fn cleanup_claim_prevents_resuming_a_run_that_has_not_launched() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({
+                        "id": "run", "taskId": "chat", "trigger": "chat", "status": "cancelled",
+                        "workspace": "/saved/workspace", "workspaceCleanedAt": 10,
+                        "chatExecution": { "messageId": "held-turn" },
+                    }),
+                    None,
+                )?;
+                let error = requeue(db, "run", Some("held-turn"), None, None, None).unwrap_err();
+                assert_eq!(error.status, 409);
+                assert!(error.message.contains("cleanup is in progress"));
+                assert_eq!(db.run("run")?.unwrap()["status"], "cancelled");
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_resume_keeps_the_saved_turn_and_clears_transient_state() {
         for completed in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let store = crate::store::Store::open(root.path()).unwrap();
             store
                 .transaction(move |db| {
                     db.add_run_fixture(&json!({
-                    "id": "mission", "taskId": "task", "status": "cancelled", "createdAt": 0,
-                    "resumeAvailable": true, "missionTurnId": "previous-turn",
-                    "waitContinuation": { "observation": { "state": "completed" } },
+                    "id": "run", "taskId": "chat", "trigger": "chat", "status": "cancelled", "createdAt": 0,
+                    "resumeAvailable": true, "chatExecution": { "messageId": "previous-turn" },
                 }), None)?;
-                    db.save_checkpoint_boundary("mission", &json!({
+                    db.save_checkpoint_boundary("run", &json!({
                     "completed": completed, "outputInterrupted": true, "launched": true, "prepared": { "cwd": "/workspace" },
                         "retiredEnvironmentDeadline": 1000,
                         "retainedCompletion": {"messageId": "previous", "finishedAt": 900},
                 }))?;
-                    let resumed = requeue(db, "mission", None, None, None, None)?;
+                    let resumed = requeue(db, "run", None, None, None, None)?;
                     assert_eq!(resumed["status"], "queued");
-                    let checkpoint = db.checkpoint_boundary("mission")?.unwrap();
+                    let checkpoint = db.checkpoint_boundary("run")?.unwrap();
                     assert!(checkpoint["outputInterrupted"].is_null());
                     assert!(checkpoint["retiredEnvironmentDeadline"].is_null());
                     assert!(checkpoint["retainedCompletion"].is_null());
-                    if completed {
-                        assert_ne!(resumed["missionTurnId"], "previous-turn");
-                        assert!(resumed["waitContinuation"].is_null());
-                    } else {
-                        assert_eq!(resumed["missionTurnId"], "previous-turn");
-                        assert!(resumed["waitContinuation"].is_object());
-                    }
+                    assert_eq!(resumed["chatExecution"]["messageId"], "previous-turn");
                     Ok(())
                 })
                 .await

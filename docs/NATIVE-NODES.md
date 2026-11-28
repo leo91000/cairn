@@ -61,8 +61,9 @@ new node. Existing conversations show **Migrate this conversation…** in their
 execution-node details on web and Android. Confirming discards the working files:
 the environment expires and its first empty environment starts on the selected
 node. History, attachments and artifacts remain. The current turn stops, questions
-close, queued messages and waits keep their continuations, and active missions
-resume automatically. A chat otherwise waits for its next message. There is no
+close, and queued messages and waits keep their continuations. An agent changing
+the node of its own conversation continues there. Other conversations wait for
+their next message. There is no
 disk transfer or physical conversion. Back up needed files before confirmation.
 Finally run the uninstall command shown for the previous runtime.
 

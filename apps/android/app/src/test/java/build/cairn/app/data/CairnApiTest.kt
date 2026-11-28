@@ -362,7 +362,7 @@ class CairnApiTest {
             )
             server.start()
             try {
-                CairnApi(server.url("/"), MemoryVault()).get<List<Task>>("/tasks")
+                CairnApi(server.url("/"), MemoryVault()).get<List<Chat>>("/chats")
                 fail("Expected unauthorized")
             } catch (e: ApiException) {
                 assertEquals(401, e.status)
@@ -379,29 +379,10 @@ class CairnApiTest {
             )
         assertEquals("Review", run.title)
         assertTrue(run.active)
-        val task =
-            Task(
-                name = "Review",
-                prompt = "Review changes",
-                cron = null,
-                enabled = false,
-                archived = true,
-                worktree = false,
-                skills = listOf("global/review"),
-                tags = listOf("release"),
-            )
-        assertEquals(task, wireJson.decodeFromString<Task>(wireJson.encodeToString(task)))
     }
 
     @Test
     fun `current server null project and skill selections preserve inherited access`() {
-        val task =
-            wireJson.decodeFromString<Task>(
-                """{"id":"00000000-0000-4000-8000-000000000003","name":"Review","prompt":"Check","agentId":"00000000-0000-4000-8000-000000000001","projectId":null,"skills":null,"revision":"fixture","createdAt":0,"nextRun":null,"authorId":null,"authorAccessId":null,"authorRemoved":false,"scheduleFailure":null,"scheduleWaitReason":null,"nativePrincipals":[],"nativeAuthorityNodes":[],"nativeParentRunId":null,"nativeParentAccess":null,"nativeProvenanceUnknown":true}"""
-            )
-        assertNull(task.projectId)
-        assertNull(task.skills)
-        assertEquals(task, wireJson.decodeFromString<Task>(wireJson.encodeToString(task)))
         val run =
             wireJson.decodeFromString<Run>(
                 """{"id":"run","taskId":"task","status":"interrupted","projectId":null,"snapshot":{"task":{"id":"00000000-0000-4000-8000-000000000003","agentId":"00000000-0000-4000-8000-000000000001","name":"Fixture","prompt":"Fixture"},"agent":{"id":"00000000-0000-4000-8000-000000000001","name":"Fixture","createdAt":0,"revision":"fixture","access":{"mcpTools":{}},"exclusiveNodes":[],"plugins":[]},"project":null,"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/workspace/cairn","origin":"","revision":"fixture","createdAt":0}]},"resumeAvailable":true}"""

@@ -101,6 +101,10 @@ async function toggle(triggering: HookRuleTriggering) {
 }
 
 const ran = computed(() => Object.fromEntries((detail.value?.steps ?? []).map(step => [step.nodeId, step.status])))
+const migratedConversation = computed(() => {
+  const event = detail.value?.event
+  return event?.hook === 'clock' && event.instanceId == null ? event.payload?.migratedConversation : null
+})
 const tones: Record<string, string> = {
   success: 'bg-success',
   danger: 'bg-coral',
@@ -179,13 +183,20 @@ const pretty = (value: unknown) => JSON.stringify(value, null, 2)
           </p>
           <template v-else>
             <RuleFlow
-              v-if="detail.version === version"
+              v-if="!migratedConversation && detail.version === version"
               :nodes="definition.steps"
               container="/steps"
               :catalog="catalog"
               :agent-name="agentName"
               :ran="ran"
             />
+            <RouterLink
+              v-if="migratedConversation?.slug"
+              :to="`/chats/${encodeURIComponent(migratedConversation.slug)}`"
+              class="text-sm font-semibold text-accent hover:underline"
+            >
+              Open conversation · {{ migratedConversation.title }}
+            </RouterLink>
             <section v-for="(step, index) in detail.steps ?? []" :key="`${step.nodeId}:${index}`" class="rounded-xl border border-line bg-surface p-3">
               <p class="m-0! flex items-center gap-2 text-sm font-semibold">
                 <span class="size-2 rounded-full" :class="step.status === 'completed' ? 'bg-success' : step.status === 'failed' ? 'bg-coral' : 'bg-accent'" />
@@ -194,6 +205,13 @@ const pretty = (value: unknown) => JSON.stringify(value, null, 2)
               <p v-if="step.error" class="m-0! mt-1! text-xs text-coral">
                 {{ step.error }}
               </p>
+              <RouterLink
+                v-if="step.kind === 'startAgent' && step.status === 'completed' && typeof step.result?.conversationId === 'string'"
+                :to="`/chats/${encodeURIComponent(step.result.conversationId)}`"
+                class="mt-2 inline-block text-sm font-semibold text-accent hover:underline"
+              >
+                Open conversation
+              </RouterLink>
               <details v-if="step.input !== undefined && step.input !== null" class="mt-2">
                 <summary class="cursor-pointer text-xs font-semibold text-muted">
                   Input
@@ -209,7 +227,7 @@ const pretty = (value: unknown) => JSON.stringify(value, null, 2)
             </section>
             <details v-if="detail.event">
               <summary class="cursor-pointer text-xs font-semibold text-muted">
-                Event · {{ detail.event.hook }} · {{ new Date(detail.event.receivedAt).toLocaleString() }}
+                {{ migratedConversation ? 'Original execution' : `Event · ${detail.event.hook}` }} · {{ new Date(detail.event.receivedAt).toLocaleString() }}
               </summary>
               <pre class="mt-1 max-h-72 overflow-auto rounded-lg bg-canvas p-2.5 text-2xs">{{ pretty(detail.event.payload) }}</pre>
             </details>

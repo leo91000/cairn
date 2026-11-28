@@ -18,9 +18,7 @@ use crate::{
     store::Db,
     validation::text,
 };
-use cairn_contracts::{
-    AgentAccount, AgentId, ConversationLifecycle, ListAgentAccountsOutput, Mission, MissionSettings,
-};
+use cairn_contracts::{AgentAccount, AgentId, ConversationLifecycle, ListAgentAccountsOutput};
 use cairn_protocol::TaskAuthorPolicy;
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
@@ -39,10 +37,6 @@ CREATE INDEX agent_account_access_account ON agent_account_access(account_id);
 
 /// Existing agents awaiting their one-time first authoritative membership snapshot.
 const ROLLOUT: &str = "agent-access-rollout";
-
-/// Shown on a scheduled task whose author cannot use its agent; it runs again once they can.
-pub(crate) const SUSPENDED: &str =
-    "Its author no longer has access to this agent. It resumes once the owner gives access again.";
 
 pub(crate) const DENIED: &str =
     "You don't have access to this agent. Ask the installation owner to give you access.";
@@ -271,11 +265,6 @@ fn require_run_cleanup(
     require_agent(db, identity, crate::nodes::run_agent(&run))
 }
 
-fn require_task(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<Admission> {
-    let task = required(db.mission(id)?, "Mission not found")?;
-    require_agent(db, identity, &task.settings.agent_id.to_string())
-}
-
 /// Read-only admission preflight for people, before dispatch, like native authority.
 /// Reductions (pause, archive, stop, cancel) and reads stay open to every member.
 /// Access allowed by a member's entry relies on a membership check started during this
@@ -349,7 +338,7 @@ where
     }
 
     // A failed check fails closed: these requests direct an agent.
-    if let Err(error) = s.missions.verify_membership_since(s, started).await {
+    if let Err(error) = s.memberships.verify_membership_since(s, started).await {
         tracing::warn!(status = error.status, "Agent access could not be confirmed");
         return Err(Error::unavailable(
             "Your access to this agent could not be confirmed right now. Try again in a moment.",
@@ -378,8 +367,8 @@ pub(crate) async fn usable_now(
 /// and those of an earlier membership of a re-invited member. When the Beacon cannot answer,
 /// the entries stay as they are.
 pub(crate) async fn confirm_memberships(s: &Service) {
-    if !s.missions.membership_verified_within(MEMBERSHIP_AGE)
-        && let Err(error) = s.missions.verify_membership(s, MEMBERSHIP_AGE).await
+    if !s.memberships.membership_verified_within(MEMBERSHIP_AGE)
+        && let Err(error) = s.memberships.verify_membership(s, MEMBERSHIP_AGE).await
     {
         tracing::warn!(status = error.status, "Agent access could not be confirmed");
     }
@@ -430,114 +419,12 @@ fn gate(
         ("POST", ["chats", id, "pause"]) if body["paused"] != true => {
             require_chat(db, identity, id)
         }
-        // A retry starts the task again as it is now, on its current agent.
-        ("POST", ["runs", id, "retry"]) => {
-            let run = required(db.run(id)?, "Run not found")?;
-            match db.mission(text(&run, "taskId"))? {
-                Some(task) => require_agent(db, identity, &task.settings.agent_id.to_string()),
-                None => require_run(db, identity, id),
-            }
-        }
-        ("POST", ["runs", id, "resume" | "chat"]) => require_run(db, identity, id),
+        ("POST", ["runs", id, "resume"]) => require_run(db, identity, id),
         // Cleanup deletes the workspace belonging to this run's agent. Delegated access
         // through a requesting conversation only authorizes directing the delegated chat.
         ("POST", ["runs", id, "cleanup"]) => require_run_cleanup(db, identity, id),
-        // A missing agent is left to the command's own validation.
-        ("POST", ["tasks"]) => match body["settings"]["agentId"].as_str() {
-            Some(agent) => require_agent(db, identity, agent),
-            None => Ok(Admission::Unrestricted),
-        },
-        // Members edit only their own tasks; like a rule, a suspended task can move to an
-        // agent its author may use. Pausing or archiving it stays open to everyone.
-        ("PUT", ["tasks", id]) => match body["settings"]["agentId"].as_str() {
-            Some(_) if reduces_task(db, id, &body["settings"])? => Ok(Admission::Unrestricted),
-            Some(agent) => require_agent(db, identity, agent),
-            None => Ok(Admission::Unrestricted),
-        },
-        ("POST", ["tasks", id, "state"]) => {
-            let task = required(db.mission(id)?, "Mission not found")?;
-            let reduces =
-                body["enabled"] == false && (body["archived"] == true || !task.settings.archived);
-            if reduces {
-                return Ok(Admission::Unrestricted);
-            }
-            require_agent(db, identity, &task.settings.agent_id.to_string())
-        }
-        ("POST", ["tasks", id, "run"]) => require_task(db, identity, id),
         _ => Ok(Admission::Unrestricted),
     }
-}
-
-/// The same reduction as a task save: only pausing, or archiving, and nothing else.
-fn reduces_task(db: &Db<'_>, id: &str, settings: &Value) -> Result<bool> {
-    let Some(current) = db.mission(id)? else {
-        return Ok(false);
-    };
-    let Ok(mut settings) = serde_json::from_value::<MissionSettings>(settings.clone()) else {
-        return Ok(false);
-    };
-    if settings.validate().is_err() {
-        return Ok(false);
-    }
-    let mut unchanged = settings.clone();
-    unchanged.enabled = current.settings.enabled;
-    unchanged.archived = current.settings.archived;
-    Ok(!settings.enabled
-        && (!current.settings.archived || settings.archived)
-        && unchanged == current.settings)
-}
-
-/// A scheduled task runs only while its author may use its agent. Tasks without a
-/// recorded author predate authorship and belong to the owner.
-pub(crate) fn suspended(db: &Db<'_>, task: &Mission, policy: &TaskAuthorPolicy) -> Result<bool> {
-    let (Some(author), Some(access)) = (&task.author_id, &task.author_access_id) else {
-        return Ok(false);
-    };
-    if *author == policy.owner.account_id {
-        return Ok(false);
-    }
-    Ok(!db.membership_uses_agent(author, access, &task.settings.agent_id.to_string())?)
-}
-
-/// Show or clear the suspension of the scheduled tasks of one author, or of every author.
-fn mark_suspensions(
-    db: &Db<'_>,
-    author: Option<&str>,
-    policy: Option<&TaskAuthorPolicy>,
-) -> Result<()> {
-    for mut task in db.missions()? {
-        if task.author_removed
-            || task.settings.cron.is_none()
-            || author.is_some_and(|author| task.author_id.as_deref() != Some(author))
-        {
-            continue;
-        }
-        let blocked = match policy {
-            Some(policy) => suspended(db, &task, policy)?,
-            // Only a member, never the owner, holds or loses an entry.
-            None => match (&task.author_id, &task.author_access_id) {
-                (Some(author), Some(access)) => {
-                    !db.membership_uses_agent(author, access, &task.settings.agent_id.to_string())?
-                }
-                _ => false,
-            },
-        };
-        let shown = task.schedule_wait_reason.as_deref() == Some(SUSPENDED);
-        if blocked == shown {
-            continue;
-        }
-        task.schedule_wait_reason = blocked.then(|| SUSPENDED.to_owned());
-        db.save_mission(&task)?;
-        db.audit(
-            if blocked {
-                "task.agent_access_suspended"
-            } else {
-                "task.agent_access_resumed"
-            },
-            &json!({ "taskId": task.id }),
-        )?;
-    }
-    Ok(())
 }
 
 /// Called with every membership observation: drops entries of memberships that ended
@@ -611,7 +498,7 @@ pub(crate) fn reconcile(db: &Db<'_>, policy: Option<&TaskAuthorPolicy>) -> Resul
         db.delete(ROLLOUT)?;
         db.audit("agent.account_access_rollout", &json!({}))?;
     }
-    mark_suspensions(db, None, Some(policy))
+    Ok(())
 }
 
 pub(crate) fn list(db: &Db<'_>, agent: AgentId) -> Result<ListAgentAccountsOutput> {
@@ -670,8 +557,8 @@ impl Service {
         }
 
         // The entry belongs to the membership the Beacon reports now.
-        let _authors = self.missions.authors.lock().await;
-        let observed = self.missions.observe(self).await.map_err(|error| {
+        let _authors = self.memberships.authors.lock().await;
+        let observed = self.memberships.observe(self).await.map_err(|error| {
             tracing::warn!(status = error.status, "Members could not be confirmed");
             Error::unavailable(
                 "The installation's members could not be confirmed right now. Try again in a moment.",
@@ -709,7 +596,6 @@ impl Service {
                         &json!({ "agentId": id, "accountId": member.account_id }),
                     )?;
                 }
-                mark_suspensions(db, Some(&member.account_id), Some(&policy))?;
                 list(db, agent)
             })
             .await
@@ -723,7 +609,7 @@ impl Service {
     ) -> Result<ListAgentAccountsOutput> {
         require_owner(identity)?;
         let account = account.to_owned();
-        let _authors = self.missions.authors.lock().await;
+        let _authors = self.memberships.authors.lock().await;
         self.store
             .transaction(move |db| {
                 let id = agent.to_string();
@@ -748,7 +634,6 @@ impl Service {
                         "agent.account_access_revoked",
                         &json!({ "agentId": id, "accountId": account }),
                     )?;
-                    mark_suspensions(db, Some(&account), None)?;
                 }
                 list(db, agent)
             })
@@ -875,7 +760,7 @@ mod tests {
 
         // While the Beacon cannot confirm the membership, the entry allows nothing.
         relay_fixture::authority_unavailable(&s, true).await;
-        s.missions.expire_membership_check();
+        s.memberships.expire_membership_check();
         let (status, message) = direct(&s, start.clone()).await.unwrap_err();
         assert_eq!(status, 503);
         assert!(message.contains("could not be confirmed"), "{message}");
@@ -1054,7 +939,7 @@ mod tests {
         // Removed and invited again: the entry belonged to the earlier membership.
         relay_fixture::remove_member(&s, MEMBER).await;
         relay_fixture::add_member(&s, MEMBER, "membership-2").await;
-        s.missions.expire_membership_check();
+        s.memberships.expire_membership_check();
         assert!(listed().await.is_empty());
     }
 
@@ -1063,14 +948,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let s = service(&root).await;
         relay_fixture::claimed(&s).await.unwrap();
-        s.missions.expire_membership_check();
+        s.memberships.expire_membership_check();
 
         // A save or an idle scheduling pass holds the lock briefly and checks nothing.
-        let authors = s.missions.authors.lock().await;
+        let authors = s.memberships.authors.lock().await;
         let waiting = {
             let s = s.clone();
             tokio::spawn(async move {
-                s.missions
+                s.memberships
                     .verify_membership(&s, std::time::Duration::from_secs(30))
                     .await
             })
@@ -1083,7 +968,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            s.missions
+            s.memberships
                 .membership_verified_within(std::time::Duration::from_secs(30))
         );
     }
@@ -1093,13 +978,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let s = service(&root).await;
         relay_fixture::claimed(&s).await.unwrap();
-        s.missions.expire_membership_check();
+        s.memberships.expire_membership_check();
 
         // A long merge or scheduling pass keeps the lock and checks no membership.
-        let authors = s.missions.authors.lock().await;
+        let authors = s.memberships.authors.lock().await;
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(20),
-            s.missions
+            s.memberships
                 .verify_membership(&s, std::time::Duration::from_secs(30)),
         )
         .await
@@ -1114,20 +999,20 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let s = service(&root).await;
         relay_fixture::claimed(&s).await.unwrap();
-        s.missions.expire_membership_check();
+        s.memberships.expire_membership_check();
 
-        // A long task admission holds the lock and confirms the memberships once.
-        let authors = s.missions.authors.lock().await;
+        // A long admission holds the lock and confirms the memberships once.
+        let authors = s.memberships.authors.lock().await;
         let waiting = {
             let s = s.clone();
             tokio::spawn(async move {
-                s.missions
+                s.memberships
                     .verify_membership(&s, std::time::Duration::from_secs(30))
                     .await
             })
         };
         tokio::task::yield_now().await;
-        s.missions.observe(&s).await.unwrap();
+        s.memberships.observe(&s).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
             .await
             .expect("the request must not wait for the rest of the admission")
@@ -1141,14 +1026,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let s = service(&root).await;
         relay_fixture::claimed(&s).await.unwrap();
-        let authors = s.missions.authors.lock().await;
+        let authors = s.memberships.authors.lock().await;
         let started = std::time::Instant::now();
         let waiting = {
             let s = s.clone();
-            tokio::spawn(async move { s.missions.verify_membership_since(&s, started).await })
+            tokio::spawn(async move { s.memberships.verify_membership_since(&s, started).await })
         };
 
-        s.missions.observe(&s).await.unwrap();
+        s.memberships.observe(&s).await.unwrap();
         // A qualifying concurrent check suffices while its holder still owns the lock.
         tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
             .await
@@ -1165,8 +1050,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let s = service(&root).await;
         relay_fixture::claimed(&s).await.unwrap();
-        let authors = s.missions.authors.lock().await;
-        let mut earlier = Box::pin(s.missions.observe(&s));
+        let authors = s.memberships.authors.lock().await;
+        let mut earlier = Box::pin(s.memberships.observe(&s));
         // Poll once to begin the real observation before this request's boundary.
         std::future::poll_fn(|cx| {
             assert!(earlier.as_mut().poll(cx).is_pending());
@@ -1174,7 +1059,7 @@ mod tests {
         })
         .await;
         let started = std::time::Instant::now();
-        let mut waiting = Box::pin(s.missions.verify_membership_since(&s, started));
+        let mut waiting = Box::pin(s.memberships.verify_membership_since(&s, started));
         std::future::poll_fn(|cx| {
             assert!(waiting.as_mut().poll(cx).is_pending());
             Poll::Ready(())

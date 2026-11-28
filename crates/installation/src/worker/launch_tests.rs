@@ -24,12 +24,18 @@ async fn preparation_fixture(root: &Path) -> (Arc<Service>, Value) {
         .unwrap();
     let id = crate::config::id();
     let record = json!({
-        "id": id, "taskId": id, "status": "running",
+        "id": id, "taskId": id, "status": "running", "trigger": "chat",
         "snapshot": { "agent": agent, "task": { "id": id }, "projects": [] },
     });
     let run = service
         .store
-        .transaction(move |db| db.add_run_fixture(&record, None))
+        .transaction(move |db| {
+            let run = db.add_run_fixture(&record, None)?;
+            db.save_conversation_boundary(
+                &json!({ "id": record["taskId"], "runId": record["id"] }),
+            )?;
+            Ok(run)
+        })
         .await
         .unwrap();
     (service, run)
@@ -123,11 +129,18 @@ async fn ready_job_wakeup_prevents_idle_close_before_scheduler_adoption() {
     service.store.transaction({
         let id = id.clone();
         move |db| {
-            db.change_run(&id, crate::runs::RunChanges { status: Some(RunStatus::Waiting), ..Default::default() })?;
-            db.save_wakeup(false, &id, Some(&serde_json::from_value(json!({
-                "id":"wake","messageId":null,"reason":"job","seconds":60,
-                "createdAt":now(),"wakeAt":now()+60_000,
-                "condition":{"type":"job_finished","jobId":"77d595dc-97b7-4c13-923d-e163baf49ea8"}
+            db.change_run(&id, crate::runs::RunChanges { status: Some(RunStatus::Succeeded), ..Default::default() })?;
+            db.save_wakeup(true, &id, Some(&serde_json::from_value(json!({
+                "id": "wake",
+                "messageId": null,
+                "reason": "job",
+                "seconds": 60,
+                "createdAt": now(),
+                "wakeAt": now() + 60_000,
+                "condition": {
+                    "type": "job_finished",
+                    "jobId": "77d595dc-97b7-4c13-923d-e163baf49ea8",
+                },
             }))?))?;
             db.0.execute("INSERT INTO background_jobs VALUES('request',?,'attempt','77d595dc-97b7-4c13-923d-e163baf49ea8','hash',?)",
                 rusqlite::params![id, serde_json::to_string(&crate::background_jobs::Outcome::Finished { receipt: crate::background_jobs::Receipt { exit_code:Some(0),signal:None,elapsed_ms:1,stopped:false,timed_out:false,log_tail:"done".into(),log_truncated:false } })?])?;
@@ -171,7 +184,7 @@ async fn ready_job_wakeup_prevents_idle_close_before_scheduler_adoption() {
     assert!(checkpoint.snapshot().await.held_environment.is_some());
     service
         .store
-        .write(move |db| db.save_wakeup(false, &id, None))
+        .write(move |db| db.save_wakeup(true, &id, None))
         .await
         .unwrap();
     checkpoint
@@ -1153,37 +1166,6 @@ async fn an_unrecorded_antigravity_session_durably_requires_new_input() {
     );
     let saved = checkpoint.snapshot().await;
     assert!(saved.antigravity_replay_refused(Some("first-turn")));
-}
-
-#[test]
-fn a_fresh_antigravity_mission_turn_is_distinct_from_recovering_it() {
-    let run = json!({ "id": "run", "missionTurnId": "wakeup" });
-    let mut saved = RunCheckpoint {
-        turn_pending: Some(true),
-        ..Default::default()
-    };
-    saved.record_launch(Some("previous-wakeup".into()));
-    let prompt = "Continue after the wait.";
-    let fresh = scheduled_execution(&run, Some(prompt), Provider::Antigravity, &saved, false);
-    assert_eq!(fresh["messageId"], "wakeup");
-    assert_eq!(fresh["text"], prompt);
-    assert_eq!(fresh["recovery"], false);
-    assert_eq!(
-        scheduled_execution(&run, Some(prompt), Provider::Codex, &saved, false)["recovery"],
-        true
-    );
-
-    saved.record_launch(launched_turn(&run, Provider::Antigravity));
-    assert_eq!(
-        scheduled_execution(&run, Some(prompt), Provider::Antigravity, &saved, false)["recovery"],
-        true
-    );
-    let wakeup_retry = scheduled_execution(&run, Some(prompt), Provider::Antigravity, &saved, true);
-    assert_eq!(wakeup_retry["text"], prompt);
-    let first = json!({ "id": "run", "snapshot": { "task": { "prompt": "Prepare a report." } } });
-    let first_retry =
-        scheduled_execution(&first, Some(prompt), Provider::Antigravity, &saved, true);
-    assert_eq!(first_retry["text"], "Task brief:\nPrepare a report.");
 }
 
 #[tokio::test]

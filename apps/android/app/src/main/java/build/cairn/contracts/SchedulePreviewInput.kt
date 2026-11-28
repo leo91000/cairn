@@ -6,8 +6,11 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class SchedulePreviewInput(
+    val count: Int = 5,
     val cron: String,
-    val timezone: String,
+    val timezone: String = "Europe/Paris",
 ) {
-    init {}
+    init {
+        require(count in 1..20)
+    }
 }

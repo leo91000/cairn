@@ -103,4 +103,11 @@ sealed interface RuleCondition {
             require(windowMinutes in 1..10080)
         }
     }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("ruleConversationWorking")
+    class J() : RuleCondition {
+        init {}
+    }
 }

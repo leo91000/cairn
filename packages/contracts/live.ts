@@ -6,6 +6,10 @@ import type { TimelineChange } from './generated/typescript/TimelineChange'
 
 export interface LiveState {
   planTurnsEnabled?: boolean
+  /** The conversation owning a standalone run's scheduled continuation is paused. */
+  runConversationPaused?: boolean
+  /** The run's conversation has a pending question, queued input or coding agent change. */
+  workspaceCleanupBlockedByInput?: boolean
   /** The trash revision clients without `compact=1` follow. */
   cacheRevision?: string
   /** Compact streams only: the saved-history revision, which trashing leaves unchanged. */

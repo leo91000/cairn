@@ -335,7 +335,7 @@ const overview = computed(() => [
         section: 'powers' as const,
         title: 'Installation management',
         summary: access.value.installation ? 'On' : 'Off',
-        detail: access.value.installation ? 'Manages agents, projects, skills, MCP connections, missions and runs' : 'Cannot manage agents, projects or missions',
+        detail: access.value.installation ? 'Manages agents, projects, skills, MCP connections and conversations' : 'Cannot manage agents or projects',
         chip: access.value.installation ? { tone: 'power' as const, label: 'Power' } : undefined,
         power: true,
       },
@@ -1487,7 +1487,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
                   </AccessChip>
                 </p>
                 <p class="mt-1 text-xs leading-relaxed text-muted">
-                  Create and change agents (including their permissions), projects, skills, MCP connections, missions and runs across the whole installation, on behalf of the owner. Applies even when the access above is restricted. Exclusive reservations and plugin grants stay with you.
+                  Create and change agents (including their permissions), projects, skills, MCP connections and conversations across the whole installation, on behalf of the owner. Applies even when the access above is restricted. Exclusive reservations and plugin grants stay with you.
                 </p>
               </div>
               <UiSwitch v-model="draft.access.installation" power label="Installation management" />

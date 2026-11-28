@@ -65,6 +65,7 @@ internal fun RuleConditionEditor(
                         "author" to author,
                         "key" to templateValue(),
                     )
+                "ruleConversationWorking" -> ruleObject("type" to JsonPrimitive(kind))
                 "authorQuota" ->
                     ruleObject(
                         "type" to JsonPrimitive(kind),
@@ -269,6 +270,8 @@ internal fun RuleConditionEditor(
                                     expects = "field",
                                 )
                         }
+                        "ruleConversationWorking" ->
+                            Text("Une conversation démarrée par cette règle travaille")
                         "authorQuota" -> {
                             Text(
                                 "Limiter le nombre d’événements par auteur",
@@ -374,6 +377,8 @@ internal fun RuleConditionEditor(
                         "conversationExists" to "Conversation existante",
                         "authorStartedConversation" to "Auteur de la conversation",
                         "authorQuota" to "Quota par auteur",
+                        "ruleConversationWorking" to
+                            "Une conversation démarrée par cette règle travaille",
                         "formula" to "Formule CEL",
                     ) +
                         // The server counts the root at level 1; a new group must still fit its

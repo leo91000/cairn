@@ -58,26 +58,26 @@ work and update separately through their existing host supervisor.
 
 ## Data-preserving upgrades
 
-New installations create schema 38. An existing installation must start from
-schema 37 after a successful start with a manager that completed
+New installations create schema 39. Existing installations can upgrade from
+schema 37 or 38. The schema-39 migration converts missions to Clock rules, links
+their runs to conversations and retains waits, history and personal activity.
+
+For a schema-37 source, start a compatible manager that completed
 [local-disk retirement](migrations/0033-local-conversation-disks.md).
-Let that manager finish cleaning up abandoned backend conversion copies before
-stopping it. When present, `backend-migration-staging` in the manager data
-directory must be empty. The schema-38 manager refuses an occupied staging
-directory so the old manager can finish the cleanup.
-The schema-38 upgrade drops retired remote-disk coordination tables in one
-transaction. The working files and retirement queue for local disks stay in
-place. Historical database migrations are available in earlier releases.
+Let that manager clean up abandoned backend conversion copies before stopping
+it. When present, `backend-migration-staging` in the manager data directory must
+be empty. The intermediate schema-38 step drops retired remote-disk
+coordination tables while retaining working files and the local retirement queue.
 For schemas 11–36, use a compatible schema-37 release such as Cairn v0.80.0
-and verify a successful start before attempting the schema-38 upgrade. Use
+and verify a successful start before attempting the schema-39 upgrade. Use
 the documented upgrade path for installations older than schema 11.
 
-Before either upgrade, stop the manager and retain a consistent database/WAL
+Before the upgrade, stop the manager and retain a consistent database/WAL
 backup. Preserve the installation identity, configuration, data roots and
 node state. Before an S3-era upgrade, save working files that depend on remote
 storage and retain the corresponding bucket for rollback. Run matching manager,
-runner, node and guest versions. Schema-37 managers refuse schema 38, so rollback
-requires restoring the corresponding pre-upgrade backup.
+runner, node and guest versions. To roll back from schema 39, restore the
+corresponding pre-upgrade backup with its compatible manager.
 
 Beacon has its own Postgres migration ledger. The installation schema upgrade
 leaves Beacon data intact. Validate ledger compatibility before promotion.
@@ -120,9 +120,9 @@ remain necessary; historical production shapes also need this private check.
    This operation writes the supplied copy. It requires an existing `manager.db`
    and opens the Store without configuration loading, Service, Vault or credential
    refresh. It does not start a manager or verify application readiness.
-4. Require `versionBefore: 37`, `versionAfter: 38`, `quickCheck: "ok"`
-   and `foreignKeyCheck: "ok"` for this upgrade. Reopen the copy to confirm
-   schema 38 and verify the untouched source checksum. Retain only aggregate
+4. Require `versionBefore: 37` or `38` to match the source, `versionAfter: 39`,
+   `quickCheck: "ok"` and `foreignKeyCheck: "ok"`. Reopen the copy to confirm
+   schema 39 and verify the untouched source checksum. Retain only aggregate
    verdicts and source and artifact identities in public evidence. Keep database
    contents, credentials and private paths out of published logs.
    A failure blocks the tag: preserve the private copies and repair the migration.

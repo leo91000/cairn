@@ -501,28 +501,54 @@ impl RelayedInstallation {
     }
 }
 
+/// Creates a conversation, sends `prompt`, admits its run via `chat_tick`, and
+/// returns `(chat_detail, run)`.
+pub async fn chat_run_fixture(
+    installation: &cairn_installation::service::Service,
+    prompt: &str,
+) -> (Value, Value) {
+    let chat = installation
+        .chat_create(json!({ "agentId": cairn_installation::config::MAIN_AGENT_ID }))
+        .await
+        .unwrap();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    installation
+        .chat_send(
+            &chat_id,
+            json!({ "id": uuid::Uuid::new_v4(), "text": prompt }),
+        )
+        .await
+        .unwrap();
+    installation
+        .chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let detail = installation.chat_detail(&chat_id).await.unwrap();
+    let run = installation
+        .store
+        .run(detail["runId"].as_str().unwrap())
+        .await
+        .unwrap();
+    (detail, run)
+}
+
 /// A private run deliverable stored directly in the installation, with no preview.
 pub async fn seeded_artifact(
     relay: &RelayedInstallation,
     bytes: &[u8],
     media_type: &str,
 ) -> (String, String) {
+    let (_, run, artifact) = seeded_conversation_artifact(relay, bytes, media_type).await;
+    (run, artifact)
+}
+
+pub async fn seeded_conversation_artifact(
+    relay: &RelayedInstallation,
+    bytes: &[u8],
+    media_type: &str,
+) -> (Value, String, String) {
     let installation = &relay.installation;
-    let task = installation
-        .task_fixture(
-            json!({
-                "name": "Report",
-                "prompt": "Make a report",
-                "agentId": cairn_installation::config::MAIN_AGENT_ID,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run = installation
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
-        .await
-        .unwrap();
+    let (conversation, run) = chat_run_fixture(installation, "Make a report").await;
     let run = run["id"].as_str().unwrap().to_owned();
     let artifact = uuid::Uuid::new_v4().to_string();
     let directory = installation.config.data_dir.join("artifacts");
@@ -542,7 +568,7 @@ pub async fn seeded_artifact(
         .transaction(move |db| db.insert_artifact(&record))
         .await
         .unwrap();
-    (run, artifact)
+    (conversation, run, artifact)
 }
 
 /// Three independent accounts can fill all 24 installation stream slots while
@@ -594,9 +620,3 @@ pub async fn stream_accounts_with_members(
     }
     cookies
 }
-
-#[path = "../../../installation/tests/common/mission_fixture.rs"]
-pub mod mission_fixture;
-
-#[allow(unused_imports)]
-pub use mission_fixture::{MissionFixture, StoreMissionFixture};

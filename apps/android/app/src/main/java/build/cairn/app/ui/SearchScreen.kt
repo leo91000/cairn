@@ -33,12 +33,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
-import build.cairn.contracts.RunMissionInput
-import build.cairn.contracts.runMission
 
 internal enum class SearchKind(val label: String) {
     CHAT("Conversations"),
-    MISSION("Missions"),
     AGENT("Agents"),
     PROJECT("Projets"),
     SKILL("Skills"),
@@ -54,7 +51,7 @@ internal data class SearchHit(
     val avatar: String = title,
 )
 
-/** Matches titles, agents, projects, tags and descriptions; titles first. */
+/** Matches titles, agents, projects and descriptions; titles first. */
 internal fun searchWorkspace(query: String, chats: List<Chat>, state: Workspace): List<SearchHit> {
     val q = query.trim()
     if (q.isEmpty()) return emptyList()
@@ -75,20 +72,6 @@ internal fun searchWorkspace(query: String, chats: List<Chat>, state: Workspace)
                         it.agentName.ifBlank { it.title },
                     )
     }
-    state.tasks
-        .filter { !it.archived }
-        .forEach {
-            if (it.name.hit() || it.tags.any { tag -> tag.hit() } || it.prompt.hit())
-                hits +=
-                    (if (it.name.hit()) 0 else 1) to
-                        SearchHit(
-                            SearchKind.MISSION,
-                            it.id,
-                            it.name,
-                            describeSchedule(it),
-                            it.agentId,
-                        )
-        }
     // Members start conversations only with the agents they may use.
     state.agents
         .filter { canUseAgent(state.usableAgents, it.id) }
@@ -131,8 +114,6 @@ fun SearchScreen(
     state: Workspace,
     back: () -> Unit,
     openChat: (String) -> Unit,
-    openRun: (String) -> Unit,
-    openMission: () -> Unit,
     newChat: (String) -> Unit,
     open: (String) -> Unit,
 ) {
@@ -146,15 +127,7 @@ fun SearchScreen(
             searchWorkspace(query, live.state?.chats.orEmpty(), state)
         }
     val shown = hits.filter { scope == null || it.kind.name == scope }
-    // Launching by hand needs access to the mission's agent.
-    val topMission = hits.firstOrNull {
-        it.kind == SearchKind.MISSION &&
-            canUseAgent(state.usableAgents, state.tasks.find { task -> task.id == it.id }?.agentId)
-    }
     val topAgent = hits.firstOrNull { it.kind == SearchKind.AGENT }
-    fun launch(taskId: String) = vm.perform {
-        openRun(api.runMission(RunMissionInput(taskId)).id)
-    }
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
@@ -236,28 +209,16 @@ fun SearchScreen(
             if (query.isBlank())
                 item {
                     Text(
-                        "Conversations, missions, agents, projets et skills.",
+                        "Conversations, agents, projets et skills.",
                         Modifier.padding(horizontal = 4.dp, vertical = 16.dp),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-            if (scope == null && (topMission != null || topAgent != null))
+            if (scope == null && topAgent != null)
                 item(key = "actions") {
                     Eyebrow("Actions", Modifier.padding(start = 4.dp, top = 16.dp, bottom = 8.dp))
                     SignalCard(Modifier.fillMaxWidth(), padding = PaddingValues(6.dp)) {
-                        topMission?.let {
-                            ActionRow(
-                                CairnIcons.Play,
-                                signal.ink,
-                                signal.onInk,
-                                "Lancer « ${it.title} »",
-                                "Mission",
-                                !state.busy,
-                            ) {
-                                launch(it.id)
-                            }
-                        }
                         topAgent?.let {
                             ActionRow(
                                 CairnIcons.Plus,
@@ -293,7 +254,6 @@ fun SearchScreen(
                         ResultRow(hit, query.trim()) {
                             when (hit.kind) {
                                 SearchKind.CHAT -> openChat(hit.id)
-                                SearchKind.MISSION -> openMission()
                                 SearchKind.AGENT -> open("agents")
                                 SearchKind.PROJECT -> open("projects")
                                 SearchKind.SKILL -> open("skills")
@@ -388,7 +348,6 @@ private fun ResultRow(hit: SearchHit, query: String, onClick: () -> Unit) {
                     ) {
                         Icon(
                             when (hit.kind) {
-                                SearchKind.MISSION -> CairnIcons.Orbit
                                 SearchKind.PROJECT -> CairnIcons.Folder
                                 else -> CairnIcons.Spark
                             },

@@ -53,6 +53,8 @@ fun latestArtifacts(items: List<Deliverable>) =
 @Serializable
 data class LiveState(
     val planTurnsEnabled: Boolean = false,
+    val runConversationPaused: Boolean = false,
+    val workspaceCleanupBlockedByInput: Boolean = false,
     val run: Run? = null,
     val chat: Chat? = null,
     val chats: List<Chat>? = null,

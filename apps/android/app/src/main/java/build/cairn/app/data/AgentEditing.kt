@@ -816,7 +816,7 @@ fun agentReview(
         add(
             ReviewLine(
                 ReviewKind.Power,
-                "Ajout : gestion de l’installation. Cet agent pourra créer et modifier les agents (y compris leurs permissions), projets, skills, connexions MCP, missions et exécutions de toute l’installation.",
+                "Ajout : gestion de l’installation. Cet agent pourra créer et modifier les agents (y compris leurs permissions), projets, skills, connexions MCP et conversations de toute l’installation.",
             )
         )
     if (after.delegation == true && before.delegation != true)

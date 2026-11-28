@@ -241,20 +241,17 @@ The agent reads `SKILL.md` and its supporting files when it uses the skill.
 Every coding-agent execution uses the chat protocol and receives this prompt
 once, in its instructions.
 Isolated runs list skill paths inside the run and include the
-[plugin instructions](PLUGINS.md) of their agent. Only chat turns are
-interactive; scheduled work states that it cannot answer questions, as
-[waits](WAIT-FOR.md) require. Its first turn is the task brief after a fixed
-lead-in, so a brief that starts with `/clear` is not run as a Claude Code
-command; a resumed run sends its resume prompt instead. Codex also lists the skills
-installed under `~/.agents/skills` itself.
+[plugin instructions](PLUGINS.md) of their agent. Scheduled conversations support
+questions and [durable waits](WAIT-FOR.md). Cairn prefixes the first scheduled
+brief with plain text so a leading slash stays part of the brief. Recovery uses
+the resume prompt. Codex also lists the skills under `~/.agents/skills`.
 
 Claude Code and OpenCode apply the instructions again at every launch.
 [Codex 0.166.0](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/app-server/src/request_processors/thread_processor.rs)
 reloads an idle unsubscribed thread when resumed with instruction overrides;
-older versions can retain its initial instructions. For compatibility, a Codex
-mission continued in chat receives the interactive rule at the start of every chat
-turn on the mission's thread, since compaction can drop earlier messages. A new
-session started by the chat gets it in its instructions.
+older versions can retain its initial instructions. When a migrated
+conversation reuses an old Codex thread, Cairn repeats the interactive rule on
+that thread. A fresh session receives it in the instructions.
 
 ## Screens
 

@@ -6,6 +6,7 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+import { runSchedule, startConversation } from './schedule-fixture'
 
 test.describe.configure({ mode: 'serial' })
 
@@ -77,47 +78,23 @@ test('sign in, author skills, schedule work, inspect results, and sign out', asy
   await expect(page.getByRole('dialog').getByText('All changes saved')).toBeVisible()
   await page.getByRole('button', { name: 'Close', exact: true }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
-  await page.getByRole('link', { name: 'Missions', exact: true }).click()
-  await page.getByRole('button', { name: 'New mission', exact: true }).click()
-  await page.getByLabel('Mission name').fill('Weekly dependency review')
-  await page
-    .getByLabel('What should happen?')
-    .fill('Review dependencies and report the checks you ran. fixture:activity')
-  await page.getByRole('combobox', { name: 'When', exact: true }).click()
-  await page.getByRole('option', { name: 'Every Monday', exact: true }).click()
-  await page.getByLabel('Timezone').fill('Europe/Paris')
-  await page.getByRole('button', { name: 'Preview next runs' }).click()
-  await expect(page.locator('.schedule-preview span')).toHaveCount(3)
-  await page.getByLabel('Timezone').fill('Invalid/Zone')
-  await expect(page.locator('.schedule-preview span')).toHaveCount(0)
-  await page.getByRole('button', { name: 'Preview next runs' }).click()
-  await expect(page.getByRole('alert')).toContainText('IANA timezone')
-  await page.getByLabel('Timezone').fill('Europe/Paris')
-  await page.getByLabel('Customize mission scope').check()
-  await page.getByLabel('Use the agent’s available skills').uncheck()
-  await page.getByLabel('review', { exact: true }).check()
-  await page.getByRole('button', { name: 'Create mission', exact: true }).click()
+  await page.getByRole('link', { name: 'Rules', exact: true }).click()
+  await page.getByRole('button', { name: 'Schedule an agent' }).click()
+  await page.getByLabel('Name', { exact: true }).fill('Weekly dependency review')
+  await page.getByLabel('Brief').fill('Review dependencies. fixture:activity')
+  await page.getByLabel('Cron (five fields)').fill('0 9 * * 1')
+  await page.getByRole('button', { name: 'Create schedule' }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
-  await expect(
-    page.getByRole('heading', { name: 'Weekly dependency review' }),
-  ).toBeVisible()
-  // As on Android, running a mission opens its run.
-  await page.getByRole('button', { name: 'Run now', exact: true }).click()
-  await expect(page).toHaveURL(/\/runs\//)
-  await expect(page.locator('.run-title-meta .status')).toContainText(
-    'Execution finished',
-  )
-  await page.getByRole('button', { name: 'Result', exact: true }).click()
-  await expect(page.getByText('The fixture task passed.')).toBeVisible()
+  const rule = (await workspace.api('/api/hook-rules')).rules.find((entry: any) => entry.name === 'Weekly dependency review')
+  const chat = await runSchedule(workspace, rule)
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).status).toBe('succeeded')
+  await page.goto(workspacePath(`/chats/${chat.slug}`))
+  await expect(page.getByText('Ready for the next step.', { exact: true })).toBeVisible()
   await page.reload()
-  await page.getByRole('button', { name: 'Result', exact: true }).click()
-  await expect(page.getByText('The fixture task passed.')).toBeVisible()
-  await page.getByRole('link', { name: 'Missions', exact: true }).click()
-  await page
-    .getByRole('button', { name: 'Pause schedule', exact: true })
-    .click()
-  await expect(page.locator('.mission-card').filter({ hasText: 'Weekly dependency review' })).toContainText('Paused · ')
-  await page.getByRole('link', { name: 'Missions', exact: true }).click()
+  await expect(page.getByText('Ready for the next step.', { exact: true })).toBeVisible()
+  await page.goto(workspacePath(`/rules?rule=${rule.id}`))
+  await page.getByRole('button', { name: 'Disable', exact: true }).click()
+  await expect(page.getByText('Disabled', { exact: true }).first()).toBeVisible()
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.mouse.move(0, 0)
   await expect(page.locator('.toast')).toHaveCount(0)
@@ -137,6 +114,9 @@ test('sign in, author skills, schedule work, inspect results, and sign out', asy
     fullPage: true,
     animations: 'disabled',
   })
+  const ruleSheet = page.getByRole('dialog', { name: 'Weekly dependency review', exact: true })
+  await ruleSheet.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(ruleSheet).toHaveCount(0)
   await page.getByRole('link', { name: 'Atelier', exact: true }).click()
   await page.getByRole('button', { name: 'Sign out', exact: true }).click()
   await expect(
@@ -145,8 +125,9 @@ test('sign in, author skills, schedule work, inspect results, and sign out', asy
   expect(errors).toEqual([])
 })
 
-test('edits supporting files, cancels work, and archives without losing history', async ({
+test('edits supporting files and cancels work without losing history', async ({
   page,
+  workspace,
 }) => {
   await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)
@@ -173,41 +154,14 @@ test('edits supporting files, cancels work, and archives without losing history'
     page.getByRole('heading', { name: 'Checks', exact: true }),
   ).toBeVisible()
   await page.keyboard.press('Escape')
-  await page.getByRole('link', { name: 'Missions', exact: true }).click()
-  await page.getByRole('button', { name: 'Edit mission', exact: true }).click()
-  await page.getByLabel('What should happen?').fill('fixture:hang')
-  await page.getByRole('button', { name: 'Save changes' }).click()
-  await expect(page.getByRole('dialog')).toHaveCount(0)
-  await page.getByRole('button', { name: 'Run now', exact: true }).click()
-  await expect(page.locator('.run-title-meta .status')).toHaveText('running')
+  const { run } = await startConversation(workspace, 'Keep prior runs', 'fixture:chat-hang')
+  await page.goto(workspacePath(`/runs/${run.id}`))
+  await expect(page.getByRole('button', { name: 'Stop run', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Stop run', exact: true }).click()
-  await page
-    .getByRole('dialog')
-    .getByRole('button', { name: 'Stop run', exact: true })
-    .click()
-  await expect(page.locator('.run-title-meta .status')).toHaveText('cancelled')
-  await page.getByRole('link', { name: 'Missions', exact: true }).click()
-  await page.getByRole('button', { name: 'Mission actions', exact: true }).click()
-  await page.getByRole('menuitem', { name: 'Archive', exact: true }).click()
-  await expect(
-    page.getByRole('heading', { name: 'Weekly dependency review' }),
-  ).toHaveCount(0)
-  await page.getByRole('group', { name: 'Filter missions' }).getByRole('button', { name: /^Archived/ }).click()
-  await expect(
-    page.getByRole('heading', { name: 'Weekly dependency review' }),
-  ).toBeVisible()
-  await expect(
-    page.getByRole('button', { name: 'Run now', exact: true }),
-  ).toBeDisabled()
-  await page.getByRole('button', { name: 'Mission actions', exact: true }).click()
-  await page.getByRole('menuitem', { name: 'Restore (paused)', exact: true }).click()
-  await page.getByRole('group', { name: 'Filter missions' }).getByRole('button', { name: /^All/ }).click()
-  await expect(
-    page.getByRole('heading', { name: 'Weekly dependency review' }),
-  ).toBeVisible()
-  await page.getByRole('link', { name: 'Atelier', exact: true }).click()
-  await page.getByRole('navigation', { name: 'Atelier sections' }).getByRole('link', { name: 'Runs', exact: true }).click()
-  await expect(page.locator('tbody tr')).toHaveCount(2)
+  await page.getByRole('dialog').getByRole('button', { name: 'Stop run', exact: true }).click()
+  await expect.poll(() => workspace.service.store.run(run.id)?.status).toBe('cancelled')
+  await page.getByRole('link', { name: 'Back to runs' }).click()
+  await expect(page.locator(`a[href="${workspacePath(`/runs/${run.id}`)}"]`).first()).toBeVisible()
 })
 
 test('approves a scoped OAuth connector and revokes its grant', async ({
@@ -365,9 +319,9 @@ test('dark appearance settings, empty states and connection sign-in feedback', a
   await page.keyboard.press('Escape')
   await expect(page.locator('.theme-popover')).not.toBeVisible()
   await expect(page.getByRole('button', { name: 'Appearance: dark', exact: true })).toBeFocused()
-  await page.route('**/api/tasks', route => route.fulfill({ json: { tasks: [] } }))
-  await page.goto(workspacePath('/tasks'))
-  await expect(page.getByRole('heading', { name: 'No missions yet', exact: true })).toBeVisible()
+  await page.route('**/api/hook-rules', route => route.fulfill({ json: { rules: [] } }))
+  await page.goto(workspacePath('/rules'))
+  await expect(page.getByRole('heading', { name: 'No rules yet', exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('empty-tasks.png'), fullPage: true, animations: 'disabled' })
   // Synthetic feedback only: never initiate a real device login or capture a real code.
   const signIn = {

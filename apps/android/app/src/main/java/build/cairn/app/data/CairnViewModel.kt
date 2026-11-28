@@ -5,28 +5,26 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import build.cairn.app.BuildConfig
 import build.cairn.contracts.AccountSignInMethod
+import build.cairn.contracts.ConversationSnoozeAction
 import build.cairn.contracts.GetInstallationOverviewInput
-import build.cairn.contracts.ListMissionsInput
 import build.cairn.contracts.ListModelsInput
 import build.cairn.contracts.ListProjectsInput
 import build.cairn.contracts.ListSkillsInput
 import build.cairn.contracts.MarkReadInput
-import build.cairn.contracts.OutcomeAsideAction
 import build.cairn.contracts.ReadMark
 import build.cairn.contracts.ReadTarget
-import build.cairn.contracts.SetOutcomeAsideInput
+import build.cairn.contracts.SetConversationSnoozeInput
 import build.cairn.contracts.getInstallationOverview
 import build.cairn.contracts.listAccountMethods
 import build.cairn.contracts.listAgents
 import build.cairn.contracts.listMcps
-import build.cairn.contracts.listMissions
 import build.cairn.contracts.listModelAvailability
 import build.cairn.contracts.listModels
 import build.cairn.contracts.listProjects
 import build.cairn.contracts.listSkills
 import build.cairn.contracts.listUsableAgents
 import build.cairn.contracts.markRead
-import build.cairn.contracts.setOutcomeAside
+import build.cairn.contracts.snoozeChat
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -73,7 +71,6 @@ data class Workspace(
     /** Agents a member may use; null for the owner, who uses every agent (ADR-0075). */
     val usableAgents: List<String>? = null,
     val projects: List<Project> = emptyList(),
-    val tasks: List<Task> = emptyList(),
     val skills: List<Skill> = emptyList(),
     val transportRoute: String = "relay",
     val protocolError: String? = null,
@@ -289,117 +286,51 @@ constructor(
     val localReads = androidx.compose.runtime.mutableStateMapOf<String, Long>()
     private var readsGeneration = 0
 
-    /**
-     * Mission outcomes set aside on this device, by run, until the mission poll reflects them. A
-     * null value brings one back.
-     */
-    val localDismissals = androidx.compose.runtime.mutableStateMapOf<String, OutcomeDismissal?>()
-    private val dismissalRequests = mutableMapOf<String, Any>()
-    private val savedDismissals = mutableMapOf<String, Any>()
-
     private fun clearReads() {
         readsGeneration++
         localReads.clear()
-        localDismissals.clear()
-        dismissalRequests.clear()
-        savedDismissals.clear()
     }
 
-    /** A poll started after a successful write supersedes its optimistic value. */
-    suspend fun missionActivity(): List<Run> {
-        val target = api
-        val generation = readsGeneration
-        val saved = savedDismissals.toMap()
-        val activity = target.get<List<Run>>("/tasks/activity")
-        if (generation == readsGeneration && connection === target) {
-            for ((runId, request) in saved) {
-                if (dismissalRequests[runId] === request) {
-                    localDismissals.remove(runId)
-                    dismissalRequests.remove(runId)
-                    savedDismissals.remove(runId)
-                }
-            }
-        }
-        return activity
-    }
+    fun snooze(chatId: String, finishedAt: Long, until: Long) =
+        updateSnooze(chatId) { ConversationSnoozeAction.A(finishedAt, until) }
 
-    /**
-     * Sets a blocked mission's outcome aside for this account, on every device: dismissed, or
-     * snoozed [until] a time. It asks again when the mission finishes another run.
-     */
-    fun setAside(runId: String, taskId: String, finishedAt: Long, until: Long? = null) =
-        dismissal(
-            runId,
-            OutcomeDismissal(until),
-            {
-                SetOutcomeAsideInput(
-                    taskId = taskId,
-                    action =
-                        if (until == null) OutcomeAsideAction.A(finishedAt = finishedAt)
-                        else OutcomeAsideAction.B(finishedAt = finishedAt, until = until),
-                )
-            },
-            if (until == null) "Écartée jusqu’au prochain résultat de la mission"
-            else "Rappel demain à 9 h",
-        )
+    fun restoreSnooze(chatId: String) = updateSnooze(chatId) { ConversationSnoozeAction.B() }
 
-    /** Brings a dismissed or snoozed outcome back to Pour vous. */
-    fun restoreOutcome(runId: String, taskId: String) =
-        dismissal(
-            runId,
-            null,
-            { SetOutcomeAsideInput(taskId = taskId, action = OutcomeAsideAction.C()) },
-            "De retour dans Pour vous",
-        )
-
-    private fun dismissal(
-        runId: String,
-        value: OutcomeDismissal?,
-        // Built inside the request: an invalid local value reports an error, never crashes.
-        input: () -> SetOutcomeAsideInput,
-        message: String,
-    ) {
+    private fun updateSnooze(chatId: String, action: () -> ConversationSnoozeAction) {
         val target = connection ?: return
-        if (!state.value.session.authenticated || state.value.signingOut) return
         val generation = readsGeneration
-        val request = Any()
-        dismissalRequests[runId] = request
-        savedDismissals.remove(runId)
-        localDismissals[runId] = value
         viewModelScope.launch {
             try {
-                target.setOutcomeAside(input())
+                val change = action()
+                val saved =
+                    target.snoozeChat(SetConversationSnoozeInput(action = change, chatId = chatId))
                 if (generation != readsGeneration || connection !== target) return@launch
-                if (dismissalRequests[runId] === request) savedDismissals[runId] = request
-                notify(message)
+                if (change is ConversationSnoozeAction.B) {
+                    localReads.remove("chat:$chatId")
+                } else if (saved.snoozedUntil == null) {
+                    notify("La conversation a changé. Reportez sa dernière activité.")
+                }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                if (generation != readsGeneration || connection !== target) return@launch
-                if (dismissalRequests[runId] !== request) return@launch
-                localDismissals.remove(runId)
-                dismissalRequests.remove(runId)
-                savedDismissals.remove(runId)
-                report(e)
+                if (generation == readsGeneration && connection === target) report(e)
             }
         }
     }
 
-    /** A Fil key (`chat:<id>` or `task:<id>`) and the finish of the work read. */
-    private fun readMark(key: String, at: Long): ReadMark {
-        val id = key.substringAfter(':')
-        return ReadMark(
-            target =
-                if (key.startsWith("chat:")) ReadTarget.A(chatId = id)
-                else ReadTarget.B(taskId = id),
+    private fun readMark(key: String, at: Long, snoozedUntil: Long?) =
+        ReadMark(
+            target = ReadTarget.A(chatId = key.removePrefix("chat:")),
             finishedAt = at,
+            snoozedUntil = snoozedUntil,
         )
-    }
 
-    /** Marks finished work (`chat:<id>` or `task:<id>` with its finish time) as read everywhere. */
-    fun markRead(items: List<Pair<String, Long>>) {
+    /** Marks the observed conversation activity as read on every device. */
+    fun markRead(items: List<Pair<String, Long>>, snoozedUntil: Long? = null) {
         val target = connection ?: return
         if (!state.value.session.authenticated || state.value.signingOut) return
-        val unread = items.filter { (key, at) -> (localReads[key] ?: Long.MIN_VALUE) < at }
+        val unread =
+            if (snoozedUntil != null) items
+            else items.filter { (key, at) -> (localReads[key] ?: Long.MIN_VALUE) < at }
         if (unread.isEmpty()) return
         val generation = readsGeneration
         viewModelScope.launch {
@@ -408,7 +339,9 @@ constructor(
                 val previous = batch.map { (key, _) -> key to localReads[key] }
                 batch.forEach { (key, at) -> localReads[key] = maxOf(localReads[key] ?: 0, at) }
                 try {
-                    target.markRead(MarkReadInput(batch.map { (key, at) -> readMark(key, at) }))
+                    target.markRead(
+                        MarkReadInput(batch.map { (key, at) -> readMark(key, at, snoozedUntil) })
+                    )
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                     if (generation != readsGeneration || connection !== target) return@launch
@@ -849,7 +782,6 @@ constructor(
         val owner = state.value.isOwner
         val agents = async { target.listAgents(build.cairn.contracts.ListAgentsInput()).agents }
         val projects = async { target.listProjects(ListProjectsInput()).projects }
-        val tasks = async { target.listMissions(ListMissionsInput()).tasks }
         val skills = async { target.listSkills(ListSkillsInput()) }
         val mcps = async {
             if (owner) target.listMcps(build.cairn.contracts.ListMcpsInput()).mcps else emptyList()
@@ -889,7 +821,6 @@ constructor(
             Workspace(
                 agents = agents.await(),
                 projects = projects.await(),
-                tasks = tasks.await(),
                 skills = skills.await(),
                 mcps = mcps.await(),
                 usableAgents = usable.await(),
@@ -900,7 +831,6 @@ constructor(
                 it.copy(
                     agents = updated.agents,
                     projects = updated.projects,
-                    tasks = updated.tasks,
                     skills = updated.skills,
                     mcps = updated.mcps,
                     usableAgents = updated.usableAgents,

@@ -116,7 +116,6 @@ impl Worker {
         self.tasks.spawn(detach_environments(s.clone()));
         self.tasks.spawn(retire_environments(s.clone()));
         self.tasks.spawn(observe_native_cleanup(s.clone()));
-        self.tasks.spawn(schedule_tasks(s.clone()));
         self.tasks.spawn(observe_background_jobs(s.clone()));
         self.tasks.spawn(self.clone().run_forever(s));
         Ok(())
@@ -196,28 +195,6 @@ impl Worker {
         let _guard = self.tick_lock.lock().await;
         self.tasks.close();
         self.tasks.wait().await;
-    }
-}
-
-/// Beacon author checks and snapshot preparation never hold the launch tick.
-async fn schedule_tasks(s: Arc<Service>) {
-    let mut timer = tokio::time::interval(Duration::from_secs(1));
-    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    loop {
-        tokio::select! {
-            () = s.shutdown.cancelled() => break,
-            _ = timer.tick() => {},
-        }
-
-        tokio::select! {
-            () = s.shutdown.cancelled() => break,
-            result = s.schedule() => {
-                if let Err(error) = result {
-                    audit(&s.store, "schedule.failed", json!({ "error": error.message })).await;
-                }
-            },
-        }
     }
 }
 
@@ -531,7 +508,7 @@ async fn observe_background_jobs(s: Arc<Service>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{mission_fixture::MissionFixture, validation::text};
+    use crate::validation::text;
 
     #[tokio::test]
     async fn restart_recovers_unbound_managed_retries_before_admission() {
@@ -897,17 +874,11 @@ mod tests {
                 .await
                 .is_err()
         );
-        let task = s
-            .task_fixture(
-                json!({"name":"Wake test","prompt":"Hello","agentId":crate::config::MAIN_AGENT_ID}),
-                None,
-            )
+        s.chat_tick(&std::collections::HashSet::new())
             .await
             .unwrap();
-        let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
-        tokio::time::timeout(Duration::from_millis(100), s.worker.wake.notified())
-            .await
-            .unwrap();
+        let detail = s.chat_detail(chat_id).await.unwrap();
+        let run = s.store.run(text(&detail, "runId")).await.unwrap();
         s.worker
             .deployment_lease(&s, "test".into(), false)
             .await

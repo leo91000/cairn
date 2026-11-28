@@ -998,7 +998,7 @@ async fn connector_enrolls_over_http_without_printing_or_exposing_its_token() {
 }
 
 #[tokio::test]
-async fn a_task_cannot_use_the_local_runner_without_node_permission() {
+async fn a_conversation_cannot_use_the_local_runner_without_node_permission() {
     let owner = Owner::new().await;
     let (status, _) = owner
         .send(
@@ -1008,19 +1008,44 @@ async fn a_task_cannot_use_the_local_runner_without_node_permission() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    let task = json!({
-        "name": "Restricted node task",
-        "prompt": "Do nothing",
-        "agentId": MAIN_AGENT_ID,
-        "enabled": false,
-    });
-    let (status, task) = owner
-        .send("POST", "/api/tasks", json!({ "settings": task }))
+    let (status, chat) = owner
+        .send("POST", "/api/chats", json!({ "agentId": MAIN_AGENT_ID }))
         .await;
-    assert_eq!(status, StatusCode::OK, "{task}");
-    let path = format!("/api/tasks/{}/run", task["id"].as_str().unwrap());
-    let (status, error) = owner.send("POST", &path, json!({})).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+    assert_eq!(status, StatusCode::OK, "{chat}");
+    let chat_id = chat["id"].as_str().unwrap();
+    let (status, message) = owner
+        .send(
+            "POST",
+            &format!("/api/chats/{chat_id}/messages"),
+            json!({ "id": id(), "text": "Do nothing" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{message}");
+    assert!(text(&message, "error").contains("no authorized execution node"));
+    owner
+        .service
+        .chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let detail = owner.service.chat_detail(chat_id).await.unwrap();
+    assert!(detail["runId"].is_null(), "{detail}");
+    assert_eq!(detail["messages"], json!([]), "{detail}");
+    let run = owner
+        .service
+        .snapshot(
+            json!({
+                "id": id(),
+                "name": "Restricted node conversation",
+                "prompt": "Do nothing",
+                "agentId": MAIN_AGENT_ID,
+            }),
+            "chat",
+        )
+        .await
+        .unwrap();
+    let error = placement::check(&owner.service, &run).await.unwrap_err();
+    assert_eq!(error.status, 503, "{error:?}");
+    assert!(error.message.contains("No authorized node"));
 }
 
 #[tokio::test]
@@ -2640,7 +2665,8 @@ async fn remote_vm_agents_reach_workspace_tools_only_through_their_node_session(
     let snapshot = json!({ "agent": { "id": MAIN_AGENT_ID, "provider": "codex", "access": { "nodes": [node] } } });
     let mut record = run_record(&run, RunStatus::Running);
     record["snapshot"] = snapshot.clone();
-    owner.add_run_fixture(&record).await;
+    record["taskId"] = id().into();
+    common::run_fixture::add_conversation_run_fixture(&owner.service.store, &mut record).await;
     owner
         .set_checkpoint(&run, json!({ "nodeId": node, "runnerId": attempt }))
         .await;
@@ -2707,9 +2733,9 @@ async fn remote_vm_agents_reach_workspace_tools_only_through_their_node_session(
     }
     // Another run in progress on the same installation.
     let mut other_run = run_record(&id(), RunStatus::Running);
-    other_run["taskId"] = "other".into();
+    other_run["taskId"] = id().into();
     other_run["snapshot"] = snapshot;
-    owner.add_run_fixture(&other_run).await;
+    common::run_fixture::add_conversation_run_fixture(&owner.service.store, &mut other_run).await;
     let other = owner
         .service
         .mcps

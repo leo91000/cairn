@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { ChatView } from '../../../../packages/contracts/chats'
-import type { FilEntry, FilItem } from '../signal'
+import type { FilItem } from '../signal'
 import {
   computed,
   nextTick,
@@ -10,43 +10,28 @@ import {
   watch,
 } from 'vue'
 import { useRouter } from 'vue-router'
-import { runMission as queueMission } from '../../../../packages/contracts/generated/runMission'
-import { setMissionState } from '../../../../packages/contracts/generated/setMissionState'
-import { canUseAgent } from '../agent-use'
-import {
-  api,
-  notify,
-  refresh,
-  state,
-} from '../api'
+import { state } from '../api'
 import { waitLeft } from '../chat-wait'
-import { setAside } from '../dismissals'
+import { restoreConversation, snoozeConversation } from '../dismissals'
 import { activeFilView } from '../fil-view'
 import {
-  Archive,
   Check,
   CheckCheck,
-  ChevronDown,
   Circle,
   CircleAlert,
   CirclePause,
   CircleX,
   Clock,
   CornerDownRight,
-  Hourglass,
   ListFilter,
   MoreHorizontal,
-  RefreshCw,
-  RotateCcw,
   Search,
   X,
 } from '../icons'
-import { refreshMissionRuns, useMissionRuns } from '../mission-runs'
 import { localReads, markRead } from '../reads'
+import { localDateTime, scheduledTimestamp } from '../schedule-time'
 import { typingTarget } from '../shortcuts'
 import {
-  dismissible,
-  filFolds,
   filOf,
   filThread,
   filViews,
@@ -60,15 +45,15 @@ import HarnessMark from './HarnessMark.vue'
 import Icon from './Icon.vue'
 import InstallationHeader from './InstallationHeader.vue'
 import MenuButton from './MenuButton.vue'
+import Modal from './Modal.vue'
+import UiButton from './UiButton.vue'
 
 const props = withDefaults(defineProps<{
   chats: ChatView[]
   selected?: string | null
-  selectedRun?: string | null
   compact?: boolean
-}>(), { selected: null, selectedRun: null, compact: false })
+}>(), { selected: null, compact: false })
 const router = useRouter()
-const runs = useMissionRuns()
 const filter = ref('')
 const filterInput = ref<HTMLInputElement>()
 const cursor = ref<string | null>(null)
@@ -76,7 +61,7 @@ const tab = activeFilView
 const now = ref(Date.now())
 const clock = setInterval(() => now.value = Date.now(), 30000)
 onBeforeUnmount(() => clearInterval(clock))
-const views = computed(() => filViews(filOf(props.chats, state.tasks, runs.value, localReads, now.value, state.usableAgents)))
+const views = computed(() => filViews(filOf(props.chats, localReads, now.value, state.usableAgents)))
 const tabs = computed(() => [
   { key: 'unread' as const, label: 'À lire', count: views.value.unread.length },
   { key: 'ongoing' as const, label: 'En cours', count: views.value.ongoing.length },
@@ -86,44 +71,9 @@ const rows = computed(() => filThread(views.value[tab.value].filter((item) => {
   const query = filter.value.trim().toLowerCase()
   return !query || [item.title, item.subtitle, item.agent, item.project ?? ''].some(value => value.toLowerCase().includes(query))
 })))
-const opened = (item: FilItem) => (item.chatId && item.chatId === props.selected) || (item.runId && item.runId === props.selectedRun)
+const opened = (item: FilItem) => item.chatId === props.selected
 const current = (item: FilItem) => opened(item) || cursor.value === item.key
-// Quiet missions fold together, except while filtering, which looks for each row.
-const unfolded = ref(new Set<string>())
-const lines = computed(() => (filter.value.trim() ? rows.value as FilEntry[] : filFolds(rows.value)).flatMap((entry) => {
-  if (!entry.folded) {
-    return [{
-      key: entry.item.key,
-      item: entry.item,
-      nested: entry.nested,
-      folded: undefined,
-      open: false,
-    }]
-  }
-
-  const key = `fold:${entry.item.key}`
-  // The work open beside the Fil stays visible in its fold.
-  const open = unfolded.value.has(key) || entry.folded.some(opened)
-  return [
-    {
-      key,
-      item: entry.item,
-      nested: false,
-      folded: entry.folded,
-      open,
-    },
-    ...(open
-      ? entry.folded.map(item => ({
-          key: item.key,
-          item,
-          nested: true,
-          folded: undefined,
-          open: false,
-        }))
-      : []),
-  ]
-}))
-const flat = computed(() => lines.value.filter(line => !line.folded).map(line => line.item))
+const flat = computed(() => rows.value.map(row => row.item))
 
 // A finished result's opening, beside the Fil: reading it there neither opens nor reads the work.
 const peeked = ref<{ item: FilItem, top: number, left: number } | null>(null)
@@ -185,13 +135,6 @@ function leavePeek() {
   hidePeekTimer = setTimeout(unpeek, 150)
 }
 
-function toggleFold(key: string) {
-  const next = new Set(unfolded.value)
-  if (!next.delete(key))
-    next.add(key)
-  unfolded.value = next
-}
-
 const tabIndex = computed(() => tabs.value.findIndex(view => view.key === tab.value))
 // The agents at work, once each, for the header's stack of avatars.
 const working = computed(() => [...new Map(views.value.all
@@ -213,14 +156,14 @@ function closeSearch() {
   filterInput.value?.blur()
 }
 
-watch(() => [props.selected, props.selectedRun], () => {
+watch(() => props.selected, () => {
   cursor.value = views.value.all.find(opened)?.key ?? null
 }, { immediate: true })
 
 function tone(item: FilItem) {
-  if (item.kind === 'question' || (item.kind === 'review' && item.outcome === 'needs_input'))
+  if (item.kind === 'question')
     return 'text-answer'
-  if (item.kind === 'failed' || item.kind === 'failed-mission')
+  if (item.kind === 'failed')
     return 'text-coral'
   if (item.kind === 'review')
     return 'text-warning'
@@ -231,26 +174,20 @@ function tone(item: FilItem) {
 
 // The corner of the agent's avatar: what the row asks for, while finished work stays quiet.
 function mark(item: FilItem) {
-  if (item.kind === 'question' || (item.kind === 'review' && item.outcome === 'needs_input'))
+  if (item.kind === 'question')
     return CircleAlert
-  if (item.kind === 'failed' || item.kind === 'failed-mission')
+  if (item.kind === 'failed')
     return CircleX
   if (item.kind === 'review' || item.kind === 'paused')
     return CirclePause
   if (['queued', 'waiting', 'snoozed', 'suspended'].includes(item.kind))
     return Clock
-  if (item.kind === 'set-aside')
-    return Hourglass
   return Circle
 }
 
 function label(item: FilItem) {
-  if (item.kind === 'question' || (item.kind === 'review' && item.outcome === 'needs_input'))
+  if (item.kind === 'question')
     return 'Answer'
-  if (item.kind === 'unread')
-    return item.taskId ? 'Mission finished' : 'Finished'
-  if (item.kind === 'failed-mission')
-    return 'Mission failed'
   if (item.kind === 'review')
     return 'Blocked'
   return item.subtitle
@@ -282,50 +219,36 @@ function open(item: FilItem) {
 }
 
 function read(item: FilItem) {
-  if (item.readAt)
-    void markRead([{ key: item.key, at: item.readAt }])
+  if (item.readAt) {
+    void markRead([{
+      key: item.key,
+      at: item.readAt,
+      snoozedUntil: item.kind === 'snoozed' ? item.wakeAt : undefined,
+    }])
+  }
 }
 
 function readAll() {
   void markRead(views.value.unread.filter(item => item.readAt).map(item => ({ key: item.key, at: item.readAt! })))
 }
 
-async function runAgain(item: FilItem) {
-  try {
-    await queueMission(api, { taskId: item.taskId! })
-    notify(`${item.title} started`)
-    await refreshMissionRuns()
-  }
-  catch (error) {
-    notify((error as Error).message)
-  }
+const snoozing = ref<FilItem | null>(null)
+const snoozeDate = ref('')
+const snoozeDeadline = computed(() => scheduledTimestamp(snoozeDate.value, Intl.DateTimeFormat().resolvedOptions().timeZone))
+
+function openSnooze(item: FilItem) {
+  snoozeDate.value = localDateTime(tomorrowMorning())
+  snoozing.value = item
 }
 
-function dismiss(item: FilItem) {
-  void setAside({ id: item.runId!, taskId: item.taskId!, finishedAt: item.at })
-}
-
-function snooze(item: FilItem) {
-  void setAside({ id: item.runId!, taskId: item.taskId!, finishedAt: item.at }, tomorrowMorning(now.value))
-}
-
-async function archive(item: FilItem) {
-  const task = state.tasks.find(task => task.id === item.taskId)
-  if (!task)
+function snooze() {
+  const item = snoozing.value
+  const deadline = snoozeDeadline.value
+  if (!item || deadline === null || deadline <= Date.now())
     return
-  try {
-    await setMissionState(api, {
-      taskId: task.id,
-      revision: task.revision,
-      archived: true,
-      enabled: false,
-    })
-    await refresh()
-    notify(`${item.title} archived`)
-  }
-  catch (error) {
-    notify((error as Error).message)
-  }
+
+  snoozing.value = null
+  void snoozeConversation(item.chatId, item.snoozeAt ?? item.at, deadline)
 }
 
 function move(delta: number) {
@@ -492,39 +415,11 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
       :aria-label="tabs.find(view => view.key === tab)?.label"
       @scroll.passive="unpeek"
     >
-      <p v-if="!lines.length" class="px-3 py-10 text-center text-[13px] text-muted">
-        {{ filter ? `Nothing matches “${filter}”.` : tab === 'unread' ? 'All read. Your tasks are in En cours and Tout.' : tab === 'ongoing' ? 'No work in progress.' : 'No conversations yet.' }}
+      <p v-if="!rows.length" class="px-3 py-10 text-center text-[13px] text-muted">
+        {{ filter ? `Nothing matches “${filter}”.` : tab === 'unread' ? 'All read. Your conversations are in En cours and Tout.' : tab === 'ongoing' ? 'No work in progress.' : 'No conversations yet.' }}
       </p>
-      <template v-for="{ key: lineKey, item, nested, folded, open: unfoldedLine } in lines" :key="lineKey">
-        <button
-          v-if="folded"
-          type="button"
-          class="flex w-full items-start gap-2 rounded-lg py-2.5 pr-2 pl-1.5 text-left transition-colors hover:bg-hover/70"
-          :aria-expanded="unfoldedLine"
-          :aria-label="`${folded.length} missions finished: ${folded.map(entry => entry.title).join(', ')}`"
-          :data-fil-fold="lineKey"
-          @click="toggleFold(lineKey)"
-        >
-          <span class="w-1.5 shrink-0" />
-          <span class="relative mt-0.5 size-[26px] shrink-0">
-            <span class="absolute top-0 left-0 opacity-80"><AgentAvatar :name="folded[1].agent" :identity="folded[1].agentKey" :size="18" /></span>
-            <span class="absolute right-0 bottom-0 rounded-[7px] ring-2 ring-(--fil-bg)"><AgentAvatar :name="folded[0].agent" :identity="folded[0].agentKey" :size="18" /></span>
-          </span>
-          <span class="min-w-0 flex-1">
-            <span class="flex items-baseline gap-2"><span class="truncate text-[13px] leading-snug font-medium text-ink/85">{{ folded.length }} missions finished</span><span class="ml-auto shrink-0 text-[10px] text-subtle tabular-nums">{{ shortAge(item.at, now) }}</span></span>
-            <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
-              <Icon :name="RefreshCw" :size="10" /><span class="truncate">{{ folded.map(entry => entry.title).join(' · ') }}</span>
-              <Icon
-                :name="ChevronDown"
-                :size="13"
-                class="ml-auto shrink-0 transition-transform duration-200 motion-reduce:transition-none"
-                :class="unfoldedLine && 'rotate-180'"
-              />
-            </span>
-          </span>
-        </button>
+      <template v-for="{ item, nested } in rows" :key="item.key">
         <article
-          v-else
           :data-fil-key="item.key"
           :data-fil-kind="item.kind"
           :data-unread="isUnread(item) ? '' : undefined"
@@ -569,26 +464,26 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
               ><Icon :name="mark(item)" :size="13" :class="tone(item) === 'text-muted' ? 'text-subtle' : tone(item)" /></span>
             </span>
             <span class="min-w-0 flex-1">
-              <span class="flex items-baseline gap-2"><span class="truncate text-[13px] leading-snug" :class="[isUnread(item) ? 'font-semibold text-ink' : 'font-medium', !isUnread(item) && (nested ? 'text-muted' : 'text-ink/85')]">{{ item.title }}</span><span class="ml-auto shrink-0 text-[10px] tabular-nums text-subtle phone:visible!" :class="(item.taskId || (isUnread(item) && item.readAt)) ? 'group-hover:invisible group-has-[[aria-expanded=true]]:invisible' : undefined">{{ shortAge(item.at, now) }}</span></span>
+              <span class="flex items-baseline gap-2"><span class="truncate text-[13px] leading-snug" :class="[isUnread(item) ? 'font-semibold text-ink' : 'font-medium', !isUnread(item) && (nested ? 'text-muted' : 'text-ink/85')]">{{ item.title }}</span><span class="ml-auto shrink-0 text-[10px] tabular-nums text-subtle phone:visible! group-hover:invisible group-has-[[aria-expanded=true]]:invisible">{{ shortAge(item.at, now) }}</span></span>
               <span v-if="!nested || !item.finished" class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
-                <span :class="item.finished ? 'sr-only' : ['truncate font-medium', tone(item)]">{{ label(item) }}</span><span v-if="!item.finished && !nested">·</span><template v-if="!nested"><HarnessMark v-if="item.harness" :provider="item.harness" /><Icon v-if="item.taskId" :name="RefreshCw" :size="10" /><span class="truncate">{{ item.project || item.agent }}</span></template>
+                <span :class="item.finished ? 'sr-only' : ['truncate font-medium', tone(item)]">{{ label(item) }}</span><span v-if="!item.finished && !nested">·</span><template v-if="!nested"><HarnessMark v-if="item.harness" :provider="item.harness" /><span class="truncate">{{ item.project || item.agent }}</span></template>
               </span>
               <span v-if="item.requester && !nested" class="mt-0.5 flex items-center gap-1 truncate text-[10px] text-subtle" data-testid="fil-requester"><Icon :name="CornerDownRight" :size="10" />Delegated by {{ item.requester.title }}</span>
+              <span v-if="item.originRule" class="mt-0.5 block truncate text-[10px] text-subtle">{{ item.originRule.schedule ? 'Schedule' : 'Rule' }} · {{ item.originRule.ruleName }}</span>
               <span v-if="item.wakeAt !== undefined" class="mt-0.5 block text-[10px] text-accent">{{ waitLeft({ wakeAt: item.wakeAt, condition: item.condition, resolved: item.resolved }, now) }}</span>
             </span>
           </button>
           <button
-            v-if="!item.taskId && isUnread(item) && item.readAt"
+            v-if="isUnread(item) && item.readAt"
             type="button"
             :aria-label="`Mark “${item.title}” as read`"
             title="Mark as read"
-            class="absolute right-1 top-1.5 grid size-7 shrink-0 place-items-center rounded-md bg-hover text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-ink phone:static phone:mr-1 phone:bg-transparent phone:opacity-100"
+            class="absolute right-9 top-1.5 grid size-7 shrink-0 place-items-center rounded-md bg-hover text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-ink phone:static phone:bg-transparent phone:opacity-100"
             @click="read(item)"
           >
             <Icon :name="Check" :size="15" />
           </button>
           <MenuButton
-            v-if="item.taskId"
             :label="`More actions for “${item.title}”`"
             trigger-class="absolute right-1 top-1.5 grid size-7 shrink-0 place-items-center rounded-md bg-hover text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-ink aria-expanded:opacity-100 phone:static phone:mr-1 phone:bg-transparent phone:opacity-100"
             :width="210"
@@ -598,7 +493,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
             </template>
             <template #default="{ select }">
               <button
-                v-if="isUnread(item) && item.readAt"
+                v-if="(isUnread(item) || item.kind === 'snoozed') && item.readAt"
                 type="button"
                 role="menuitem"
                 tabindex="-1"
@@ -608,59 +503,38 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                 <Icon :name="Check" :size="16" />Mark as read
               </button>
               <button
+                v-if="item.kind === 'snoozed'"
                 type="button"
                 role="menuitem"
                 tabindex="-1"
                 class="menu-item"
-                @click="select(() => open(item))"
+                @click="select(() => restoreConversation(item.chatId))"
               >
-                Open conversation
+                <Icon :name="Clock" :size="16" />Restore
               </button>
               <button
-                v-if="dismissible(item)"
+                v-else
                 type="button"
                 role="menuitem"
                 tabindex="-1"
                 class="menu-item"
-                @click="select(() => dismiss(item))"
+                @click="select(() => openSnooze(item))"
               >
-                <Icon :name="Check" :size="16" />Dismiss outcome
-              </button>
-              <button
-                v-if="item.kind === 'review'"
-                type="button"
-                role="menuitem"
-                tabindex="-1"
-                class="menu-item"
-                @click="select(() => snooze(item))"
-              >
-                <Icon :name="Clock" :size="16" />Remind me tomorrow
-              </button>
-              <button
-                v-if="item.taskId && canUseAgent(state.usableAgents, state.tasks.find(task => task.id === item.taskId)?.agentId ?? item.agentKey)"
-                type="button"
-                role="menuitem"
-                tabindex="-1"
-                class="menu-item"
-                @click="select(() => runAgain(item))"
-              >
-                <Icon :name="RotateCcw" :size="16" />Run again
-              </button>
-              <button
-                v-if="item.taskId"
-                type="button"
-                role="menuitem"
-                tabindex="-1"
-                class="menu-item"
-                @click="select(() => archive(item))"
-              >
-                <Icon :name="Archive" :size="16" />Archive mission
+                <Icon :name="Clock" :size="16" />Snooze until…
               </button>
             </template>
           </MenuButton>
         </article>
       </template>
     </div>
+    <Modal v-if="snoozing" title="Snooze conversation" @close="snoozing = null">
+      <form class="grid gap-4 p-5" @submit.prevent="snooze">
+        <label>Until<input v-model="snoozeDate" type="datetime-local" required></label>
+        <UiButton type="submit" variant="primary" :disabled="snoozeDeadline === null || snoozeDeadline <= now">
+          Snooze
+        </UiButton>
+      </form>
+    </Modal>
     <Teleport to="body">
       <Transition
         enter-active-class="transition duration-150 ease-out motion-reduce:transition-none"

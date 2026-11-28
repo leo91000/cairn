@@ -53,46 +53,6 @@ class FilUnreadJourneyTest {
             id = MAIN_AGENT_ID,
             name = "Rédacteur",
         )
-    private val notes =
-        Task(
-            "348988cc-0279-5ed4-801b-ac44d6987c6e",
-            "Notes de version hebdomadaires",
-            "Résumer la semaine.",
-            MAIN_AGENT_ID,
-        )
-    private val audit =
-        Task(
-            "b7ec3b50-62dd-530b-8060-bd5700fb7eb6",
-            "Audit de sécurité nocturne",
-            "Auditer.",
-            MAIN_AGENT_ID,
-        )
-    private val activity =
-        listOf(
-            Run(
-                id = "notes-run",
-                taskId = "348988cc-0279-5ed4-801b-ac44d6987c6e",
-                status = "succeeded",
-                trigger = "schedule",
-                startedAt = now - 30 * 60_000,
-                finishedAt = now - 20 * 60_000,
-                snapshot = Snapshot(task = notes.runTaskSnapshot(), agent = main),
-                provider = "codex",
-                unread = true,
-                preview =
-                    "Trois nouveautés cette semaine : reprise à la demande, partage d’installations et notifications.",
-            ),
-            Run(
-                id = "audit-run",
-                taskId = "b7ec3b50-62dd-530b-8060-bd5700fb7eb6",
-                status = "failed",
-                trigger = "schedule",
-                startedAt = now - 7_200_000,
-                finishedAt = now - 7_000_000,
-                snapshot = Snapshot(task = audit.runTaskSnapshot(), agent = main),
-                provider = "opencode",
-            ),
-        )
     private val chats =
         listOf(
             Chat(
@@ -115,6 +75,16 @@ class FilUnreadJourneyTest {
                 pendingQuestions = 1,
                 updatedAt = now - 60_000,
                 provider = "claude",
+            ),
+            Chat(
+                id = "348988cc-0279-5ed4-801b-ac44d6987c6e",
+                title = "Notes de version hebdomadaires",
+                agentName = "Rédacteur",
+                status = "succeeded",
+                updatedAt = now - 20 * 60_000,
+                finishedAt = now - 20 * 60_000,
+                unread = true,
+                preview = "Trois nouveautés cette semaine.",
             ),
             Chat(
                 id = "7e0552ad-fde3-5785-a37c-8bc7e408e409",
@@ -186,16 +156,6 @@ class FilUnreadJourneyTest {
                                         build.cairn.contracts.ListAgentsOutput(listOf(main))
                                     )
                                 )
-                            path == "/api/installations/fixture/api/tasks" ->
-                                json(
-                                    wireJson.encodeToString(
-                                        build.cairn.contracts.ListMissionsOutput(
-                                            listOf(notes, audit)
-                                        )
-                                    )
-                                )
-                            path == "/api/installations/fixture/api/tasks/activity" ->
-                                json(wireJson.encodeToString(activity))
                             path == "/api/installations/fixture/api/chats/stream" ->
                                 stream(LiveState(chats = chats))
                             path == "/api/installations/fixture/api/reads" -> {
@@ -259,7 +219,7 @@ class FilUnreadJourneyTest {
                 theme = "dark"
                 compose
                     .onNodeWithContentDescription("Autres actions pour Rédiger le changelog 0.53")
-                    .assertDoesNotExist()
+                    .assertExists()
                 compose
                     .onNodeWithContentDescription("Marquer comme lu : Rédiger le changelog 0.53")
                     .performClick()
@@ -280,7 +240,7 @@ class FilUnreadJourneyTest {
                     .assertDoesNotExist()
                 compose
                     .onNodeWithContentDescription("Autres actions pour Rédiger le changelog 0.53")
-                    .assertDoesNotExist()
+                    .assertExists()
                 compose.onNodeWithText("En cours 1").performClick()
                 compose.onNodeWithText("Répondre").assertExists()
                 compose.onNodeWithText("À lire 1").performClick()
@@ -290,7 +250,7 @@ class FilUnreadJourneyTest {
                     reads.size == 2
                 }
                 assertEquals(
-                    "{\"items\":[{\"finishedAt\":${activity.first().finishedAt},\"target\":{\"kind\":\"mission\",\"taskId\":\"348988cc-0279-5ed4-801b-ac44d6987c6e\"}}]}",
+                    "{\"items\":[{\"finishedAt\":${chats[2].finishedAt},\"target\":{\"kind\":\"chat\",\"chatId\":\"348988cc-0279-5ed4-801b-ac44d6987c6e\"}}]}",
                     reads[1],
                 )
                 compose.onAllNodesWithTag("unread").assertCountEquals(0)
@@ -400,6 +360,26 @@ class FilUnreadJourneyTest {
                 compose.runOnIdle { vm.markRead(listOf(first to (now - 1000))) }
                 waitFor { reads.size == 3 }
                 compose.runOnIdle { assertEquals(now - 1000, vm.localReads[first]) }
+                val deadline = now + 60_000
+                compose.runOnIdle {
+                    vm.markRead(listOf(first to (now - 1000)), snoozedUntil = deadline)
+                }
+                waitFor { reads.size == 4 }
+                val ordinary =
+                    wireJson
+                        .parseToJsonElement(reads[2])
+                        .jsonObject["items"]!!
+                        .jsonArray[0]
+                        .jsonObject
+                val explicit =
+                    wireJson
+                        .parseToJsonElement(reads[3])
+                        .jsonObject["items"]!!
+                        .jsonArray[0]
+                        .jsonObject
+                assertEquals(null, ordinary["snoozedUntil"])
+                assertEquals(deadline.toString(), explicit["snoozedUntil"].toString())
+                assertEquals(ordinary, explicit - "snoozedUntil")
             } finally {
                 vm.api.closeStreams()
             }
@@ -516,127 +496,6 @@ class FilUnreadJourneyTest {
                     "{\"items\":[{\"finishedAt\":${chats.first().finishedAt},\"target\":{\"kind\":\"chat\",\"chatId\":\"${chats.first().id}\"}}]}",
                     reads.first(),
                 )
-            } finally {
-                release.countDown()
-                vm.api.closeStreams()
-            }
-        }
-    }
-
-    @Test
-    fun `an open mission is read on files without reading twice on result`() {
-        val release = java.util.concurrent.CountDownLatch(1)
-        val requests = java.util.concurrent.atomic.AtomicInteger()
-        val reads = Collections.synchronizedList(mutableListOf<String>())
-        val finished = activity.first().copy(summary = "Output waiting to be read")
-        MockWebServer().use { server ->
-            server.dispatcher =
-                object : Dispatcher() {
-                    override fun dispatch(request: RecordedRequest): MockResponse {
-                        val path = request.path!!.substringBefore('?')
-                        if (path.endsWith("/runs/notes-run/stream")) {
-                            if (requests.getAndIncrement() == 0) {
-                                val initial =
-                                    LiveBatch(
-                                        emptyList(),
-                                        LiveState(
-                                            run =
-                                                finished.copy(status = "running", finishedAt = null)
-                                        ),
-                                        true,
-                                        false,
-                                    )
-                                return MockResponse()
-                                    .setHeader("Content-Type", "text/event-stream")
-                                    .setBody(
-                                        "event: batch\nid: 1\ndata: ${wireJson.encodeToString(initial)}\n\n"
-                                    )
-                            }
-                            check(release.await(20, TimeUnit.SECONDS))
-                            return stream(LiveState(run = finished))
-                        }
-                        val response =
-                            when {
-                                path == "/api/account/session" -> beaconAccountFixture("fixture")
-                                path == "/api/installations" -> beaconInstallationsFixture()
-                                path.endsWith("/reads") -> {
-                                    reads += request.body.readUtf8()
-                                    "{\"read\":1,\"readAt\":1}"
-                                }
-                                path.endsWith("/overview") -> installationOverviewFixture()
-                                path.endsWith("/models") -> "{}"
-                                else ->
-                                    if (
-                                        request.requestUrl
-                                            ?.encodedPath
-                                            ?.endsWith("/api/projects") == true
-                                    )
-                                        """{"projects":[]}"""
-                                    else if (
-                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
-                                            true
-                                    )
-                                        """{"agents":[]}"""
-                                    else if (
-                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
-                                            true
-                                    )
-                                        """{"tasks":[]}"""
-                                    else if (
-                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
-                                            true
-                                    )
-                                        """{"mcps":[]}"""
-                                    else "[]"
-                            }
-                        return MockResponse()
-                            .setHeader("Content-Type", "application/json")
-                            .setBody(response)
-                    }
-                }
-            val vm =
-                CairnViewModel(
-                    ApplicationProvider.getApplicationContext<Application>(),
-                    MemoryVault(),
-                    beaconOrigin = "",
-                )
-            compose.setContent {
-                val state by vm.state.collectAsState()
-                LaunchedEffect(Unit) {
-                    vm.state.first { it.ready }
-                    vm.connect(server.url("/").toString())
-                }
-                CairnTheme {
-                    if (state.installation != null) RunScreen(vm, state, "notes-run", openRun = {})
-                }
-            }
-            try {
-                compose.waitUntil(20000) {
-                    compose.onAllNodesWithText("Fichiers").fetchSemanticsNodes().isNotEmpty()
-                }
-                compose.onNodeWithText("Fichiers").performClick()
-                compose.waitForIdle()
-                assertEquals(0, reads.size)
-                release.countDown()
-                compose.waitUntil(20000) {
-                    compose
-                        .onAllNodesWithText("Terminée", substring = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-                }
-                compose.waitUntil(20000) {
-                    compose.onAllNodes(isRoot()).fetchSemanticsNodes()
-                    reads.isNotEmpty()
-                }
-                compose.onNodeWithText("Fichiers").assertIsSelected()
-                assertEquals(
-                    "{\"items\":[{\"finishedAt\":${finished.finishedAt},\"target\":{\"kind\":\"mission\",\"taskId\":\"348988cc-0279-5ed4-801b-ac44d6987c6e\"}}]}",
-                    reads.single(),
-                )
-                compose.onNodeWithText("Résultat").performClick()
-                compose.waitForIdle()
-                compose.onNodeWithText("Résultat").assertIsSelected()
-                assertEquals(1, reads.size)
             } finally {
                 release.countDown()
                 vm.api.closeStreams()

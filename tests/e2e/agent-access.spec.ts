@@ -144,7 +144,7 @@ async function enroll(page: Page, workspace: Workspace, name: string, exclusive:
   return node.nodeId as string
 }
 
-test('an agent is created on its page and its access is inherited by missions on mobile in both themes', async ({ page }, testInfo) => {
+test('an agent is created on its page and its access is inherited by a scheduled conversation on mobile in both themes', async ({ page }, testInfo) => {
   await signIn(page)
   await page.goto(workspacePath('/agents'))
   await page.setViewportSize({ width: 390, height: 844 })
@@ -177,19 +177,13 @@ test('an agent is created on its page and its access is inherited by missions on
   await page.getByRole('link', { name: 'Back to agents' }).click()
   await expect(page.locator('article').filter({ hasText: 'Scoped reviewer' })).toContainText('1 project · 1 node')
   await expect(page.locator(`a[href$="/agents/${id}"]`).first()).toBeVisible()
-  await page.getByRole('link', { name: 'Missions', exact: true }).filter({ visible: true }).click()
-  await page.getByRole('button', { name: 'New mission', exact: true }).click()
-  await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveValue('Main agent')
-  await expect(page.getByRole('combobox', { name: 'Project context', exact: true })).toHaveCount(0)
-  await page.getByRole('combobox', { name: 'Agent', exact: true }).click()
-  await page.getByRole('option', { name: 'Scoped reviewer', exact: true }).click()
-  await page.getByLabel('Mission name', { exact: true }).fill('Review the repository')
-  await page.getByLabel('What should happen?').fill('Review code without making changes.')
-  await expect(page.locator('.agent-scope-summary')).toContainText('1 allowed project')
-  await page.screenshot({ path: testInfo.outputPath('agent-first-task.png'), animations: 'disabled' })
-  await page.getByRole('button', { name: 'Create mission', exact: true }).click()
-  // As on Android, the new mission opens in its sheet on phones.
-  await expect(page.getByRole('dialog', { name: 'Review the repository' })).toBeVisible()
+  await page.goto(workspacePath(`/rules?agent=${id}`))
+  await page.getByRole('button', { name: 'Schedule an agent' }).click()
+  await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveValue('Scoped reviewer')
+  await page.getByLabel('Name', { exact: true }).fill('Review the repository')
+  await page.getByLabel('Brief').fill('Review code without making changes.')
+  await page.screenshot({ path: testInfo.outputPath('agent-first-schedule.png'), animations: 'disabled' })
+  await page.getByRole('button', { name: 'Create schedule', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Review the repository' })).toBeVisible()
 })
 

@@ -35,6 +35,7 @@ function chat(messages: ChatMessage[], run: Partial<Run> | null = null, paused =
     slug: '',
     revision: '',
     lifecycle: 'active',
+    personParticipated: false,
     sessionRestartRequested: false,
     canRequestNewSession: false,
     unread: false,

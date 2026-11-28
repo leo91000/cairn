@@ -1,5 +1,10 @@
 # Generated Rust contracts
 
+The sections below record the original contract conversions. ADR-0094 later
+migrated missions to Clock rules and their runs to conversations. For current
+commands and personal read and snooze state, see the [MCP guide](MCP.md) and
+the [generated contracts](../packages/contracts/generated).
+
 Issue #401 qualifies the toolchain selected by #396/#397 for the first converted
 capability. The Rust DTOs in `crates/contracts` own the wire fields. The installation's
 `capabilities` module owns its verified context, policy and handler. It appends one
@@ -263,7 +268,7 @@ DB/WAL/page reporting as A1/A2, with mixed wildcard/empty/selected grants and MC
 tool selections. The reference mapping is test-only. Raw measurements stay out
 of Git and local SQLite timings do not include production network latency.
 
-## Missions and scheduled commitments (#405)
+## Historical mission contracts (#405)
 
 `crates/contracts/src/missions.rs` owns mission settings, their public view, creation,
 complete replacement, state, deletion and cron preview commands. `list_tasks`,

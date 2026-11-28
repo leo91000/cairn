@@ -143,15 +143,10 @@ test('a durable condition wait follows a dependency across restart and queue pau
   const detail = await workspace.api(`/api/chats/${chat.id}`)
   workspace.service.store.set('deployment-lease', 'condition-wait-fixture', Date.now() + 120000)
   try {
-    const task = await workspace.api('/api/tasks', 'POST', {
-      settings: {
-        name: 'Condition dependency',
-        prompt: 'Other work',
-        agentId: agent.id,
-        worktree: false,
-      },
-    })
-    const target = await workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
+    const dependency = await workspace.api('/api/chats', 'POST', { agentId: agent.id })
+    await workspace.api(`/api/chats/${dependency.id}/messages`, 'POST', { id: randomUUID(), text: 'Condition dependency' })
+    await expect.poll(async () => (await workspace.api(`/api/chats/${dependency.id}`)).run?.status).toBe('queued')
+    const target = (await workspace.api(`/api/chats/${dependency.id}`)).run
     const wakeup = {
       id: randomUUID(),
       messageId: detail.run.chatExecution.messageId,
@@ -231,15 +226,10 @@ test('a large grouped wait pages through every condition and resumes once all ar
   workspace.service.store.set('deployment-lease', 'grouped-wait-fixture', Date.now() + 120000)
   try {
     const targets = await Promise.all(Array.from({ length: 23 }, (_, index) => `Grouped dependency ${index + 1}`).map(async (name) => {
-      const task = await workspace.api('/api/tasks', 'POST', {
-        settings: {
-          name,
-          prompt: 'Other work',
-          agentId: agent.id,
-          worktree: false,
-        },
-      })
-      return workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
+      const dependency = await workspace.api('/api/chats', 'POST', { agentId: agent.id })
+      const target = workspace.service.chatRun(dependency.id, name)
+      workspace.service.store.updateRun(target.id, { status: 'queued', finishedAt: null })
+      return target
     }))
     const first = targets[0]
     const last = targets.at(-1)!

@@ -62,7 +62,7 @@ pub(crate) const RESOURCE_OPERATIONS: &[ResourceOperation] = &[
     ResourceOperation {
         name: "delete_skill",
         scope: "manage",
-        description: "Delete a skill and forget its source. A mission selecting the skill prevents deletion.",
+        description: "Delete a skill and forget its source.",
     },
     ResourceOperation {
         name: "export_skill_archive",

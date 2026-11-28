@@ -33,7 +33,6 @@ fun ChatScreen(
     initialProject: String = "",
     openChat: (String) -> Unit,
     openRun: (String) -> Unit,
-    openFilRun: (String) -> Unit = openRun,
     back: () -> Unit = {},
     create: () -> Unit = back,
     openConnections: () -> Unit = {},
@@ -64,37 +63,6 @@ fun ChatScreen(
         conversations,
         openChat,
         openRun,
-        openFilRun,
-        back,
-        create,
-        openConnections,
-        openSettings,
-    )
-}
-
-/** A mission run opened from the Fil, read in the same pager as its conversations. */
-@Composable
-fun FilRunScreen(
-    vm: CairnViewModel,
-    state: Workspace,
-    id: String,
-    openChat: (String) -> Unit,
-    openRun: (String) -> Unit,
-    openFilRun: (String) -> Unit,
-    back: () -> Unit = {},
-    create: () -> Unit = back,
-    openConnections: () -> Unit = {},
-    openSettings: () -> Unit = {},
-) {
-    val conversations = rememberFilConversations(vm, state)
-    FilPager(
-        vm,
-        state,
-        "run:$id",
-        conversations,
-        openChat,
-        openRun,
-        openFilRun,
         back,
         create,
         openConnections,
@@ -117,8 +85,8 @@ internal fun pagerKeys(fil: List<String>, keys: List<String>, page: Int): List<S
 }
 
 /**
- * Conversations and missions of the Fil side by side, keyed as the Fil keys them. The route
- * identifies the starting page; the pager owns subsequent selection and its restoration.
+ * Conversations of the Fil side by side, keyed as the Fil keys them. The route identifies the
+ * starting page; the pager owns subsequent selection and its restoration.
  */
 @Composable
 private fun FilPager(
@@ -128,13 +96,11 @@ private fun FilPager(
     conversations: LiveSnapshot,
     openChat: (String) -> Unit,
     openRun: (String) -> Unit,
-    openFilRun: (String) -> Unit,
     back: () -> Unit,
     create: () -> Unit,
     openConnections: () -> Unit,
     openSettings: () -> Unit,
 ) {
-    val activity = rememberFilActivity(vm)
     key(start) {
         var keys by rememberSaveable { mutableStateOf(listOf(start)) }
         val pager = rememberPagerState { keys.size }
@@ -148,14 +114,12 @@ private fun FilPager(
             }
         }
         val filKeys =
-            remember(conversations.state?.chats, activity, state.tasks, state.usableAgents) {
+            remember(conversations.state?.chats, state.usableAgents) {
                 val chats = conversations.state?.chats
-                if (chats == null || activity == null) null
+                if (chats == null) null
                 else
                     buildFeed(
                             chats.filter { it.lifecycle == "active" },
-                            activity,
-                            state.tasks,
                             usable = state.usableAgents,
                         )
                         .keys()
@@ -196,14 +160,10 @@ private fun FilPager(
             userScrollEnabled = keys.size > 1,
         ) { page ->
             val pageKey = keys[page]
-            val runId = pageKey.removePrefix("run:").takeIf { pageKey.startsWith("run:") }
             val selected = page == pager.settledPage
             Box(
                 Modifier.fillMaxSize()
-                    .testTag(
-                        if (runId != null) "run-page:$runId"
-                        else "chat-page:${pageKey.removePrefix("chat:")}"
-                    )
+                    .testTag("chat-page:${pageKey.removePrefix("chat:")}")
                     .semantics { this.selected = selected }
             ) {
                 // Preloaded pages render real content but cannot take keyboard or TalkBack focus.
@@ -213,32 +173,19 @@ private fun FilPager(
                         .then(if (selected) Modifier else Modifier.clearAndSetSemantics {})
                 ) {
                     val showChat = { target: String -> show("chat:$target") { openChat(target) } }
-                    if (runId != null)
-                        RunScreen(
-                            vm,
-                            state,
-                            runId,
-                            openChat = showChat,
-                            back = back,
-                            selected = selected,
-                            mission = true,
-                        ) { target ->
-                            show("run:$target") { openFilRun(target) }
-                        }
-                    else
-                        ChatPage(
-                            vm,
-                            state,
-                            pageKey.removePrefix("chat:"),
-                            conversations,
-                            selected = selected,
-                            openChat = showChat,
-                            openRun = openRun,
-                            back = back,
-                            create = create,
-                            openConnections = openConnections,
-                            openSettings = openSettings,
-                        )
+                    ChatPage(
+                        vm,
+                        state,
+                        pageKey.removePrefix("chat:"),
+                        conversations,
+                        selected = selected,
+                        openChat = showChat,
+                        openRun = openRun,
+                        back = back,
+                        create = create,
+                        openConnections = openConnections,
+                        openSettings = openSettings,
+                    )
                 }
             }
         }

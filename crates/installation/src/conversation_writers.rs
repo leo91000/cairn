@@ -738,9 +738,9 @@ pub(crate) struct Eligibility {
 }
 
 impl Eligibility {
-    /// Callers hold `s.missions.authors`.
+    /// Callers hold `s.memberships.authors`.
     pub(crate) async fn observe(s: &Service) -> Result<Self> {
-        let policy = s.missions.observe(s).await?;
+        let policy = s.memberships.observe(s).await?;
         let global_skills = tokio::fs::canonicalize(&s.config.home)
             .await
             .ok()

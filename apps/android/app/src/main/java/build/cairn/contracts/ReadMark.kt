@@ -7,9 +7,12 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ReadMark(
     val finishedAt: Long,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val snoozedUntil: Long? = null,
     val target: ReadTarget,
 ) {
     init {
         require(finishedAt in 1L..9007199254740991L)
+        snoozedUntil?.let { require(it in 1L..9007199254740991L) }
     }
 }

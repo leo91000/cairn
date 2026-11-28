@@ -21,18 +21,23 @@ watch(() => [state.accountId, state.installationId, state.authenticated, state.s
     delete localReads[key]
 }, { flush: 'sync' })
 
-/** A Fil key (`chat:<id>` or `task:<id>`) and the finish of the work read. */
-function mark(item: Pick<FilItem, 'key' | 'at'>): ReadMark {
-  const [kind, id] = [item.key.slice(0, item.key.indexOf(':')), item.key.slice(item.key.indexOf(':') + 1)]
-  const target: ReadMark['target'] = kind === 'chat' ? { kind: 'chat', chatId: id } : { kind: 'mission', taskId: id }
-  return { target, finishedAt: item.at }
+export function clearLocalRead(chatId: string) {
+  delete localReads[`chat:${chatId}`]
+}
+
+type ReadObservation = Pick<FilItem, 'key' | 'at'> & { snoozedUntil?: number }
+
+/** A Fil key (`chat:<id>`) and the finish of the work read. */
+function mark(item: ReadObservation): ReadMark {
+  const chatId = item.key.startsWith('chat:') ? item.key.slice(5) : item.key
+  return { target: { kind: 'chat', chatId }, finishedAt: item.at, snoozedUntil: item.snoozedUntil }
 }
 
 /** Marks finished work as read for the signed-in account, on every device. */
-export async function markRead(items: Pick<FilItem, 'key' | 'at'>[]) {
+export async function markRead(items: ReadObservation[]) {
   if (!state.authenticated || state.signingOut)
     return
-  const unread = items.filter(item => !(localReads[item.key] >= item.at))
+  const unread = items.filter(item => item.snoozedUntil !== undefined || !(localReads[item.key] >= item.at))
   if (!unread.length)
     return
   const current = generation

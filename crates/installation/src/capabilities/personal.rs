@@ -1,4 +1,4 @@
-//! Read marks and set-aside outcomes of one Cairn account, on HTTP and both tools.
+//! Read marks and snoozed conversations of one Cairn account, on HTTP and both tools.
 //! An execution never acts as a person: without a delegation from an account, it is refused.
 use super::{ResumeContext, decode};
 use crate::{
@@ -16,11 +16,11 @@ pub(crate) struct PersonalOperation {
 pub(crate) const PERSONAL_OPERATIONS: &[PersonalOperation] = &[
     PersonalOperation {
         name: "mark_read",
-        description: "Acknowledge conversation questions, finished turns (including errors), or mission results for the Cairn account that authorized this connection. Pass the conversation readAt or mission finishedAt; later work stays unread. Reading does not answer a question or change execution status. Executions have no account delegation and are refused.",
+        description: "Acknowledge conversation questions, finished turns (including errors), or blocked outcomes for the Cairn account that authorized this connection. Pass the conversation readAt or finishedAt; later work stays unread. Reading does not answer a question or change execution status. Executions have no account delegation and are refused.",
     },
     PersonalOperation {
-        name: "set_outcome_aside",
-        description: "Dismiss, snooze (up to 30 days) or restore a blocked mission outcome in For you, for the Cairn account that authorized this connection. It asks again when the mission finishes another run; input the agent asked for can only be snoozed. Executions have no account delegation and are refused.",
+        name: "snooze_chat",
+        description: "Snooze any conversation until a later time (up to 30 days) or restore it early, for the Cairn account that authorized this connection. For a new snooze, pass the later of lastActivityAt and readAt (or updatedAt if readAt is absent) as finishedAt. Newer activity cancels the snooze. Executions have no account delegation and are refused.",
     },
 ];
 
@@ -45,7 +45,7 @@ pub(crate) async fn reader(s: &Service, context: ResumeContext, scope: &str) -> 
         ResumeContext::Installation(bearer) => {
             crate::installation_mcp::authorize(s, &bearer).await?;
             Err(Error::forbidden(
-                "Read marks and set-aside outcomes belong to a Cairn account; this execution has no delegation from one. Ask the person to do it in the Cairn apps or through their own MCP connection.",
+                "Read marks and snoozed conversations belong to a Cairn account; this execution has no delegation from one. Ask the person to do it in the Cairn apps or through their own MCP connection.",
             ))
         }
     }
@@ -70,8 +70,8 @@ impl PersonalOperation {
                 schema_for::<MarkReadOutput>(Contract::Serialize),
             ),
             _ => (
-                schema_for::<SetOutcomeAsideInput>(Contract::Deserialize),
-                schema_for::<SetOutcomeAsideOutput>(Contract::Serialize),
+                schema_for::<SetConversationSnoozeInput>(Contract::Deserialize),
+                schema_for::<SetConversationSnoozeOutput>(Contract::Serialize),
             ),
         };
         json!({
@@ -96,7 +96,7 @@ impl PersonalOperation {
                 crate::reads::mark(s, &account, decode(input)?).await?,
             )?),
             _ => Ok(serde_json::to_value(
-                crate::reads::set_aside(s, &account, decode(input)?).await?,
+                crate::reads::snooze(s, &account, decode(input)?).await?,
             )?),
         }
     }

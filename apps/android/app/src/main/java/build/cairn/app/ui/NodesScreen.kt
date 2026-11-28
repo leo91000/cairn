@@ -637,7 +637,7 @@ fun NodesScreen(
                     "Cette machine perd immédiatement son accès au master et les agents ne peuvent plus l’utiliser."
                 )
                 append(
-                    " Les fichiers de travail de cette conversation seront perdus. L’historique, les pièces jointes et les artefacts sont conservés. Cela concerne toutes les conversations de cette node. Leurs environnements expirent. Le prochain message crée un environnement vide sur une node autorisée ; les missions actives reprennent automatiquement. Les conversations fixées à cette node attendent un changement de placement."
+                    " Les fichiers de travail de cette conversation seront perdus. L’historique, les pièces jointes et les artefacts sont conservés. Cela concerne toutes les conversations de cette node. Leurs environnements expirent. Le prochain message crée un environnement vide sur une node autorisée. Les conversations fixées à cette node attendent un changement de placement."
                 )
                 append(
                     "\n\nLes fichiers restent sur la machine. Pour la désinstaller, lancez dessus :"
@@ -740,7 +740,7 @@ internal fun RetireNode(
             "Les conversations fixées sur l’ancienne node ou qui la préfèrent reviennent au placement automatique. Les conversations gardent leur backend d’exécution : leurs prochains environnements démarrent sur d’autres nodes ${if (previousNative) "natives" else "VM"}."
         )
         Text(
-            "Les fichiers de travail de cette conversation seront perdus. L’historique, les pièces jointes et les artefacts sont conservés. Cela concerne toutes les conversations de l’ancienne node. Leurs environnements expirent. Le prochain message crée un environnement vide ; les missions actives reprennent automatiquement."
+            "Les fichiers de travail de cette conversation seront perdus. L’historique, les pièces jointes et les artefacts sont conservés. Cela concerne toutes les conversations de l’ancienne node. Leurs environnements expirent. Le prochain message crée un environnement vide."
         )
         Text("Puis désinstallez l’ancien runtime sur la machine :")
         Code(uninstallCommand(previous))

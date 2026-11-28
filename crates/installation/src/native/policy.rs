@@ -233,65 +233,6 @@ pub(crate) fn apply(record: &mut Value, grant: &Value) {
     }
 }
 
-/// Scheduled commitments retain their author and every directing editor. An
-/// edit cannot replace an earlier person's host authority with its own.
-pub(crate) fn task_grant(
-    db: &Db<'_>,
-    task: &Value,
-    previous: Option<&Value>,
-    source: &Origin,
-) -> Result<Value> {
-    let agent = db
-        .agent_snapshot(text(task, "agentId"))?
-        .unwrap_or_default();
-    let mut grant = provenance(db, source)?;
-    let mut people = principals(&grant).as_array().cloned().unwrap_or_default();
-    if let Some(previous) = previous {
-        merge_plugin_grants(&mut grant, previous);
-        for person in principals(previous).as_array().into_iter().flatten() {
-            if !people.contains(person) {
-                people.push(person.clone());
-            }
-        }
-        if previous["nativeProvenanceUnknown"] != false {
-            grant["nativeProvenanceUnknown"] = true.into();
-        }
-        if previous["nativeParentRunId"].is_string() {
-            if grant["nativeParentRunId"].is_string()
-                && grant["nativeParentRunId"] != previous["nativeParentRunId"]
-            {
-                if native(&agent) {
-                    return Err(Error::forbidden(
-                        "A task cannot combine unrelated native delegation grants.",
-                    ));
-                }
-                grant["nativeProvenanceUnknown"] = true.into();
-            }
-            grant["nativeParentRunId"] = previous["nativeParentRunId"].clone();
-            grant["nativeParentAccess"] = previous["nativeParentAccess"].clone();
-            let nodes = grant["nativeAuthorityNodes"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            grant["nativeAuthorityNodes"] = nodes
-                .into_iter()
-                .filter(|node| {
-                    node.as_str()
-                        .is_some_and(|node| explicit(&previous["nativeAuthorityNodes"], node))
-                })
-                .collect::<Vec<_>>()
-                .into();
-        }
-    }
-    if let Some(author) = task["authorId"].as_str()
-        && !people.iter().any(|person| person == author)
-    {
-        people.push(author.into());
-    }
-    grant["nativePrincipals"] = people.into();
-    authorize_origin(db, &agent, &Origin::Stored(grant))
-}
-
 /// Admission and renewal follow current grants all the way to the human origin.
 /// Parent node limits are a ceiling; descendants cannot add a node or caller.
 pub fn allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
@@ -415,14 +356,6 @@ fn allows_agent(
     {
         return Ok(false);
     }
-    if run["trigger"] == "schedule" {
-        let Some(author) = run["snapshot"]["task"]["authorId"].as_str() else {
-            return Ok(false);
-        };
-        if !explicit(&node["nativeAccounts"], author) || !proof.current_account(author) {
-            return Ok(false);
-        }
-    }
     let mut scope = run.clone();
     let mut seen = std::collections::HashSet::new();
     if let Some(id) = run["id"].as_str() {
@@ -495,11 +428,11 @@ pub(crate) fn authorize_origin_on_node(
         return Ok(grant);
     }
 
-    // Saved tasks and rules are stored origins. An edit never replaces unknown provenance,
+    // Saved rules are stored origins. An edit never replaces unknown provenance,
     // so a fresh authenticated commitment is the only way back to native execution.
     if matches!(source, Origin::Stored(_)) && grant["nativeProvenanceUnknown"] != false {
         return Err(Error::forbidden(
-            "This mission has no recorded native authority, so it cannot run on a native node. A trusted person must create it again, for example by duplicating it.",
+            "This rule has no recorded native authority, so it cannot reach a native node. Its creator must save or duplicate it again.",
         ));
     }
 

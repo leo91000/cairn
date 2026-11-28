@@ -77,7 +77,7 @@ async fn parent_node_grant_reductions_revoke_existing_native_delegation() {
     let mut parent = f.run();
     parent["snapshot"]["agent"] = agent.clone();
     parent["status"] = "running".into();
-    common::add_run(&f.service.store, &parent).await;
+    add_conversation_run_fixture(&f.service.store, &mut parent).await;
     let configuration = f
         .service
         .mcps
@@ -154,7 +154,7 @@ async fn a_vm_coordinator_directed_by_unrelated_parents_loses_native_delegation(
     parent_b["id"] = id().into();
     parent_b["taskId"] = id().into();
     parent_b["snapshot"]["agent"] = parent_b_agent.clone();
-    common::add_run(&f.service.store, &parent_b).await;
+    add_conversation_run_fixture(&f.service.store, &mut parent_b).await;
     let coordinator = f
         .service
         .agent_fixture(
@@ -366,220 +366,60 @@ async fn changing_the_parent_permission_or_node_ceiling_revokes_descendants() {
 }
 
 #[tokio::test]
-async fn editing_a_vm_task_cannot_replace_its_authors_with_a_native_trusted_editor() {
+async fn scheduled_native_conversations_recheck_the_rule_creators_node_access() {
     let f = Fixture::new().await;
-    let _authority = mission_authority(&f).await;
-    let author = auth::InstallationIdentity::trusted(auth::InstallationRole::Member, OTHER);
-    let editor = auth::InstallationIdentity::trusted(auth::InstallationRole::Owner, TRUSTED);
-    let vm = f
-        .service
-        .agent_fixture(json!({ "name": "VM task agent" }), None)
-        .await
-        .unwrap();
-    members_use_agents(&f.service, &[(OTHER, "two")]).await;
-    let task = f
-        .service
-        .task_as_fixture(
-            json!({
-                "name": "Retained commitment",
-                "prompt": "Original brief",
-                "agentId": vm["id"],
-            }),
-            None,
-            Some(&author),
-        )
-        .await
-        .unwrap();
-    assert_eq!(task["authorId"], OTHER);
-    let mut edited = task.clone();
-    edited["agentId"] = f.agent["id"].clone();
-    let error = f
-        .service
-        .task_as_fixture(edited, task["id"].as_str(), Some(&editor))
-        .await
-        .unwrap_err();
-    assert_eq!(error.status, 403);
-    assert_eq!(
-        f.service
-            .mission_snapshot_fixture(task["id"].as_str().unwrap())
-            .await
-            .unwrap()["agentId"],
-        vm["id"]
-    );
-}
-
-#[tokio::test]
-async fn native_tasks_retain_previous_directing_editors_and_current_author_rights() {
-    let f = Fixture::new().await;
-    trust_owner(&f).await;
-    let _authority = mission_authority(&f).await;
-    let author =
-        auth::InstallationIdentity::trusted(auth::InstallationRole::Member, "fixture-owner");
-    let editor = auth::InstallationIdentity::trusted(auth::InstallationRole::Owner, TRUSTED);
-    members_use_agents(&f.service, &[("fixture-owner", "fixture-owner")]).await;
-    let task = f
-        .service
-        .task_as_fixture(
-            json!({
-                "name": "Native commitment",
-                "prompt": "Original brief",
+    let date = now() + 3_600_000;
+    let definition = json!({
+        "name": "Scheduled native work",
+        "description": "Verify the creator retains native access",
+        "executionAgentId": f.agent["id"],
+        "trigger": { "type": "clock", "at": date, "timezone": "UTC" },
+        "limits": cairn_contracts::HookRuleLimits::default(),
+        "steps": [{
+            "type": "action",
+            "id": "start_agent",
+            "action": {
+                "type": "startAgent",
                 "agentId": f.agent["id"],
-            }),
-            None,
-            Some(&author),
-        )
-        .await
-        .unwrap();
-    let mut edited = task.clone();
-    edited["prompt"] = "Updated brief".into();
-    let saved = f
-        .service
-        .task_as_fixture(edited, task["id"].as_str(), Some(&editor))
-        .await
-        .unwrap();
-    assert_eq!(saved["authorId"], "fixture-owner");
-    assert!(
-        saved["nativePrincipals"]
-            .as_array()
-            .unwrap()
-            .contains(&json!(TRUSTED))
-    );
-    assert!(
-        saved["nativePrincipals"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("fixture-owner"))
-    );
-    f.service
-        .store
-        .put_node_fixture(f.node.clone())
-        .await
-        .unwrap();
-    let error = f
-        .service
-        .task_as_fixture(saved, task["id"].as_str(), Some(&editor))
-        .await
-        .unwrap_err();
-    assert_eq!(error.status, 403);
-}
-
-#[tokio::test]
-async fn revoked_native_permissions_still_allow_disabling_but_never_reenabling_a_task() {
-    let f = Fixture::new().await;
-    trust_owner(&f).await;
-    let owner = RelayContext::new(&common::relay_fixture::context(&f.service).await);
-    let (status, task) = f
+                "prompt": { "type": "literal", "value": "Run on the native node." },
+            },
+        }],
+    });
+    let (status, rule) = f
         .call(
-            &owner,
+            &f.trusted,
             "POST",
-            "/api/tasks",
-            json!({ "settings": {
-                "name": "Native schedule", "prompt": "Build", "agentId": f.agent["id"],
-                "cron": "0 * * * *", "timezone": "UTC"
-            } }),
+            "/api/hook-rules",
+            json!({ "definition": definition }),
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "{task}");
-    f.service
-        .store
-        .put_node_fixture(f.node.clone())
+    assert_eq!(status, StatusCode::OK, "{rule}");
+    assert_eq!(rule["nativeAuthority"], true, "{rule}");
+    let run_now = format!("/api/hook-rules/{}/run", text(&rule, "id"));
+    let (status, queued) = f.call(&f.trusted, "POST", &run_now, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{queued}");
+    cairn_installation::rules::engine::tick(&f.service)
         .await
         .unwrap();
-    // Disabling a task must succeed while Beacon authority is unavailable.
-    common::relay_fixture::native_authority_unavailable(&f.service).await;
-    f.service
-        .store
-        .set(
-            "native-authority",
-            json!({ "observedAt": 0, "accounts": {} }),
-            None,
-        )
-        .await
-        .unwrap();
-    let path = format!("/api/tasks/{}/state", task["id"].as_str().unwrap());
-    let disabled = json!({ "taskId": task["id"], "revision": task["revision"], "enabled": false, "archived": false });
-    let (status, saved) = f.call(&owner, "POST", &path, disabled).await;
-    assert_eq!(status, StatusCode::OK, "{saved}");
-    assert_eq!(saved["enabled"], false);
-    assert_eq!(saved["nativePrincipals"], task["nativePrincipals"]);
-    assert_eq!(saved["nativeAuthorityNodes"], task["nativeAuthorityNodes"]);
-    f.service
-        .store
-        .set(
-            "native-authority",
-            json!({
-                "observedAt": now(),
-                "accounts": { TRUSTED: {} },
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let enabled = json!({ "taskId": saved["id"], "revision": saved["revision"], "enabled": true, "archived": false });
-    let (status, _) = f.call(&owner, "POST", &path, enabled).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-}
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
+    let chats = f.service.chat_list().await.unwrap();
+    assert_eq!(chats.len(), 1, "{chats:?}");
+    assert_eq!(chats[0]["originRule"]["schedule"], true);
+    let run = f.service.store.run(text(&chats[0], "runId")).await.unwrap();
+    assert_eq!(run["nativePrincipals"], json!([TRUSTED]));
+    placement::check(&f.service, &run).await.unwrap();
 
-#[tokio::test]
-async fn a_native_task_without_recorded_provenance_says_how_to_schedule_it_again() {
-    let f = Fixture::new().await;
-    trust_owner(&f).await;
-    // A complete current mission whose agent subsequently moves to native.
-    let vm = f
-        .service
-        .agent_fixture(json!({ "name": "VM before native" }), None)
-        .await
-        .unwrap();
-    let mut task = f
-        .service
-        .task_fixture(
-            json!({
-                "name": "Existing commitment", "prompt": "Original brief", "agentId": vm["id"],
-                "cron": "0 9 * * *", "timezone": "Europe/Paris"
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    task["agentId"] = f.agent["id"].clone();
-    let author =
-        auth::InstallationIdentity::trusted(auth::InstallationRole::Owner, "fixture-owner");
-    f.service
-        .store
-        .put_mission_fixture(task.clone())
-        .await
-        .unwrap();
-
-    let error = f
-        .service
-        .task_as_fixture(task.clone(), task["id"].as_str(), Some(&author))
-        .await
-        .unwrap_err();
-    assert_eq!(error.status, 403, "{}", error.message);
-    assert!(
-        error.message.contains("no recorded native authority"),
-        "{}",
-        error.message
-    );
-
-    let mut duplicate = task.clone();
-    duplicate.as_object_mut().unwrap().remove("id");
-    let saved = f
-        .service
-        .task_as_fixture(duplicate, None, Some(&author))
-        .await
-        .unwrap();
-    assert_eq!(saved["nativeProvenanceUnknown"], false);
-}
-
-#[tokio::test]
-async fn scheduled_native_placement_rechecks_the_retained_author_even_on_older_provenance() {
-    let f = Fixture::new().await;
-    let mut run = f.run();
-    run["trigger"] = "schedule".into();
-    run["snapshot"]["task"] = json!({ "authorId": OTHER });
-    common::add_run(&f.service.store, &run).await;
+    let mut node = f.node.clone();
+    node["nativeAccounts"] = json!([]);
+    f.service.store.put_node_fixture(node).await.unwrap();
     assert!(placement::check(&f.service, &run).await.is_err());
+    let (status, queued) = f.call(&f.trusted, "POST", &run_now, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{queued}");
+    cairn_installation::rules::engine::tick(&f.service)
+        .await
+        .unwrap();
+    let chats = f.service.chat_list().await.unwrap();
+    assert_eq!(chats.len(), 1, "{chats:?}");
 }
 
 #[tokio::test]

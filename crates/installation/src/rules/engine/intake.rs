@@ -91,38 +91,30 @@ pub(super) async fn deliver_hook(
     }
     s.rules.clear_delivery(&key);
     let (rule, number, event_id) = (row.id.clone(), version.version, event.id.clone());
-    let inserted = s
-    .store
-    .transaction(move |db| {
-        if !admissions::eligible(db, &rule, &event_id, number)? {
-            return Ok(None);
-        }
-        if db.refuse_admission(&rule, &event_id, incoming_bytes)? { return Ok(None) }
-        let recorded = record.to_string();
-        let recorded_bytes = recorded.len() + 256;
-        if recorded_bytes > MAX_RECORDED_BYTES - ERROR_RESERVE {
-            return Err(Error::bad("The event exceeds the recorded-data budget."));
-        }
-        let received = db.0.execute(
-            "INSERT OR IGNORE INTO hook_rule_receipts(rule_id,event_id) VALUES(?1,?2)",
-            params![rule, event_id],
-        )?;
-        if received == 0 {
-            return Ok(Some(false));
-        }
-        let cursor = serde_json::to_string(&Cursor::default())?;
-        let at = now();
-        let insert_sql = "INSERT OR IGNORE INTO hook_rule_triggerings( \
-            id,rule_id,version,event_id,event,status,cursor,pending,in_flight, \
-            actions,tool_calls,counted_at,verify,verify_since,next_at,lease_until, \
-            error,created_at,updated_at,finished_at,recorded_bytes) \
-            VALUES(?1,?2,?3,?4,?5,'running',?6,NULL,0,0,0,NULL,0,NULL,NULL,NULL,NULL,?7,?7,NULL,?8)";
-        Ok(Some(db.0.prepare_cached(insert_sql)?
-            .execute(params![id(), rule, number, event_id, recorded, cursor, at, recorded_bytes as i64])?
-            > 0))
-    })
-    .await?;
-    let _ = inserted;
+    s.store
+        .transaction(move |db| {
+            if !admissions::eligible(db, &rule, &event_id, number)? {
+                return Ok(());
+            }
+            if db.refuse_admission(&rule, &event_id, incoming_bytes)? {
+                return Ok(());
+            }
+            let recorded = record.to_string();
+            let recorded_bytes = recorded.len() + 256;
+            if recorded_bytes > MAX_RECORDED_BYTES - ERROR_RESERVE {
+                return Err(Error::bad("The event exceeds the recorded-data budget."));
+            }
+            let received = db.0.execute(
+                "INSERT OR IGNORE INTO hook_rule_receipts(rule_id,event_id) VALUES(?1,?2)",
+                params![rule, event_id],
+            )?;
+            if received == 0 {
+                return Ok(());
+            }
+            db.insert_rule_triggering(&rule, number, &event_id, &recorded, now())?;
+            Ok(())
+        })
+        .await?;
     Ok(Delivery::Handled)
 }
 
@@ -333,12 +325,16 @@ pub(super) async fn sweep(s: &Service) -> Result<()> {
                 [now() - 3_600_000],
             )?;
             // Delivery receipts outlive quiet triggerings while another listener is
-            // deferred. Counted receipts also meter the hour independently of history.
+            // deferred. A pending Clock slot can already have a receipt after a v38
+            // upgrade. Counted receipts meter the hour independently of history.
             db.0.execute(
                 "DELETE FROM hook_rule_receipts WHERE (counted_at IS NULL OR counted_at<=?1) \
                  AND NOT EXISTS(SELECT 1 FROM plugin_hook_events e WHERE e.id=hook_rule_receipts.event_id) \
                  AND NOT EXISTS(SELECT 1 FROM hook_rule_admissions a \
                      WHERE a.rule_id=hook_rule_receipts.rule_id AND a.event_id=hook_rule_receipts.event_id) \
+                 AND NOT EXISTS(SELECT 1 FROM hook_rule_schedules s \
+                     WHERE s.rule_id=hook_rule_receipts.rule_id \
+                     AND hook_rule_receipts.event_id='clock:'||s.rule_id||':'||s.next_run) \
                  AND NOT EXISTS(SELECT 1 FROM hook_rule_triggerings t \
                      WHERE t.rule_id=hook_rule_receipts.rule_id AND t.event_id=hook_rule_receipts.event_id \
                      AND t.status IN ('running','waiting','retrying'))",

@@ -69,6 +69,27 @@ pub enum HookRuleTrigger {
         )]
         hook: CairnHookKind,
     },
+    /// Cairn's clock hook: a 5-field cron schedule or a single date in an IANA timezone.
+    Clock {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(length(min = 1, max = 100))]
+        #[ts(optional = nullable)]
+        cron: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(range(min = 1, max = MAX_CLOCK_DATE_MILLIS))]
+        #[ts(optional = nullable, type = "number | null")]
+        at: Option<i64>,
+        #[serde(default = "default_clock_timezone")]
+        #[schemars(length(min = 1, max = 100))]
+        timezone: String,
+    },
+}
+
+/// End of year 9999 UTC, the last year with four digits in RFC 3339.
+pub const MAX_CLOCK_DATE_MILLIS: i64 = 253_402_300_799_999;
+
+fn default_clock_timezone() -> String {
+    "Europe/Paris".into()
 }
 
 /// Any value of an action or a condition.
@@ -231,6 +252,9 @@ pub enum RuleCondition {
         #[schemars(range(min = 1, max = 10080))]
         window_minutes: u32,
     },
+    /// A conversation started by this rule has a turn queued, running or waiting for a wakeup.
+    /// An unanswered question alone does not count.
+    RuleConversationWorking {},
 }
 
 /// Where a stored value lives.
@@ -431,6 +455,8 @@ pub enum HookRuleSource {
     Duplicate,
     /// A rule template from a plugin.
     Template,
+    /// Migrated from a legacy mission (ADR-0094).
+    Migration,
 }
 
 /// What the person viewing the rule may do with it.
@@ -444,6 +470,9 @@ pub struct HookRuleAllowed {
     pub delete: bool,
     pub emergency_pause: bool,
     pub lift_budget: bool,
+    /// Trigger this clock rule immediately without waiting for its next occurrence.
+    #[serde(default)]
+    pub run_now: bool,
     /// Whether the triggering history shows payloads and action results.
     pub view_details: bool,
 }
@@ -474,13 +503,18 @@ pub struct HookRule {
     pub native_authority: bool,
     #[schemars(
         with = "String",
-        pattern("^(app|publicMcp|installationAgent|duplicate|template)$")
+        pattern("^(app|publicMcp|installationAgent|duplicate|template|migration)$")
     )]
     pub source: HookRuleSource,
     /// The conversation in which an agent wrote this version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub conversation_id: Option<Uuid>,
+    /// Next scheduled occurrence for an active clock rule, in epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 9007199254740991_i64))]
+    #[ts(optional = nullable, type = "number | null")]
+    pub next_run: Option<i64>,
     #[schemars(range(min = 0, max = 9007199254740991_i64))]
     #[ts(type = "number")]
     pub created_at: i64,
@@ -506,6 +540,11 @@ pub struct HookRuleSummary {
     pub tool_instance_ids: Vec<PluginInstanceId>,
     pub blocks: Vec<HookRuleBlock>,
     pub allowed: HookRuleAllowed,
+    /// Next scheduled occurrence for an active clock rule, in epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 9007199254740991_i64))]
+    #[ts(optional = nullable, type = "number | null")]
+    pub next_run: Option<i64>,
     #[schemars(range(min = 0, max = 9007199254740991_i64))]
     #[ts(type = "number")]
     pub updated_at: i64,
@@ -518,7 +557,7 @@ pub struct HookRuleVersion {
     pub saved_by_account_id: String,
     #[schemars(
         with = "String",
-        pattern("^(app|publicMcp|installationAgent|duplicate|template)$")
+        pattern("^(app|publicMcp|installationAgent|duplicate|template|migration)$")
     )]
     pub source: HookRuleSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -994,4 +1033,29 @@ pub struct InstallHookRuleTemplateInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InstallHookRuleTemplateOutput {
     pub rules: Vec<HookRule>,
+}
+
+fn default_preview_count() -> u8 {
+    5
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SchedulePreviewInput {
+    #[schemars(length(min = 1, max = 100))]
+    pub cron: String,
+    #[serde(default = "default_clock_timezone")]
+    #[schemars(length(min = 1, max = 100))]
+    pub timezone: String,
+    #[serde(default = "default_preview_count")]
+    #[schemars(range(min = 1, max = 20))]
+    pub count: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SchedulePreviewOutput {
+    #[ts(type = "number[]")]
+    pub occurrences: Vec<i64>,
+    pub timezone: String,
 }

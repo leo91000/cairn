@@ -23,6 +23,7 @@ use cairn_contracts::{
 
 mod admissions;
 mod cairn_hooks;
+pub(crate) mod clock;
 
 pub(crate) use cairn_hooks::record_question;
 
@@ -151,6 +152,7 @@ pub struct Engine {
     pub(crate) wake: tokio::sync::Notify,
     delivery_retries: Mutex<HashMap<(String, String), (Instant, u32)>>,
     maintenance: Mutex<Option<Instant>>,
+    clock_memberships: Mutex<clock::MembershipCheck>,
     last_resolution: Mutex<HashMap<String, Instant>>,
     last_execution: Mutex<HashMap<String, Instant>>,
 }
@@ -402,6 +404,9 @@ pub async fn tick(s: &Arc<Service>) -> Result<usize> {
         if let Err(error) = cairn_hooks::observe(s).await {
             tracing::warn!(error = %error, "Cairn hook observation failed");
         }
+        if let Err(error) = clock::observe(s).await {
+            tracing::warn!(error = %error, "Clock hook observation failed");
+        }
 
         let capacity = PARALLEL.saturating_sub(tasks.len());
         if capacity > 0 {
@@ -573,6 +578,7 @@ fn exhaust(db: &Db<'_>, row: &RuleRow, reason: &str) -> Result<()> {
         row.revision = id();
         row.updated_at = now();
         db.save_hook_rule(&row)?;
+        clock::clear_next_run(db, &row.id)?;
         db.audit("hook_rule.budget_exhausted", &json!({ "ruleId": row.id }))?;
         let name = db
             .hook_rule_version(&row.id, row.version)?

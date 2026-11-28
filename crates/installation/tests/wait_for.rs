@@ -1,8 +1,7 @@
 use crate::common::run_fixture::DbRunFixture;
 use crate::common::run_fixture::RunFixture;
 use common::AgentFixture;
-use common::MissionFixture;
-use common::StoreMissionFixture;
+use common::ChatRunFixture;
 
 mod common;
 #[path = "wait_for/groups.rs"]
@@ -121,67 +120,6 @@ impl Fixture {
         f
     }
 
-    async fn mission() -> Self {
-        let mut f = Self::new().await;
-        let task = f.s.task_fixture(json!({ "name": "Waiting mission", "prompt": "Finish after CI", "agentId": MAIN_AGENT_ID }), None).await.unwrap();
-        let run =
-            f.s.enqueue(text(&task, "id"), "manual", None)
-                .await
-                .unwrap();
-        f.run = text(&run, "id").to_owned();
-        let _state =
-            f.s.store
-                .change_run(
-                    &f.run,
-                    cairn_installation::runs::RunChanges {
-                        status: Some(cairn_contracts::RunStatus::Running),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-        let run = f.s.store.run(&f.run).await.unwrap();
-        let config = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
-        f.token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
-        f.s.store
-            .save_checkpoint_boundary(
-                &f.run,
-                json!({
-                    "completed": true, "launched": true, "remainingMs": 90_000,
-                }),
-            )
-            .await
-            .unwrap();
-        // Block admission while exercising the real worker's durable wait tick.
-        f.s.store
-            .set("deployment-lease", json!({ "id": "fixture" }), None)
-            .await
-            .unwrap();
-        f
-    }
-
-    async fn park_mission(&self) {
-        self.s
-            .store
-            .change_run(
-                &self.run,
-                cairn_installation::runs::RunChanges {
-                    status: Some(cairn_contracts::RunStatus::Waiting),
-                    recovery_pending: Some(false),
-                    session_id: Some(Some("saved-session".into())),
-                    workspace: Some(Some("/saved/workspace".into())),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-    }
-
-    async fn mission_tick(&self) -> Value {
-        self.s.worker.tick(&self.s).await.unwrap();
-        self.s.store.run(&self.run).await.unwrap()
-    }
-
     /// The same installation after a restart, still talking to the local GitHub.
     async fn restart(&self) -> Arc<Service> {
         let restarted = Service::new(self.s.config.clone()).await.unwrap();
@@ -206,11 +144,20 @@ impl Fixture {
     }
 
     async fn target(&self) -> Value {
-        let task = self.s.task_fixture(json!({ "name": "Other work", "prompt": "Check result", "worktree": false, "agentId": MAIN_AGENT_ID }), None).await.unwrap();
-        self.s
-            .enqueue(text(&task, "id"), "manual", None)
+        self.target_for(MAIN_AGENT_ID).await
+    }
+
+    async fn target_for(&self, agent_id: &str) -> Value {
+        let (_, run) = self
+            .s
+            .chat_run_fixture(agent_id, None, "Check result")
             .await
-            .unwrap()
+            .unwrap();
+        self.s
+            .chat_acknowledge(text(&run, "id"), text(&run["chatExecution"], "messageId"))
+            .await
+            .unwrap();
+        run
     }
 
     async fn schedule(&self, condition: Value) -> Value {
@@ -311,22 +258,7 @@ async fn installation_access_can_wait_for_another_agents_run() {
         f.s.agent_fixture(json!({ "name": "Delegated worker" }), None)
             .await
             .unwrap();
-    let task =
-        f.s.task_fixture(
-            json!({
-                "name": "Delegated work",
-                "prompt": "Check result",
-                "worktree": false,
-                "agentId": agent["id"]
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let target =
-        f.s.enqueue(text(&task, "id"), "manual", None)
-            .await
-            .unwrap();
+    let target = f.target_for(text(&agent, "id")).await;
     let wait = f
         .schedule(json!({ "type": "run_finished", "runId": target["id"] }))
         .await;
@@ -1321,155 +1253,4 @@ async fn measure_wait_metadata() {
             })
         );
     }
-}
-
-#[tokio::test]
-async fn mission_plugin_wait_survives_restart_and_resumes_on_the_pinned_result() {
-    let f = Fixture::mission().await;
-    let wait = f.schedule(f.github_condition()).await;
-    assert_eq!(wait, f.schedule(f.github_condition()).await);
-    f.park_mission().await;
-    assert_eq!(f.mission_tick().await["status"], "waiting");
-    let restarted = f.restart().await;
-    restarted.worker.tick(&restarted).await.unwrap();
-    assert_eq!(
-        restarted.store.run(&f.run).await.unwrap()["wakeup"],
-        wait["wakeup"]
-    );
-    f.github_state("completed", Some("failure"), 0);
-    cairn_installation::plugins::conditions::poll_once(&restarted)
-        .await
-        .unwrap();
-    restarted.worker.tick(&restarted).await.unwrap();
-    let resumed = restarted.store.run(&f.run).await.unwrap();
-    assert_eq!(resumed["status"], "queued");
-    assert_eq!(
-        resumed["waitContinuation"]["observation"]["pluginResult"]["conclusion"],
-        "failure"
-    );
-    assert_eq!(resumed["missionTurnId"], wait["wakeup"]["id"]);
-    assert!(resumed["wakeup"].is_null());
-    let checkpoint = restarted
-        .store
-        .checkpoint_boundary(&f.run)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(checkpoint["remainingMs"], 90_000);
-    assert_eq!(checkpoint["completed"], false);
-    // Even a retained credential from the previous turn cannot act in the next one.
-    restarted
-        .store
-        .change_run(
-            &f.run,
-            cairn_installation::runs::RunChanges {
-                status: Some(cairn_contracts::RunStatus::Running),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert!(
-        wait_for::schedule(
-            &restarted,
-            &f.token,
-            &json!({
-                "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "Stale turn",
-            })
-        )
-        .await
-        .is_err()
-    );
-}
-
-#[tokio::test]
-async fn mission_wait_is_cancellable_and_schedule_pause_only_affects_future_runs() {
-    let f = Fixture::mission().await;
-    let wait = wait_for::schedule(
-        &f.s,
-        &f.token,
-        &json!({
-            "conditions": [{ "type": "delay", "seconds": 60 }], "reason": "Wait for the result",
-        }),
-    )
-    .await
-    .unwrap();
-    f.park_mission().await;
-    let run = f.s.store.run(&f.run).await.unwrap();
-    let mut task =
-        f.s.mission_snapshot_fixture(text(&run, "taskId"))
-            .await
-            .unwrap();
-    task["enabled"] = false.into();
-    f.s.store.put_mission_fixture(task).await.unwrap();
-    assert_eq!(f.mission_tick().await["wakeup"], wait["wakeup"]);
-    f.s.worker.cancel(&f.s, &f.run).await.unwrap();
-    let cancelled = f.mission_tick().await;
-    assert_eq!(cancelled["status"], "cancelled");
-    assert!(cancelled["wakeup"].is_null());
-}
-
-#[tokio::test]
-async fn missions_share_dependency_cycle_detection_with_conversations() {
-    let f = Fixture::mission().await;
-    let target = f.target().await;
-    f.s.store
-        .update_run_boundary_fixture(
-            text(&target, "id"),
-            json!({
-                "wakeup": { "condition": { "type": "run_finished", "runId": f.run } },
-            }),
-        )
-        .await
-        .unwrap();
-    let error = wait_for::schedule(
-        &f.s,
-        &f.token,
-        &json!({
-            "conditions": [{ "type": "run_finished", "runId": target["id"] }],
-            "reason": "Cyclic dependency", "timeoutSeconds": 60,
-        }),
-    )
-    .await
-    .unwrap_err();
-    assert!(error.message.contains("cycle"), "{error:?}");
-}
-
-#[tokio::test]
-async fn mission_dependency_wait_observes_completion_and_not_another_missions_wait() {
-    let f = Fixture::mission().await;
-    let target = f.target().await;
-    f.s.store
-        .change_run(
-            text(&target, "id"),
-            cairn_installation::runs::RunChanges {
-                status: Some(cairn_contracts::RunStatus::Waiting),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let wait = f
-        .schedule(json!({ "type": "run_finished", "runId": target["id"] }))
-        .await;
-    assert_eq!(wait["deferred"], true);
-    f.park_mission().await;
-    assert_eq!(f.mission_tick().await["status"], "waiting");
-    f.s.store
-        .change_run(
-            text(&target, "id"),
-            cairn_installation::runs::RunChanges {
-                status: Some(cairn_contracts::RunStatus::Failed),
-                finished_at: Some(Some(now())),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let resumed = f.mission_tick().await;
-    assert_eq!(resumed["status"], "queued");
-    assert_eq!(
-        resumed["waitContinuation"]["observation"]["status"],
-        "failed"
-    );
 }

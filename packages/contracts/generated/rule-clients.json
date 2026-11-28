@@ -35,6 +35,13 @@
     "path": "/hook-rules/validate"
   },
   {
+    "input": "SchedulePreviewInput",
+    "method": "POST",
+    "name": "previewSchedule",
+    "output": "SchedulePreviewOutput",
+    "path": "/hook-rules/schedule/preview"
+  },
+  {
     "input": "ListHookRuleTemplatesInput",
     "method": "GET",
     "name": "listHookRuleTemplates",
@@ -122,6 +129,13 @@
     "name": "liftHookRuleBudget",
     "output": "HookRule",
     "path": "/hook-rules/{ruleId}/budget"
+  },
+  {
+    "input": "HookRuleInput",
+    "method": "POST",
+    "name": "runHookRule",
+    "output": "HookRuleTriggering",
+    "path": "/hook-rules/{ruleId}/run"
   },
   {
     "input": "DuplicateHookRuleInput",

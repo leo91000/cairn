@@ -31,13 +31,11 @@ import org.junit.runner.RunWith
 internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
     private val timestamp = System.currentTimeMillis()
     private val task =
-        Task(
-            "85aac3c3-27f5-5b76-a34d-d59120d410eb",
-            "Revue hebdomadaire du projet",
-            "Examiner les changements, vérifier les tests et publier le compte rendu.",
-            MAIN_AGENT_ID,
-            cron = "0 9 * * 1",
-            nextRun = timestamp + 86400000,
+        build.cairn.contracts.RunTaskSnapshot(
+            id = "85aac3c3-27f5-5b76-a34d-d59120d410eb",
+            name = "Revue hebdomadaire du projet",
+            prompt = "Examiner les changements.",
+            agentId = MAIN_AGENT_ID,
         )
     private val outcome =
         TaskOutcome(
@@ -60,7 +58,7 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                 "## Revue terminée\n\nLes changements sont prêts. La navigation est plus claire et la conversation reste au centre de l’écran.",
             snapshot =
                 Snapshot(
-                    task = task.runTaskSnapshot(),
+                    task = task,
                     agent =
                         Agent(
                             exclusiveNodes = emptyList(),
@@ -203,12 +201,6 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                                         )
                                     )
                                 )
-                            "/api/installations/fixture/api/tasks" ->
-                                wireJson.encodeToString(
-                                    build.cairn.contracts.ListMissionsOutput(listOf(task))
-                                )
-                            "/api/installations/fixture/api/tasks/activity" ->
-                                wireJson.encodeToString(listOf(run))
                             "/api/installations/fixture/api/runs" ->
                                 wireJson.encodeToString(listOf(run))
                             "/api/installations/fixture/api/schedule/preview" ->
@@ -404,73 +396,6 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
             }
         }
     }
-
-    fun adaptiveTaskLayout() {
-        MockWebServer().use { server ->
-            val vm = fixture(server)
-            compose.setContent { CairnTheme("dark") { CairnApp(vm = vm) } }
-            compose.waitUntil(30000) {
-                compose
-                    .onAllNodesWithContentDescription("Missions")
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            compose.onNodeWithContentDescription("Missions").performClick()
-            compose.waitUntil(30000) {
-                compose.onAllNodesWithText(task.name).fetchSemanticsNodes().isNotEmpty()
-            }
-            val width =
-                InstrumentationRegistry.getInstrumentation()
-                    .targetContext
-                    .resources
-                    .configuration
-                    .screenWidthDp
-            // Wide screens show the selected mission next to the list.
-            if (width >= 840) compose.onNodeWithText("Lancer maintenant").assertIsDisplayed()
-            capture("missions-adaptive-dark")
-            vm.api.closeStreams()
-        }
-    }
-
-    fun taskConversationAndManagement() {
-        MockWebServer().use { server ->
-            val vm = fixture(server)
-            compose.setContent { CairnTheme("dark") { CairnApp(vm = vm) } }
-            compose.waitUntil(30000) {
-                compose
-                    .onAllNodesWithContentDescription("Missions")
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            compose.onNodeWithContentDescription("Missions").performClick()
-            compose.waitUntil(30000) {
-                compose.onAllNodesWithText(task.name).fetchSemanticsNodes().isNotEmpty()
-            }
-            compose.onNodeWithText("Chaque lundi · 09:00", substring = true).assertExists()
-            capture("missions-dark")
-            val width =
-                InstrumentationRegistry.getInstrumentation()
-                    .targetContext
-                    .resources
-                    .configuration
-                    .screenWidthDp
-            if (width < 840) {
-                compose.onNodeWithText(task.name).performClick()
-                compose.onNodeWithTag("mission-sheet").assertIsDisplayed()
-            }
-            compose.waitUntil(30000) {
-                compose.onAllNodesWithText("100 % de réussite").fetchSemanticsNodes().isNotEmpty()
-            }
-            capture("mission-details-dark")
-            compose
-                .onNodeWithContentDescription("Modifier la mission")
-                .performScrollTo()
-                .performClick()
-            compose.onNodeWithText("Enregistrer").assertIsEnabled()
-            capture("mission-editor-dark")
-            vm.api.closeStreams()
-        }
-    }
 }
 
 @RunWith(AndroidJUnit4::class)
@@ -480,9 +405,4 @@ class ParityDeviceTest {
     @Test
     fun compactChatEvidenceAndSwitcher() =
         ParityDeviceCases(compose).compactChatEvidenceAndSwitcher()
-
-    @Test
-    fun taskConversationAndManagement() = ParityDeviceCases(compose).taskConversationAndManagement()
-
-    @Test fun adaptiveTaskLayout() = ParityDeviceCases(compose).adaptiveTaskLayout()
 }

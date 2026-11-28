@@ -28,8 +28,6 @@ abstract class ResourceSaveCases {
 
     protected open fun captureFailure(name: String) = Unit
 
-    @Test fun taskRefreshFailureKeepsTheCreatedMission() = saveAfterFailure("tasks", false)
-
     @Test fun projectRefreshFailureKeepsTheCreatedProject() = saveAfterFailure("projects", false)
 
     @Test
@@ -40,10 +38,6 @@ abstract class ResourceSaveCases {
         saveAfterFailure("import", true)
 
     @Test
-    fun lostTaskResponseReplaysTheOriginalCreationThenUpdatesTheEditedMission() =
-        saveAfterFailure("tasks", true)
-
-    @Test
     fun lostProjectResponseReplaysTheOriginalCreationThenUpdatesTheEditedProject() =
         saveAfterFailure("projects", true)
 
@@ -52,24 +46,12 @@ abstract class ResourceSaveCases {
         saveAfterFailure("projects", true, delayCatalog = true)
 
     @Test
-    fun rejectedReplayStillAppliesTheLatestMissionEdits() =
-        saveAfterFailure("tasks", true, rejectReplay = true)
-
-    @Test
     fun malformedResponseThenRejectedReplayKeepsTheProjectSourceAndIdentity() =
         saveAfterFailure("projects", false, rejectReplay = true, malformedResponse = true)
 
     @Test
     fun rejectedUpdateAfterRefreshFailureNamesTheCreatedProject() =
         saveAfterFailure("projects", false, rejectReplay = true)
-
-    @Test
-    fun restoredTaskEditorKeepsItsCommittedIdentity() =
-        saveAfterFailure("tasks", false, restore = true)
-
-    @Test
-    fun restoredTaskEditorReplaysItsUncertainCreation() =
-        saveAfterFailure("tasks", true, restore = true)
 
     @Test
     fun projectBaseBranchCanBeReplaced() = saveAfterFailure("projects", false, editBranch = true)
@@ -139,55 +121,33 @@ abstract class ResourceSaveCases {
                             val settings =
                                 if (
                                     kind == "projects" ||
-                                        kind == "tasks" ||
                                         request.method == "PUT" && resourceKind == "projects"
                                 )
                                     stored["settings"]!!.jsonObject
                                 else stored
                             val output =
-                                if (resourceKind == "projects")
-                                    JsonObject(
-                                        settings.filterKeys {
-                                            it in
-                                                setOf(
-                                                    "name",
-                                                    "path",
-                                                    "description",
-                                                    "baseBranch",
-                                                    "sourceMode",
-                                                )
-                                        } +
-                                            projectPath +
-                                            mapOf(
-                                                "id" to JsonPrimitive(savedId),
-                                                "origin" to JsonPrimitive(""),
-                                                "revision" to
-                                                    JsonPrimitive("revision-${mutations.size}"),
-                                                "createdAt" to JsonPrimitive(0L),
-                                                "sourceMode" to
-                                                    (settings["sourceMode"]
-                                                        ?: JsonPrimitive("remote")),
+                                JsonObject(
+                                    settings.filterKeys {
+                                        it in
+                                            setOf(
+                                                "name",
+                                                "path",
+                                                "description",
+                                                "baseBranch",
+                                                "sourceMode",
                                             )
-                                    )
-                                else
-                                    JsonObject(
-                                        wireJson
-                                            .encodeToJsonElement(
-                                                Task(
-                                                    id = savedId,
-                                                    name = "Fixture",
-                                                    agentId =
-                                                        "d3153f9f-724b-59c3-9614-ab78f231c4d3",
-                                                )
-                                            )
-                                            .jsonObject +
-                                            settings +
-                                            mapOf(
-                                                "id" to JsonPrimitive(savedId),
-                                                "revision" to
-                                                    JsonPrimitive("revision-${mutations.size}"),
-                                            )
-                                    )
+                                    } +
+                                        projectPath +
+                                        mapOf(
+                                            "id" to JsonPrimitive(savedId),
+                                            "origin" to JsonPrimitive(""),
+                                            "revision" to
+                                                JsonPrimitive("revision-${mutations.size}"),
+                                            "createdAt" to JsonPrimitive(0L),
+                                            "sourceMode" to
+                                                (settings["sourceMode"] ?: JsonPrimitive("remote")),
+                                        )
+                                )
                             return json(output.toString())
                         }
                         if (loseResponse && created.get() && request.method == "GET") {
@@ -196,14 +156,14 @@ abstract class ResourceSaveCases {
                                 check(allowRecoveryProbe.await(20, TimeUnit.SECONDS))
                                 traceRecovery("GET /overview released")
                             }
-                            if (path.endsWith("/tasks") && mutations.size == 1) {
-                                traceRecovery("GET /tasks recovery refresh waiting")
+                            if (path.endsWith("/skills") && mutations.size == 1) {
+                                traceRecovery("GET /skills recovery refresh waiting")
                                 recoveryRefreshStarted.countDown()
                                 check(allowRecoveryRefresh.await(20, TimeUnit.SECONDS))
-                                traceRecovery("GET /tasks recovery refresh released")
+                                traceRecovery("GET /skills recovery refresh released")
                             }
                         }
-                        if (path.endsWith("/tasks") && failRefresh.get())
+                        if (path.endsWith("/skills") && failRefresh.get())
                             return MockResponse()
                                 .setResponseCode(409)
                                 .setBody("""{"error":"Lecture refusée"}""")
@@ -278,20 +238,6 @@ abstract class ResourceSaveCases {
                 CairnTheme {
                     if (state.installation != null && !closed.get()) {
                         when (kind) {
-                            "tasks" ->
-                                TaskEditor(
-                                    vm,
-                                    state,
-                                    null,
-                                    draft =
-                                        build.cairn.contracts.MissionSettings(
-                                            name = "Original",
-                                            prompt = "Brief",
-                                            agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
-                                            skills = null,
-                                        ),
-                                    close = { closed.set(true) },
-                                )
                             "projects",
                             "import" ->
                                 ProjectEditor(

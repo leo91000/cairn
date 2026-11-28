@@ -1561,10 +1561,14 @@ async fn gateway_calls_recheck_the_requesters_resource_coverage() {
 }
 
 #[tokio::test]
-async fn cancelled_mission_observations_stop_before_the_next_host_effect() {
+async fn cancelled_conversation_observations_stop_before_the_next_host_effect() {
     let f = Fixture::new().await;
     f.set(json!([contribution("condition", "ready", json!([]))]))
         .await;
+    let run = f.s.store.run(&f.run).await.unwrap();
+    f.s.chat_acknowledge(&f.run, text(&run["chatExecution"], "messageId"))
+        .await
+        .unwrap();
     f.marker("condition-pending").await;
     let scheduled = cairn_installation::waits::schedule(
         &f.s,
@@ -1581,7 +1585,7 @@ async fn cancelled_mission_observations_stop_before_the_next_host_effect() {
         .change_run(
             &f.run,
             cairn_installation::runs::RunChanges {
-                status: Some(cairn_contracts::RunStatus::Waiting),
+                status: Some(cairn_contracts::RunStatus::Succeeded),
                 recovery_pending: Some(false),
                 ..Default::default()
             },

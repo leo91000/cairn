@@ -1,5 +1,8 @@
 # Durable mission waits
 
+Historical design before [ADR-0094](adr/0094-programmations-as-clock-hook-rules.md).
+The current [wait contract](WAIT-FOR.md) applies to conversations.
+
 Missions and conversations share `waits`: input validation, idempotency, run dependency
 cycle detection, authorization and plugin observation. The owner stores the wakeup
 on the conversation or the mission run. Existing conversation behavior is unchanged.

@@ -178,7 +178,8 @@ class MemberConversationTest {
                 lifecycle = "trash",
                 purgeAt = System.currentTimeMillis() + 86_400_000,
             )
-        asMember(trashed, AtomicReference("[]")) { _, waitFor ->
+        asMember(trashed, AtomicReference("[]")) { vm, waitFor ->
+            waitFor { vm.state.value.usableAgents == emptyList<String>() }
             waitFor {
                 compose
                     .onAllNodesWithText("Cette conversation est dans la corbeille.")

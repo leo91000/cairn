@@ -1,6 +1,5 @@
 import type { Provider } from '../../../packages/contracts/accounts'
 import type { ChatView } from '../../../packages/contracts/chats'
-import type { RunListItem, Task } from '../../../packages/contracts/contracts'
 import type { TimelineEntry } from '../../../packages/contracts/live'
 import type { ActivityEntry } from './activity'
 import type { UsableAgents } from './agent-use'
@@ -23,13 +22,8 @@ export function identityColor(key: string) {
 
 export const initial = (name: string) => name.trim().match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? '?'
 
-export type FilKind = 'question' | 'failed' | 'failed-mission' | 'review' | 'unread' | 'running' | 'queued' | 'waiting' | 'snoozed' | 'set-aside' | 'paused' | 'suspended' | 'recent'
+export type FilKind = 'question' | 'failed' | 'review' | 'unread' | 'running' | 'queued' | 'waiting' | 'snoozed' | 'paused' | 'suspended' | 'recent'
 
-/**
- * Why a blocked mission no longer asks for the user: it waits on the agent work that started it,
- * on an outside system, or the user dismissed it.
- */
-export type SetAside = 'requester' | 'external' | 'dismissed'
 export interface FilItem {
   key: string
   kind: FilKind
@@ -46,27 +40,30 @@ export interface FilItem {
   unread?: boolean
   /** Observed question/turn timestamp to acknowledge. */
   readAt?: number
+  /** Latest observed activity that a snooze is allowed to cover. */
+  snoozeAt?: number
   /** The opening of the agent's final message, for finished work not read yet. */
   preview?: string
-  chatId?: string
-  taskId?: string
-  runId?: string
-  /** A waiting conversation's deadline: when it resumes, or at the latest for a condition. */
+  chatId: string
+  /** A waiting or snoozed conversation's deadline. */
   wakeAt?: number
   /** It waits for a condition, so it may resume before `wakeAt`. */
   condition?: boolean
   /** Its result already arrived: it resumes as soon as capacity allows. */
   resolved?: boolean
-  /** A mission's outcome that is not complete: what its actions apply to. */
-  outcome?: 'blocked' | 'needs_input'
-  /** Why a blocked mission sits in Recent rather than For you. */
-  setAside?: SetAside
-  /** The conversation or mission that started this one, while it still exists. */
+  /** A conversation's blocked outcome that needs review. */
+  outcome?: 'blocked'
+  /** The conversation that delegated this one, while it still exists. */
   requester?: {
     title: string
     to: string
-    chatId?: string
-    runId?: string
+    chatId: string
+  }
+  /** The hook rule (or schedule) that started this conversation, if any (ADR-0094). */
+  originRule?: {
+    ruleId: string
+    ruleName: string
+    schedule: boolean
   }
   /** It finished as expected: its row shows no status label, only a quiet mark. */
   finished?: boolean
@@ -78,15 +75,9 @@ export interface Fil {
   recent: FilItem[]
 }
 
-/** Missions open beside the Fil, as conversations do, rather than in the Atelier. */
-export const filRunPath = (runId: string) => `/fil/runs/${runId}`
+export const outcomeLabels = { blocked: 'Blocked' } as const
 
-export const outcomeLabels = { blocked: 'Blocked', needs_input: 'Needs your input' } as const
-
-/** Only a blocked outcome can be dismissed; input the agent asked for can only be snoozed. */
-export const dismissible = (item: FilItem) => item.kind === 'review' && item.outcome === 'blocked'
-
-/** 9:00 tomorrow, local time: when a snoozed mission asks again. */
+/** 9:00 tomorrow, local time: default snooze deadline. */
 export function tomorrowMorning(now = Date.now()) {
   const date = new Date(now)
   date.setDate(date.getDate() + 1)
@@ -95,19 +86,19 @@ export function tomorrowMorning(now = Date.now()) {
 }
 
 /** Finished work waiting to be read, as opposed to what needs an answer or a decision. */
-export const isUnread = (item: FilItem) => item.unread ?? item.kind === 'unread'
+export const isUnread = (item: FilItem) => item.unread ?? (item.kind === 'unread' || item.kind === 'review')
 
 /**
- * What needs the user first (questions, failures, missions to review, then finished work they
- * have not read), then live work, waiting conversations, then recent conversations. Only the latest run of each mission
- * counts, and chat runs belong to their conversation. `read` holds marks taken on this page
- * before the server's lists reflect them, by the finish time that was read.
- *
- * A blocked mission asks the user only when it waits on them: one waiting on the agent work that
- * started it or on an outside system, or one the user dismissed, sits in Recent. A snoozed one
- * waits until `now` reaches its time.
+ * What needs the user first (questions, failures, blocked conversations to review, then finished
+ * work they have not read), then live work, waiting/snoozed conversations, then recent conversations.
+ * `read` holds marks taken on this page before the server's lists reflect them.
  */
-export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], read: Record<string, number> = {}, now = Date.now(), usable: UsableAgents = null): Fil {
+export function filOf(
+  chats: ChatView[],
+  read: Record<string, number> = {},
+  now = Date.now(),
+  usable: UsableAgents = null,
+): Fil {
   const unreadNow = (key: string, finishedAt: number | null | undefined) => !(read[key] >= (finishedAt ?? 0))
   const forYou: FilItem[] = []
   const live: FilItem[] = []
@@ -116,6 +107,18 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
   for (const chat of chats) {
     if (chat.lifecycle && chat.lifecycle !== 'active')
       continue
+    const snoozedUntil = chat.snoozedUntil
+    const readTimestamp = chat.readAt ?? chat.finishedAt ?? chat.updatedAt
+    const reminderDue = !!snoozedUntil && !!chat.unread && readTimestamp >= snoozedUntil
+    const isSnoozed = !!snoozedUntil && snoozedUntil > now && !reminderDue
+    const unread = !isSnoozed
+      && !!chat.unread
+      && unreadNow(`chat:${chat.id}`, readTimestamp)
+      && (reminderDue || !chat.requestedBy || chat.pendingQuestions > 0 || chat.outcome?.status === 'blocked')
+    const blocked = chat.status === 'succeeded' && chat.outcome?.status === 'blocked' ? chat.outcome : null
+    const requester = chat.requester
+      ? { title: chat.requester.title || 'New conversation', to: chatPath({ id: chat.requester.chatId }), chatId: chat.requester.chatId }
+      : undefined
     const base = {
       key: `chat:${chat.id}`,
       title: chat.title || 'New conversation',
@@ -126,21 +129,49 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       at: chat.updatedAt,
       to: chatPath(chat),
       chatId: chat.id,
-      readAt: chat.readAt ?? chat.finishedAt ?? chat.updatedAt,
-      unread: !!chat.unread && unreadNow(`chat:${chat.id}`, chat.readAt ?? chat.finishedAt)
-        && (!chat.requestedBy || chat.pendingQuestions > 0),
-      // A delegated conversation names the conversation that delegated it.
-      requester: chat.requester ? { title: chat.requester.title || 'New conversation', to: chatPath({ id: chat.requester.chatId }), chatId: chat.requester.chatId } : undefined,
+      readAt: readTimestamp,
+      snoozeAt: Math.max(readTimestamp, chat.lastActivityAt ?? 0),
+      unread,
+      requester,
+      originRule: chat.originRule ?? undefined,
+    }
+    if (isSnoozed) {
+      waiting.push({
+        ...base,
+        kind: 'snoozed',
+        subtitle: 'Snoozed',
+        wakeAt: snoozedUntil,
+      })
     }
     // A question only those with access to its agent may answer waits for them.
-    if (chat.pendingQuestions > 0 && !canDirectChat(usable, chat, chats)) {
+    else if (chat.pendingQuestions > 0 && !canDirectChat(usable, chat, chats)) {
       waiting.push({ ...base, kind: 'waiting', subtitle: 'Waiting for someone with access' })
     }
     else if (chat.pendingQuestions > 0) {
       forYou.push({ ...base, kind: 'question', subtitle: chat.pendingQuestions > 1 ? `${chat.pendingQuestions} questions need your answer` : 'Needs your answer' })
     }
-    else if (chat.status === 'failed' || chat.status === 'interrupted') {
-      forYou.push({ ...base, kind: 'failed', subtitle: chat.status === 'failed' ? 'Failed' : 'Interrupted' })
+    else if (chat.status === 'failed' || chat.status === 'interrupted' || (chat.paused && chat.error)) {
+      forYou.push({ ...base, kind: 'failed', subtitle: chat.error || (chat.status === 'interrupted' ? 'Interrupted' : 'Failed') })
+    }
+    else if (blocked && (unread || !chat.wakeup || chat.paused)) {
+      const item = {
+        ...base,
+        at: chat.finishedAt ?? chat.updatedAt,
+        outcome: 'blocked' as const,
+        subtitle: `Blocked · ${blocked.reason}`,
+      }
+      if (unread)
+        forYou.push({ ...item, kind: 'review' })
+      else
+        recent.push({ ...item, kind: 'recent' })
+    }
+    else if (reminderDue && unread) {
+      forYou.push({
+        ...base,
+        kind: 'unread',
+        at: readTimestamp,
+        subtitle: 'Snooze ended',
+      })
     }
     else if (chat.paused) {
       recent.push({ ...base, kind: 'paused', subtitle: 'Paused' })
@@ -183,141 +214,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
         ...base,
         kind: 'recent',
         finished: chat.status === 'succeeded',
-        subtitle: chat.status === 'succeeded' ? 'Finished' : chat.paused ? 'Paused' : [chat.agentName, chat.projectName].filter(Boolean).join(' · '),
-      })
-    }
-  }
-
-  const latest = new Map<string, RunListItem>()
-  for (const run of runs) {
-    if (run.trigger === 'chat')
-      continue
-    const current = latest.get(run.taskId)
-    if (!current || run.createdAt > current.createdAt)
-      latest.set(run.taskId, run)
-  }
-
-  // The work that started a mission, while it is still there to act.
-  function requesterOf(run: RunListItem): FilItem['requester'] {
-    const { chatId, taskId } = run.requestedBy ?? {}
-    const chat = chatId ? chats.find(chat => chat.id === chatId && (!chat.lifecycle || chat.lifecycle === 'active')) : undefined
-    if (chat)
-      return { title: chat.title || 'New conversation', to: chatPath(chat), chatId: chat.id }
-    const mission = taskId ? tasks.find(task => task.id === taskId && !task.archived) : undefined
-    const missionRun = mission && latest.get(mission.id)
-    if (mission && missionRun)
-      return { title: mission.name, to: filRunPath(missionRun.id), runId: missionRun.id }
-    return undefined
-  }
-
-  for (const task of tasks) {
-    const run = latest.get(task.id)
-    if (task.archived || !run)
-      continue
-    const base = {
-      key: `task:${task.id}`,
-      title: task.name,
-      agent: run.agentName,
-      agentKey: task.agentId,
-      harness: run.provider ?? undefined,
-      project: null,
-      at: run.finishedAt ?? run.startedAt ?? run.createdAt,
-      to: filRunPath(run.id),
-      taskId: task.id,
-      runId: run.id,
-      readAt: run.finishedAt ?? undefined,
-      unread: !!run.unread && unreadNow(`task:${task.id}`, run.finishedAt),
-    }
-    if (isExclusivelySuspended(run)) {
-      live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
-    }
-    else if (isQuotaWait(run)) {
-      waiting.push({ ...base, kind: 'waiting', subtitle: 'Waiting for quota' })
-    }
-    // A mission that scheduled its continuation resumes on its own, like a chat.
-    else if (run.status === 'waiting') {
-      waiting.push({
-        ...base,
-        kind: 'waiting',
-        subtitle: run.wakeup?.reason || 'Mission waiting for continuation',
-        wakeAt: run.wakeup?.wakeAt,
-        condition: !!run.wakeup?.condition,
-        resolved: !!run.wakeup?.observation,
-      })
-    }
-    else if (run.status === 'running' || run.status === 'queued') {
-      live.push({ ...base, kind: run.status === 'running' ? 'running' : 'queued', subtitle: run.status === 'running' ? 'Mission running' : 'Mission needs a free runner' })
-    }
-    else if (run.status === 'failed' || run.status === 'interrupted') {
-      forYou.push({ ...base, kind: 'failed-mission', subtitle: run.error?.split('\n')[0] || (run.status === 'failed' ? 'Mission failed' : 'Mission interrupted') })
-    }
-    else if (run.status === 'succeeded' && run.outcome && run.outcome.status !== 'completed') {
-      const outcome = run.outcome.status
-      const reason = `${outcomeLabels[outcome]} · ${run.outcome.reason}`
-      // A requester that is gone leaves the user to act.
-      const requester = run.outcome.waitingOn === 'requester' ? requesterOf(run) : undefined
-      const until = run.dismissal?.until
-      if (requester) {
-        recent.push({
-          ...base,
-          kind: 'set-aside',
-          outcome,
-          setAside: 'requester',
-          requester,
-          subtitle: `Waiting on ${requester.title}`,
-        })
-      }
-      else if (run.outcome.waitingOn === 'external') {
-        recent.push({
-          ...base,
-          kind: 'set-aside',
-          outcome,
-          setAside: 'external',
-          subtitle: 'Waiting on an outside check',
-        })
-      }
-      else if (run.dismissal && !until && outcome === 'blocked') {
-        recent.push({
-          ...base,
-          kind: 'set-aside',
-          outcome,
-          setAside: 'dismissed',
-          subtitle: 'Dismissed',
-        })
-      }
-      else if (until && until > now) {
-        waiting.push({
-          ...base,
-          kind: 'snoozed',
-          outcome,
-          subtitle: `Snoozed · ${reason}`,
-          wakeAt: until,
-        })
-      }
-      else {
-        forYou.push({
-          ...base,
-          kind: 'review',
-          outcome,
-          subtitle: reason,
-        })
-      }
-    }
-    else if (run.status === 'succeeded' && base.unread) {
-      forYou.push({
-        ...base,
-        kind: 'unread',
-        subtitle: 'Mission finished',
-        finished: true,
-        preview: run.preview || undefined,
-      })
-    }
-    else {
-      recent.push({
-        ...base,
-        kind: 'recent',
-        finished: run.status === 'succeeded',
-        subtitle: run.status === 'succeeded' ? 'Mission finished' : run.status,
+        subtitle: chat.status === 'succeeded' ? 'Finished' : [chat.agentName, chat.projectName].filter(Boolean).join(' · '),
       })
     }
   }
@@ -338,24 +235,21 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
 /** Compact reception views: acknowledging a notification never changes its execution status. */
 export function filViews(fil: Fil) {
   const all = [...fil.forYou, ...fil.live, ...fil.waiting, ...fil.recent].sort((a, b) => b.at - a.at)
-  const ongoing = all.filter(item => ['question', 'running', 'queued', 'waiting', 'snoozed', 'suspended', 'review'].includes(item.kind)
-    || (item.kind === 'set-aside' && item.setAside !== 'dismissed'))
+  const ongoing = all.filter(item => ['question', 'running', 'queued', 'waiting', 'snoozed', 'suspended', 'review'].includes(item.kind))
   return { unread: all.filter(isUnread), ongoing, all }
 }
 
 /**
- * Rows in reading order, each delegated conversation or mission right below the work that
+ * Rows in reading order, each delegated conversation right below the conversation that
  * started it when both are listed. One that started without its requester in the list stays
  * in place and names it instead.
  */
 export function filThread(items: FilItem[]): { item: FilItem, nested: boolean }[] {
-  const byChat = new Map(items.filter(item => item.chatId).map(item => [item.chatId, item]))
-  const byRun = new Map(items.filter(item => item.runId).map(item => [item.runId, item]))
+  const byChat = new Map(items.map(item => [item.chatId, item]))
   const childrenOf = new Map<FilItem, FilItem[]>()
   const roots: FilItem[] = []
   for (const item of items) {
-    const { chatId, runId } = item.requester ?? {}
-    const parent = (chatId && byChat.get(chatId)) || (runId && byRun.get(runId)) || undefined
+    const parent = item.requester?.chatId ? byChat.get(item.requester.chatId) : undefined
     if (parent && parent !== item)
       childrenOf.set(parent, [...childrenOf.get(parent) ?? [], item])
     else
@@ -377,39 +271,6 @@ export function filThread(items: FilItem[]): { item: FilItem, nested: boolean }[
   // A requester cycle has no root: keep those rows rather than losing them.
   items.forEach(item => place(item, false))
   return rows
-}
-
-/** A Fil row, or a run of quiet missions folded into one. */
-export type FilEntry = { item: FilItem, nested: boolean, folded?: undefined } | { item: FilItem, nested: false, folded: FilItem[] }
-
-/**
- * Folds consecutive missions that finished as expected and were read into one row, so that
- * scheduled checks stop crowding the work worth reading. A lone one, a mission with delegated
- * work below it, and nested rows stay as they are.
- */
-export function filFolds(rows: { item: FilItem, nested: boolean }[]): FilEntry[] {
-  const quiet = (index: number) => {
-    const { item, nested } = rows[index]
-    return !nested && !!item.taskId && !!item.finished && !isUnread(item) && !rows[index + 1]?.nested
-  }
-
-  const entries: FilEntry[] = []
-  for (let index = 0; index < rows.length;) {
-    let end = index
-    while (end < rows.length && quiet(end))
-      end++
-    if (end - index >= 2) {
-      const folded = rows.slice(index, end).map(row => row.item)
-      entries.push({ item: folded[0], nested: false, folded })
-      index = end
-    }
-    else {
-      entries.push(rows[index])
-      index++
-    }
-  }
-
-  return entries
 }
 
 /**

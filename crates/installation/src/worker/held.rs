@@ -795,6 +795,7 @@ mod tests {
             .unwrap();
         service.store.transaction(move |db| {
             let record = db.add_run_fixture(&json!({"id":"observed","taskId":"observed","status":"succeeded","snapshot":{"agent":agent,"projects":[]}}),None)?;
+            db.save_conversation_boundary(&json!({ "id": "observed", "runId": "observed" }))?;
             let mut saved = RunCheckpoint::fresh(None);
             saved.runner_id = Some(Some("attempt".into()));
             saved.completed = Some(true);

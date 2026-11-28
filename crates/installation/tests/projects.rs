@@ -1,5 +1,4 @@
 use common::AgentFixture;
-use common::MissionFixture;
 
 mod common;
 
@@ -7,7 +6,6 @@ use axum::{body::Body, http::StatusCode};
 use cairn_contracts::{CreateProjectInput, ProjectId, ReplaceProjectInput};
 use cairn_installation::{
     auth::{InstallationIdentity, InstallationRole},
-    config::MAIN_AGENT_ID,
     service::Service,
 };
 use serde_json::{Value, json};
@@ -215,11 +213,6 @@ async fn project_deletion_keeps_current_reference_rules_and_historical_snapshots
         .0,
         StatusCode::OK
     );
-    let task = s.task_fixture(json!({ "name": "Uses project", "prompt": "Work", "agentId": MAIN_AGENT_ID, "projectId": id }), None).await.unwrap();
-    assert!(s.delete_project(project.id, |_| Ok(())).await.is_err());
-    s.remove_mission_fixture(task["id"].as_str().unwrap())
-        .await
-        .unwrap();
     let run = json!({
         "id": cairn_installation::config::id(),
         "taskId": "snapshot",

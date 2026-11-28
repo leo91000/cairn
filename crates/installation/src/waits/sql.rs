@@ -12,8 +12,7 @@ use std::collections::HashMap;
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE durable_wakeups(
     key INTEGER PRIMARY KEY,
-    chat_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
-    mission_run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+    chat_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     id TEXT NOT NULL CHECK(length(id)>0),
     message_id TEXT,
     reason TEXT NOT NULL,
@@ -28,11 +27,9 @@ CREATE TABLE durable_wakeups(
     display TEXT CHECK(display IS NULL OR json_valid(display)),
     next_check_at INTEGER CHECK(next_check_at BETWEEN 0 AND 9007199254740991),
     last_error TEXT,
-    CHECK((chat_id IS NOT NULL) != (mission_run_id IS NOT NULL)),
     CHECK((time_kind IS NULL AND time_seconds IS NULL AND time_date IS NULL) OR (time_kind='delay' AND time_seconds IS NOT NULL AND time_date IS NULL) OR (time_kind='at' AND time_date IS NOT NULL AND time_seconds IS NULL))
 );
-CREATE UNIQUE INDEX durable_wakeups_chat ON durable_wakeups(chat_id) WHERE chat_id IS NOT NULL;
-CREATE UNIQUE INDEX durable_wakeups_mission ON durable_wakeups(mission_run_id) WHERE mission_run_id IS NOT NULL;
+CREATE UNIQUE INDEX durable_wakeups_chat ON durable_wakeups(chat_id);
 CREATE TABLE wait_conditions(
     wakeup_key INTEGER NOT NULL REFERENCES durable_wakeups(key) ON DELETE CASCADE,
     position INTEGER NOT NULL CHECK(position>=0),
@@ -176,11 +173,15 @@ fn attach_conditions(
 
 impl Db<'_> {
     pub fn wakeup(&self, chat: bool, id: &str) -> Result<Option<ChatWakeup>> {
-        let owner = if chat { "chat_id" } else { "mission_run_id" };
+        let chat_id = if chat {
+            "?"
+        } else {
+            "(SELECT id FROM conversations WHERE run_id=?)"
+        };
         // One statement gives point readers an atomic header/member snapshot.
         // Integer child keys avoid repeating external UUIDs in every condition.
         let query = format!(
-            "SELECT w.{owner},{WAKEUP_COLUMNS},{CONDITION_COLUMNS} FROM durable_wakeups w LEFT JOIN wait_conditions c ON c.wakeup_key=w.key WHERE w.{owner}=? ORDER BY c.position"
+            "SELECT w.chat_id,{WAKEUP_COLUMNS},{CONDITION_COLUMNS} FROM durable_wakeups w LEFT JOIN wait_conditions c ON c.wakeup_key=w.key WHERE w.chat_id={chat_id} ORDER BY c.position"
         );
         let mut statement = self.0.prepare_cached(&query)?;
         let mut rows = statement.query([id])?;
@@ -220,10 +221,17 @@ impl Db<'_> {
             tx.commit()?;
             return Ok(result);
         }
-        let owner = if chat { "chat_id" } else { "mission_run_id" };
-        let query = format!(
-            "SELECT w.{owner},{WAKEUP_COLUMNS} FROM durable_wakeups w WHERE w.{owner} IS NOT NULL"
-        );
+        let (owner, join, filter) = if chat {
+            ("w.chat_id", "", "")
+        } else {
+            (
+                "conversation.run_id",
+                "JOIN conversations conversation ON conversation.id=w.chat_id",
+                "WHERE conversation.run_id IS NOT NULL",
+            )
+        };
+        let query =
+            format!("SELECT {owner},{WAKEUP_COLUMNS} FROM durable_wakeups w {join} {filter}");
         let mut rows = self
             .0
             .prepare_cached(&query)?
@@ -234,7 +242,7 @@ impl Db<'_> {
         }
         let mut conditions = HashMap::<String, Vec<(WaitCondition, WaitMemberProgress)>>::new();
         let query = format!(
-            "SELECT w.{owner},{CONDITION_COLUMNS} FROM durable_wakeups w JOIN wait_conditions c ON c.wakeup_key=w.key WHERE w.{owner} IS NOT NULL ORDER BY w.{owner},c.position"
+            "SELECT {owner},{CONDITION_COLUMNS} FROM durable_wakeups w JOIN wait_conditions c ON c.wakeup_key=w.key {join} {filter} ORDER BY {owner},c.position"
         );
         let mut statement = self.0.prepare_cached(&query)?;
         for value in statement.query_map([], |row| {
@@ -290,11 +298,11 @@ impl Db<'_> {
     }
 
     fn write_wakeup(&self, chat: bool, owner_id: &str, wakeup: Option<&ChatWakeup>) -> Result<()> {
-        let owner = if chat { "chat_id" } else { "mission_run_id" };
-        self.0.execute(
-            &format!("DELETE FROM durable_wakeups WHERE {owner}=?"),
-            [owner_id],
-        )?;
+        if !chat {
+            return Ok(());
+        }
+        self.0
+            .execute("DELETE FROM durable_wakeups WHERE chat_id=?", [owner_id])?;
         let Some(w) = wakeup else {
             return Ok(());
         };
@@ -320,11 +328,10 @@ impl Db<'_> {
         };
         self.0
             .prepare_cached(
-                "INSERT INTO durable_wakeups(chat_id,mission_run_id,id,message_id,reason,seconds,created_at,wake_at,group_mode,time_kind,time_seconds,time_date,observation,display,next_check_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO durable_wakeups(chat_id,id,message_id,reason,seconds,created_at,wake_at,group_mode,time_kind,time_seconds,time_date,observation,display,next_check_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             )?
             .execute(params![
-                chat.then_some(owner_id),
-                (!chat).then_some(owner_id),
+                owner_id,
                 w.id,
                 w.message_id,
                 w.reason,

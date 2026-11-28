@@ -101,59 +101,6 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
             .unwrap()
     );
 
-    // The current mission view must retain the plugin's revocation lineage through
-    // SQL reload, replacement and the frozen launch snapshot, independently of its author.
-    let mission_owner =
-        auth::InstallationIdentity::trusted(auth::InstallationRole::Owner, "fixture-owner");
-    let mission = f.service.task_as_fixture(json!({
-        "name": "Retained bot commitment", "prompt": "Follow the approved delegation", "agentId": f.agent["id"],
-        "cron": "0 9 * * *", "timezone": "UTC"
-    }), None, Some(&mission_owner)).await.unwrap();
-    let mut stored = f
-        .service
-        .store
-        .mission(text(&mission, "id"))
-        .await
-        .unwrap()
-        .unwrap();
-    stored.native_plugin_grants =
-        serde_json::from_value(run["nativePluginGrants"].clone()).unwrap();
-    f.service
-        .store
-        .transaction(move |db| db.save_mission(&stored))
-        .await
-        .unwrap();
-    let replaced = f
-        .service
-        .task_as_fixture(
-            json!({ "prompt": "Retain the approved delegation after editing" }),
-            Some(text(&mission, "id")),
-            Some(&mission_owner),
-        )
-        .await
-        .unwrap();
-    assert_eq!(replaced["nativePluginGrants"], run["nativePluginGrants"]);
-    let restarted = Service::new(f.service.config.clone()).await.unwrap();
-    assert_eq!(
-        serde_json::to_value(
-            restarted
-                .store
-                .mission(text(&mission, "id"))
-                .await
-                .unwrap()
-                .unwrap()
-        )
-        .unwrap(),
-        replaced
-    );
-    let queued = f
-        .service
-        .enqueue(text(&mission, "id"), "schedule", None)
-        .await
-        .unwrap();
-    assert_eq!(queued["nativePluginGrants"], run["nativePluginGrants"]);
-    assert_eq!(queued["snapshot"]["task"], replaced);
-
     let original = serde_json::to_value(&connection).unwrap();
     for (label, field, value) in [
         ("disabled", "enabled", json!(false)),
@@ -177,15 +124,6 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
                 .await
                 .unwrap(),
             "{label}"
-        );
-        let (check, target) = (queued.clone(), node.clone());
-        assert!(
-            !f.service
-                .store
-                .read(move |db| policy::allows(db, &check, &target))
-                .await
-                .unwrap(),
-            "Mission lineage: {label}"
         );
         f.service
             .store
@@ -217,30 +155,6 @@ async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
     )
     .await
     .unwrap();
-    let paused = f
-        .service
-        .task_as_fixture(
-            json!({ "enabled": false }),
-            Some(text(&mission, "id")),
-            Some(&mission_owner),
-        )
-        .await
-        .unwrap();
-    assert_eq!(paused["nativePluginGrants"], replaced["nativePluginGrants"]);
-    assert_eq!(
-        f.service.store.run(text(&queued, "id")).await.unwrap()["snapshot"]["task"],
-        replaced
-    );
-    let denied = f
-        .service
-        .task_as_fixture(
-            json!({ "enabled": true }),
-            Some(text(&mission, "id")),
-            Some(&mission_owner),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(denied.status, 403);
     assert!(
         !f.service
             .store
@@ -320,44 +234,6 @@ async fn native_mode_preview_detects_concurrent_access_changes_and_agent_request
         .await;
     assert_eq!(status, StatusCode::OK);
     assert!(changed["node"]["nativeModeProposal"].is_null());
-}
-
-#[tokio::test]
-async fn converting_a_mission_retains_native_authority_and_rejects_unauthorized_callers() {
-    let f = Fixture::new().await;
-    let mut run = f.run();
-    run["status"] = "succeeded".into();
-    run["sessionId"] = "saved-session".into();
-    run["projectId"] = Value::Null;
-    run["snapshot"]["task"] =
-        json!({ "name": "Native mission", "prompt": "Inspect the workspace" });
-    let run_id = run["id"].as_str().unwrap().to_owned();
-    let saved = run.clone();
-    f.service
-        .store
-        .transaction(move |db| {
-            db.add_run_fixture(&saved, None)?;
-            db.save_checkpoint_boundary(saved["id"].as_str().unwrap(), &json!({ "prepared": {} }))
-        })
-        .await
-        .unwrap();
-    let run = f.service.store.run(&run_id).await.unwrap();
-    let path = format!("/api/runs/{run_id}/chat");
-    let (status, _) = f.call(&f.other, "POST", &path, json!({})).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(f.service.chat_list().await.unwrap().is_empty());
-    assert_eq!(f.service.store.run(&run_id).await.unwrap(), run);
-    let (status, chat) = f.call(&f.trusted, "POST", &path, json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{chat}");
-    assert!(chat.get("nativePrincipals").is_none());
-    let chat = f
-        .service
-        .conversation_boundary(text(&chat, "id"))
-        .await
-        .unwrap();
-    assert_eq!(chat["nativePrincipals"], json!([TRUSTED]));
-    assert_eq!(chat["nativeAuthorityNodes"], json!([f.node["id"]]));
-    assert_eq!(chat["nativeProvenanceUnknown"], false);
 }
 
 #[tokio::test]

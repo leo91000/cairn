@@ -44,8 +44,9 @@ pub mod mcp_client;
 pub mod mcp_oauth;
 pub mod mcp_server;
 pub mod mcps;
+pub mod memberships;
 pub mod microvm;
-pub mod missions;
+pub(crate) mod migrations;
 pub mod models;
 pub mod native;
 pub mod network;
@@ -104,6 +105,5 @@ pub(crate) mod plugin_grant_fixture;
 
 #[cfg(test)]
 pub(crate) use common::{
-    account_fixture, agent_fixture, attempt_fixture, mission_fixture, node_fixture, relay_fixture,
-    run_fixture,
+    account_fixture, agent_fixture, attempt_fixture, node_fixture, relay_fixture, run_fixture,
 };

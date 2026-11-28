@@ -84,7 +84,7 @@ fn continue_run(
     snapshot: &Value,
     execution: ChatExecution,
 ) -> Result<()> {
-    super::continue_run(db, &fixture_chat(chat), run, snapshot, execution)
+    super::continue_run(db, &fixture_chat(chat), run, snapshot, execution, None)
 }
 
 #[tokio::test]
@@ -171,7 +171,7 @@ async fn stale_chat_preparation_preserves_pending_environment_retirement() {
             recovery_pending: Some(true),
             ..Default::default()
         })?;
-        let retiring = db.run("run")?.unwrap();
+        let mut retiring = db.run("run")?.unwrap();
         assert!(steering_run(db, &before_admission)?.is_none());
         let arrived = message["createdAt"].as_i64().unwrap();
         let plan = send(db, "chat", parse_message(json!({
@@ -179,6 +179,8 @@ async fn stale_chat_preparation_preserves_pending_environment_retirement() {
         }))?, None, &crate::native::policy::Origin::default())?;
         assert_eq!(plan["status"], "queued");
         assert!(conversation(db, "chat")?.wakeup.is_none());
+        // The run view now reflects the wait the follow-up cleared on its conversation.
+        retiring["wakeup"] = Value::Null;
         launch_turn(db, "chat", Some(stale.clone()), message, stale)?;
         assert_eq!(db.run("run")?.unwrap(), retiring);
         assert_eq!(db.messages("chat")?[0]["status"], "queued");
@@ -354,7 +356,7 @@ async fn a_merge_during_preparation_keeps_queued_work_unpaused() {
             preparation_failed(db, &transferred, Error::bad("Current preparation failed"))?;
             assert_eq!(db.conversation_boundary("chat")?.unwrap()["paused"], true);
             assert_eq!(
-                db.kv("chat-error:chat")?.unwrap(),
+                db.kv("chat-error:chat")?.unwrap()["message"],
                 "Current preparation failed"
             );
             Ok(())

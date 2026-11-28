@@ -1,6 +1,6 @@
 //! Permissions are edited on typed profiles. Resource lists are projections of
 //! the same relations used by enforcement; no resource JSON is authoritative.
-use common::MissionFixture;
+use common::ChatRunFixture;
 use common::node_fixture::*;
 use common::{McpFixture, StoreAgentFixture};
 
@@ -464,17 +464,9 @@ async fn deleting_an_agent_or_revoking_a_node_removes_its_live_grants() {
 async fn preview_counts_work_that_reduced_access_would_stop() {
     let owner = Owner::new().await;
     let agent = owner.create_agent("Busy").await;
-    let task = owner
-        .service
-        .task_fixture(
-            json!({ "name": "Nightly", "prompt": "Build", "agentId": agent["id"] }),
-            None,
-        )
-        .await
-        .unwrap();
     owner
         .service
-        .enqueue(text(&task, "id"), "manual", None)
+        .chat_run_fixture(text(&agent, "id"), None, "Build")
         .await
         .unwrap();
 

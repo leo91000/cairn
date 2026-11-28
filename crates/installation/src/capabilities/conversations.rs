@@ -101,11 +101,6 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
         description: "Create an empty conversation for an agent and optional project. Send a message separately to start execution.",
     },
     ChatOperation {
-        name: "convert_run_to_chat",
-        scope: "manage",
-        description: "Move a successfully completed mission run into Chats, preserving its session, workspace and history. The original mission schedule remains unchanged. No execution starts until a message is sent. Retrying returns the same chat.",
-    },
-    ChatOperation {
         name: "send_chat_message",
         scope: "run",
         description: "Send a message to a conversation. Supply a fresh UUID message.id; reuse it with identical content for safe retries, unless the message was cancelled or returned: send it again with a new id. Queue waits for the current turn; steer joins it. Starts agent work with its configured permissions. After a failed or stopped turn that holds nothing, a new message starts the next turn; after a stop, send the message first, then call set_chat_paused(false). If the turn still holds a message (one the agent may have received, including steering or an answer claimed after Stop, an answer, or a rule's or agent's message from before it ended), the conversation is paused and set_chat_paused(false) replays that turn first, then sends what was written since. If Antigravity asks for a new message, unpausing continues the queue without replaying the refused turn. Ordinary messages a person wrote that a failed or stopped turn never delivered are cancelled and returned to them (returnedTo); others stay queued behind a pause.",
@@ -148,7 +143,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "resume_chat",
         scope: "run",
-        description: "Resume a failed or stopped chat turn using its saved session, subject to existing recovery rules. An optional selection changes only this turn's model, reasoning and speed for the same coding agent; runId and turnId are required and guard against stale selections. An empty model resolves to the current catalog default unless preserveModel is true, which requires a blank saved model and keeps it blank. For Codex, an empty selection speed inherits the saved request and standard explicitly selects Standard. Mission runs do not support model selection. A turn whose message was returned to its author (turnReturned) cannot be resumed; that message continues the conversation instead. When Antigravity asks for a new message, send one to continue the preserved conversation. Use set_chat_paused(false) to resume queued follow-ups.",
+        description: "Resume a failed or stopped chat turn using its saved session, subject to existing recovery rules. An optional selection changes only this turn's model, reasoning and speed for the same coding agent; runId and turnId are required and guard against stale selections. An empty model resolves to the current catalog default unless preserveModel is true, which requires a blank saved model and keeps it blank. For Codex, an empty selection speed inherits the saved request and standard explicitly selects Standard. A turn whose message was returned to its author (turnReturned) cannot be resumed; that message continues the conversation instead. When Antigravity asks for a new message, send one to continue the preserved conversation. Use set_chat_paused(false) to resume queued follow-ups.",
     },
     ChatOperation {
         name: "restart_chat_session",
@@ -237,10 +232,6 @@ impl ChatOperation {
             ),
             "create_chat" => (
                 schema_for::<CreateChatInput>(Contract::Deserialize),
-                schema_for::<Chat>(Contract::Serialize),
-            ),
-            "convert_run_to_chat" => (
-                schema_for::<RunInput>(Contract::Deserialize),
                 schema_for::<Chat>(Contract::Serialize),
             ),
             "send_chat_message" => (
@@ -458,10 +449,6 @@ impl ChatOperation {
                 let input: CreateChatInput = decode(input)?;
                 serde_json::to_value(input)?
             }
-            "convert_run_to_chat" => {
-                let input: RunInput = decode(input)?;
-                serde_json::to_value(input)?
-            }
             "send_chat_message" => {
                 let input: SendChatMessageInput = decode(input)?;
                 serde_json::to_value(input)?
@@ -539,25 +526,6 @@ impl ChatOperation {
         }
         let result = crate::native::policy::DELEGATION
             .scope(origin, async {
-                if self.name == "convert_run_to_chat" {
-                    let authorize =
-                        crate::installation_mcp::management_authorization(s, bearer.as_deref())
-                            .await?;
-                    let run_id = crate::validation::text(&args, "runId").to_owned();
-                    let authorize = if let Some(account) = member_account.clone() {
-                        let guarded_run_id = run_id.clone();
-                        authorize.with_guard(move |db| {
-                            crate::agent_access::authorize_member_run_in(
-                                db,
-                                &account,
-                                &guarded_run_id,
-                            )
-                        })
-                    } else {
-                        authorize
-                    };
-                    return s.chat_from_run_live(&run_id, authorize).await;
-                }
                 crate::mcp_server::chat_tools::invoke(
                     s,
                     self.name,
@@ -572,7 +540,6 @@ impl ChatOperation {
         if matches!(
             self.name,
             "create_chat"
-                | "convert_run_to_chat"
                 | "rename_chat"
                 | "set_chat_paused"
                 | "stop_chat"

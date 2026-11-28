@@ -7,11 +7,6 @@ mod node_fixture;
 use node_fixture::DbNodeFixture;
 use run_fixture::DbRunFixture;
 
-#[path = "../tests/common/mission_fixture.rs"]
-mod mission_fixture;
-
-use mission_fixture::MissionFixture;
-
 #[path = "../tests/common/agent_fixture.rs"]
 mod agent_fixture;
 
@@ -56,7 +51,7 @@ async fn main() -> Result<()> {
     let arg = |index: usize| args.get(index).cloned().unwrap_or(Value::Null);
     let string = |index: usize| args.get(index).and_then(Value::as_str).unwrap_or("");
     let result = match operation {
-        "agent" | "project" | "task" | "enqueue" | "skill" | "detail" => {
+        "agent" | "project" | "skill" | "detail" | "queueChat" => {
             let service = open_service(config).await?;
             let existing = args.get(1).and_then(Value::as_str);
             match operation {
@@ -89,8 +84,22 @@ async fn main() -> Result<()> {
                     };
                     serde_json::to_value(project)?
                 }
-                "task" => service.task_fixture(arg(0), existing).await?,
-                "enqueue" => service.enqueue(string(0), "manual", None).await?,
+                "queueChat" => {
+                    let mut chat = service.chat_create(arg(0)).await?;
+                    chat["title"] = arg(1);
+                    let chat = service.store.save_conversation_boundary(chat).await?;
+                    let chat_id = text(&chat, "id");
+                    service
+                        .chat_send(
+                            chat_id,
+                            json!({
+                                "id": cairn_installation::config::id(),
+                                "text": string(2),
+                            }),
+                        )
+                        .await?;
+                    service.conversation_boundary(chat_id).await?
+                }
                 "skill" => service.skills.save(string(0), string(1), None).await?,
                 _ => service.chat_detail(string(0)).await?,
             }
@@ -176,7 +185,6 @@ async fn main() -> Result<()> {
                 "get" if string(0) == "agents" => {
                     db.agent_snapshot(string(1))?.unwrap_or(Value::Null)
                 }
-                "get" if string(0) == "tasks" => serde_json::to_value(db.mission(string(1))?)?,
                 "get" if string(0) == "nodes" => {
                     db.node_boundary(string(1))?.unwrap_or(Value::Null)
                 }
@@ -185,17 +193,12 @@ async fn main() -> Result<()> {
                 }
                 "get" => db.get(string(0), string(1))?.unwrap_or(Value::Null),
                 "list" if string(0) == "agents" => db.agent_snapshots()?.into(),
-                "list" if string(0) == "tasks" => serde_json::to_value(db.missions()?)?,
                 "list" if string(0) == "nodes" => db.nodes_boundary()?.into(),
                 "list" if string(0) == "chats" => db.conversations_boundary()?.into(),
                 "list" => db.list(string(0))?.into(),
                 "projects" => serde_json::to_value(db.projects()?)?,
                 "put" if string(0) == "agents" => {
                     serde_json::to_value(db.save_agent(&serde_json::from_value(arg(1))?)?)?
-                }
-                "put" if string(0) == "tasks" => {
-                    db.save_mission(&serde_json::from_value(arg(1))?)?;
-                    arg(1)
                 }
                 "put" if string(0) == "nodes" => db.put_node_fixture(&arg(1))?,
                 "put" if string(0) == "chats" => {
@@ -217,6 +220,29 @@ async fn main() -> Result<()> {
                 "put" => db.put(string(0), &arg(1))?,
                 "run" => db.run(string(0))?.unwrap_or(Value::Null),
                 "runs" => db.runs(None, None, 10000, 0, true)?.into(),
+                "chatRun" => {
+                    let chat_id = string(0);
+                    let mut chat = db
+                        .conversation(chat_id)?
+                        .ok_or_else(|| Error::bad("Fixture conversation not found."))?;
+                    let agent = db
+                        .agent_snapshot(&chat.agent_id)?
+                        .ok_or_else(|| Error::bad("Fixture agent not found."))?;
+                    let run_id = cairn_installation::config::id();
+                    let time = cairn_installation::config::now();
+                    let run = db.add_run_fixture(&json!({
+                        "id": run_id,
+                        "taskId": chat_id,
+                        "trigger": "chat",
+                        "status": "succeeded",
+                        "createdAt": time,
+                        "finishedAt": time,
+                        "snapshot": { "agent": agent, "task": { "name": string(1) }, "project": null }
+                    }), None)?;
+                    chat.run_id = Some(run_id);
+                    db.save_conversation(&chat)?;
+                    run
+                }
                 "addRun" => db.add_run_fixture(&arg(0), None)?,
                 "updateRun" => run_fixture::change_run_fixture(&db, string(0), &arg(1))?,
                 "deferNativeCleanup" => {

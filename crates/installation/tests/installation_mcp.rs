@@ -7,9 +7,8 @@ use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
 use common::AgentFixture;
 use common::McpFixture;
-use common::MissionFixture;
 use common::ProjectFixture;
-use common::run_fixture::RunFixture;
+use common::run_fixture::{RunFixture, add_conversation_run_fixture};
 
 mod common;
 
@@ -30,30 +29,21 @@ async fn service(root: &TempDir) -> Arc<Service> {
 }
 
 async fn active_run(s: &Service, agent: &Value) -> (Value, Value) {
-    let task = s
-        .task_fixture(
+    let chat = cairn_installation::config::id();
+    let mut run = s
+        .snapshot(
             json!({
-                "name": "Inspect Cairn", "prompt": "Inspect runs", "agentId": agent["id"],
-                "worktree": false,
+                "id": chat,
+                "name": "Inspect Cairn",
+                "prompt": "Inspect runs",
+                "agentId": agent["id"],
             }),
-            None,
+            "chat",
         )
         .await
         .unwrap();
-    let run = s
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
-        .await
-        .unwrap();
-    s.store
-        .change_run(
-            run["id"].as_str().unwrap(),
-            cairn_installation::runs::RunChanges {
-                status: Some(RunStatus::Running),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+    run["status"] = json!(RunStatus::Running);
+    add_conversation_run_fixture(&s.store, &mut run).await;
     let run = s.store.run(text(&run, "id")).await.unwrap();
     let configuration = s.mcps.run_configuration(s, &run).await.unwrap();
     (run, configuration)
@@ -235,7 +225,7 @@ async fn public_call(s: &Arc<Service>, scopes: &[&str], name: &str, args: Value)
     finish_resource_call(s, "/mcp", &token, name, response).await
 }
 
-async fn saved_mission(s: &Service, agent: &Value) -> Value {
+async fn saved_run(s: &Service, agent: &Value) -> Value {
     let (run, _) = active_run(s, agent).await;
     let id = text(&run, "id");
     common::set_checkpoint(
@@ -266,27 +256,6 @@ async fn saved_mission(s: &Service, agent: &Value) -> Value {
         .await
         .unwrap();
     s.store.run(id).await.unwrap()
-}
-
-fn mission_settings(mission: &Value) -> Value {
-    let mut settings = mission.clone();
-    settings.as_object_mut().unwrap().retain(|key, _| {
-        [
-            "name",
-            "prompt",
-            "agentId",
-            "projectId",
-            "skills",
-            "tags",
-            "cron",
-            "timezone",
-            "enabled",
-            "archived",
-            "worktree",
-        ]
-        .contains(&key.as_str())
-    });
-    settings
 }
 
 async fn account_http(

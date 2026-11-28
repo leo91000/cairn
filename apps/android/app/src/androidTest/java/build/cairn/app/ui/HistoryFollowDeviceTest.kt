@@ -54,11 +54,6 @@ class HistoryFollowDeviceTest : HistoryFollowCases() {
     fun compactConversationAndKeyboard() =
         ParityDeviceCases(compose).compactChatEvidenceAndSwitcher()
 
-    @Test
-    fun taskConversationAndManagement() = ParityDeviceCases(compose).taskConversationAndManagement()
-
-    @Test fun adaptiveTaskLayout() = ParityDeviceCases(compose).adaptiveTaskLayout()
-
     /**
      * Like EdgeEffect, the stretch only advances from its own draw and is plain, unobserved state.
      */

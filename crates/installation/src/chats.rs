@@ -11,6 +11,7 @@ pub(crate) mod side_questions;
 
 pub use crate::waits as wait_for;
 
+use cairn_contracts::ConversationLifecycle;
 pub use handoff::{PLAN_TURN, execution_text, with_invoked_skills};
 pub use questions::{Question, QuestionField, QuestionStatus};
 pub use side_questions::side_question_prefixes;
@@ -28,7 +29,7 @@ use crate::{
 pub(crate) use handoff::handoff_context;
 use questions::{find_question, questions, save_question};
 use rusqlite::OptionalExtension;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 pub use storage::{Conversation, Message, MessageAnswer};
@@ -188,13 +189,36 @@ fn conversation_view(db: &Db<'_>, chat: Conversation) -> Result<cairn_contracts:
     conversation_view_with_run(db, chat, run.as_ref())
 }
 
+#[derive(Deserialize, Serialize)]
+pub(crate) struct PreparationFailure {
+    pub(crate) message: String,
+    pub(crate) at: i64,
+}
+
+pub(crate) fn preparation_failure(
+    db: &Db<'_>,
+    chat: &Conversation,
+) -> Result<Option<PreparationFailure>> {
+    if chat.lifecycle != ConversationLifecycle::Active {
+        return Ok(None);
+    }
+    db.kv(&format!("chat-error:{}", chat.id))?
+        .map(|stored| match stored {
+            Value::String(message) => Ok(PreparationFailure {
+                message,
+                at: chat.updated_at,
+            }),
+            value => serde_json::from_value(value).map_err(Into::into),
+        })
+        .transpose()
+}
+
 fn conversation_view_with_run(
     db: &Db<'_>,
     chat: Conversation,
     run: Option<&Value>,
 ) -> Result<cairn_contracts::Chat> {
-    use cairn_contracts::{Chat, ChatRequester, ConversationLifecycle, ConversationStatus};
-    let active = chat.lifecycle == ConversationLifecycle::Active;
+    use cairn_contracts::{Chat, ChatRequester, ConversationStatus};
     let (pending_questions, question_at) = db.pending_question_summary(&chat.id)?;
     let agent_name =
         db.0.query_row(
@@ -256,15 +280,17 @@ fn conversation_view_with_run(
         })
         .transpose()?
         .flatten();
+    let origin_rule = crate::rules::engine::conversations::origin_rule_for_chat(db, &chat.id)?;
+    let person_participated = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM conversation_entry_writers WHERE chat_id=? AND writer='person')",
+        [&chat.id],
+        |row| row.get::<_, bool>(0),
+    )?;
     let compaction = Some(compaction_state(db, &chat, run)?);
     let coding_agent_switch = coding_agent::progress(db, &chat.id)?;
-    let error = if active {
-        db.kv(&format!("chat-error:{}", chat.id))?
-            .map(serde_json::from_value)
-            .transpose()?
-    } else {
-        None
-    };
+    let failure = preparation_failure(db, &chat)?;
+    let failure_at = failure.as_ref().map(|failure| failure.at);
+    let error = failure.map(|failure| failure.message);
     // Run-owned fields remain at A5/A10's explicit projection boundary.
     let run_field = |field: &str| run.as_ref().map_or(Value::Null, |run| run[field].clone());
     let provider = run
@@ -280,7 +306,9 @@ fn conversation_view_with_run(
             .transpose()?
             .unwrap_or(false),
         finished_at: serde_json::from_value(run_field("finishedAt"))?,
-        read_at: question_at.max(run_field("finishedAt").as_i64()),
+        read_at: question_at
+            .max(run_field("finishedAt").as_i64())
+            .max(failure_at),
         context_usage: serde_json::from_value(run_field("contextUsage"))?,
         account_wait_reason: serde_json::from_value(run_field("accountWaitReason"))?,
         account_required: serde_json::from_value(run_field("accountRequired"))?,
@@ -313,6 +341,14 @@ fn conversation_view_with_run(
         requested_by: chat.requested_by,
         wakeup: chat.wakeup,
         requester,
+        origin_rule,
+        person_participated,
+        outcome: run
+            .as_ref()
+            .and_then(|run| run.get("outcome"))
+            .filter(|value| !value.is_null())
+            .cloned(),
+        snoozed_until: None,
         provider,
         compaction,
         coding_agent_switch,
@@ -398,10 +434,8 @@ fn compaction_blocker(
             "Continue or resolve the last turn before compacting.".into(),
         ));
     }
-    if !run["workspaceCleanedAt"].is_null() {
-        return Ok(Some(
-            "This workspace has been cleaned up. Start a new chat.".into(),
-        ));
+    if let Err(error) = require_workspace_not_cleaned(run) {
+        return Ok(Some(error.message));
     }
     let (fresh_session, held_expired) = RunCheckpoint::compaction_flags_in(db, text(run, "id"))?;
     if held_expired {
@@ -467,7 +501,7 @@ fn compact(db: &Db<'_>, chat_id: &str, origin: &crate::native::policy::Origin) -
             "outcome": run["outcome"],
         }))?),
     };
-    continue_run(db, &chat, &run, &run, execution)?;
+    continue_run(db, &chat, &run, &run, execution, None)?;
     db.event(
         text(&run, "id"),
         &EventKind::Status,
@@ -761,13 +795,20 @@ fn require_sendable(
     )?;
     crate::nodes::require_node(&agent)?;
     task_projects(&agent, &serde_json::to_value(chat)?, &db.projects()?)?;
-    let cleaned = db
-        .run(chat.run_id.as_deref().unwrap_or(""))?
-        .is_some_and(|run| !run["workspaceCleanedAt"].is_null());
-    if cleaned {
-        return Err(Error::conflict(
-            "This workspace has been cleaned up. Start a new chat.",
-        ));
+    if let Some(run) = db.run(chat.run_id.as_deref().unwrap_or(""))? {
+        require_workspace_not_cleaned(&run)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn require_workspace_not_cleaned(run: &Value) -> Result<()> {
+    if !run["workspaceCleanedAt"].is_null() {
+        let message = if run["workspace"].is_string() {
+            "Workspace cleanup is in progress or incomplete. Finish cleanup before continuing."
+        } else {
+            "This workspace has been cleaned up. Start a new chat."
+        };
+        return Err(Error::conflict(message));
     }
     Ok(())
 }
@@ -940,10 +981,15 @@ pub(crate) fn send(
         }
         _ => false,
     };
-    if !expiry_owns_wait {
-        chat.wakeup = None;
-    }
+    let superseded_wait = if expiry_owns_wait {
+        None
+    } else {
+        chat.wakeup.take()
+    };
     db.save_conversation(&chat)?;
+    if let (Some(wakeup), Some(run_id)) = (superseded_wait, chat.run_id.as_deref()) {
+        continuation::settle_superseded_wait(db, run_id, &wakeup.id)?;
+    }
     if let Some((mut question, answers)) = answer {
         question.status = QuestionStatus::Answering;
         question.message_id = Some(values.id.clone());
@@ -1227,7 +1273,14 @@ fn preparation_failed(db: &Db<'_>, prepared: &Conversation, error: Error) -> Res
     } else {
         "Unable to prepare this conversation.".into()
     };
-    db.set(&format!("chat-error:{id}"), &shown.into(), None)
+    db.set(
+        &format!("chat-error:{id}"),
+        &serde_json::to_value(PreparationFailure {
+            message: shown,
+            at: now(),
+        })?,
+        None,
+    )
 }
 
 #[cfg(test)]

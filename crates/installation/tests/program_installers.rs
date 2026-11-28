@@ -1306,7 +1306,7 @@ async fn revoked_public_mcp_cannot_activate_an_approved_package_after_preparatio
 #[tokio::test]
 async fn revoked_agent_first_use_cannot_download_or_publish_a_program() {
     use cairn_installation::{config::MAIN_AGENT_ID, plugins::agents, validation::text};
-    use common::{AgentFixture, MissionFixture};
+    use common::{AgentFixture, ChatRunFixture};
     for metadata in [true, false] {
         let mut f = Fixture::new().await;
         common::reconfigure(&mut f.service, |config| {
@@ -1338,21 +1338,9 @@ async fn revoked_agent_first_use_cannot_download_or_publish_a_program() {
             .agent_fixture(json!({ "plugins": [instance] }), Some(MAIN_AGENT_ID))
             .await
             .unwrap();
-        let task = f
+        let (_, run) = f
             .service
-            .task_fixture(
-                json!({
-                    "name": "Probe",
-                    "agentId": MAIN_AGENT_ID,
-                    "prompt": "Probe",
-                }),
-                None,
-            )
-            .await
-            .unwrap();
-        let run = f
-            .service
-            .enqueue(text(&task, "id"), "manual", None)
+            .chat_run_fixture(MAIN_AGENT_ID, None, "Probe")
             .await
             .unwrap();
         let run_id = text(&run, "id").to_owned();

@@ -1,6 +1,6 @@
 mod common;
 
-use common::{RelayedInstallation, seeded_artifact};
+use common::{RelayedInstallation, seeded_artifact, seeded_conversation_artifact};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
@@ -143,7 +143,7 @@ async fn anonymous_links_stay_revoked_while_conversation_purge_removes_artifacts
     let server = tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
     let relay = RelayedInstallation::with_runner_url(Router::new(), runner_url).await;
     let bytes = b"Public purge sentinel";
-    let (run, artifact) = seeded_artifact(&relay, bytes, "text/plain").await;
+    let (chat, run, artifact) = seeded_conversation_artifact(&relay, bytes, "text/plain").await;
     let file = relay
         .installation
         .config
@@ -152,14 +152,6 @@ async fn anonymous_links_stay_revoked_while_conversation_purge_removes_artifacts
         .join(&artifact);
     let preview = file.with_file_name(format!("{artifact}.jpg"));
     tokio::fs::write(&preview, b"Preview purge sentinel")
-        .await
-        .unwrap();
-    let mut chat = relay.installation.chat_create(json!({})).await.unwrap();
-    chat["runId"] = run.clone().into();
-    relay
-        .installation
-        .store
-        .save_conversation_boundary(chat.clone())
         .await
         .unwrap();
     let shared = visibility(&relay, &run, &artifact, "public").await;
@@ -428,16 +420,9 @@ async fn artifact_reads_recheck_public_authorization_after_preparation() {
     for operation in ["list_run_artifacts", "read_run_artifact"] {
         for invalidation in ["none", "revoke", "expire", "trash", "purge"] {
             let relay = RelayedInstallation::new(Router::new()).await;
-            let (run, artifact) =
-                seeded_artifact(&relay, b"Private artifact sentinel", "text/plain").await;
-            let mut chat = relay.installation.chat_create(json!({})).await.unwrap();
-            chat["runId"] = run.clone().into();
-            relay
-                .installation
-                .store
-                .save_conversation_boundary(chat.clone())
-                .await
-                .unwrap();
+            let (chat, run, artifact) =
+                seeded_conversation_artifact(&relay, b"Private artifact sentinel", "text/plain")
+                    .await;
             let worker = std::env::var_os("CAIRN_TEST_CODE_WORKER")
                 .map(std::path::PathBuf::from)
                 .expect("Use the credential-isolating backend launcher");

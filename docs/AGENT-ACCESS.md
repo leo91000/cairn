@@ -19,7 +19,7 @@ Main and existing agents. The owner enables it in the web or Android agent edito
 It automatically supplies `cairn_installation` to Codex and Claude Code, without
 a server URL, personal access token, or OAuth setup. This delegates the complete
 public management catalogue across the installation: agents, projects, global
-and project skills, MCP connections, missions and runs. This authority applies
+and project skills, MCP connections, conversations and run history. This authority applies
 even when the agent's direct resource, plugin or node permissions are restricted.
 It includes changing other agents' permissions and managing their work. Account
 administration remains outside the public MCP catalogue.
@@ -35,18 +35,15 @@ cannot delegate further and a requester has at most five working tasks. Turning
 the power off is a reduction. See [delegated tasks](adr/0059-delegated-tasks.md).
 
 The `delete_agent` management tool removes an unused agent, including its saved
-portrait and plugin grants (GitHub accounts, 1Password). Main, agents referenced by tasks
-(including archived tasks), and agents with active work cannot be deleted. Move
-their tasks to another agent and finish or cancel active work first. Completed
-run history is preserved.
+portrait and plugin grants (GitHub accounts, 1Password). Main and agents with
+active work are protected. Finish or cancel active work before deleting the
+agent. Cairn retains its completed run history.
 
-New missions default to the calling agent when no agent ID is supplied; another
-agent can be selected explicitly. A mission uses its selected agent's permissions,
-plugin grants such as GitHub accounts and 1Password. Installation access can also inspect,
-cancel or wait for runs belonging to other agents in the installation. The owner
-delegates these operations through the agent setting; newly created scheduled
-missions use the owner's authorship, as with the existing management MCP. The
-ordinary author reconciliation still ends them if that owner's access ends.
+An installation agent can inspect, cancel or wait for work belonging to other
+agents, subject to each tool's authorization. It manages Clock rules for the
+person whose eligible conversation supplies the provenance required by ADR-0075.
+The rule keeps that person's authorship and current access. See
+[agent access to rules](HOOK-RULES.md#agents-with-installation-access).
 Disabling installation access denies active calls immediately. Completed,
 cancelled or superseded chat turns cannot reuse their token. Tokens issued
 without installation access cannot acquire it by enabling the setting; a new

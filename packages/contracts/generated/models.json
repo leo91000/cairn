@@ -1045,15 +1045,9 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
-        },
-        "tasks": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
         }
       },
       "required": [
-        "tasks",
         "chats",
         "runs"
       ],
@@ -1522,6 +1516,26 @@
           ],
           "description": "Resolved selection for the next implicit message, including changed defaults."
         },
+        "originRule": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ChatRuleOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The hook rule (including a clock schedule) that started this conversation."
+        },
+        "outcome": {
+          "additionalProperties": true,
+          "description": "Reported outcome of the conversation's latest turn (`completed` or `blocked`).",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "TaskOutcome"
+        },
         "paused": {
           "default": false,
           "type": "boolean"
@@ -1538,6 +1552,11 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "personParticipated": {
+          "default": false,
+          "description": "True once any person has written in this conversation.",
+          "type": "boolean"
         },
         "preview": {
           "default": null,
@@ -1681,6 +1700,16 @@
         "slug": {
           "default": "",
           "type": "string"
+        },
+        "snoozedUntil": {
+          "description": "The calling account's snooze deadline, in epoch milliseconds, until it is acknowledged.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "status": {
           "default": "idle",
@@ -2297,6 +2326,26 @@
       },
       "required": [
         "chatId"
+      ],
+      "type": "object"
+    },
+    "ChatRuleOrigin": {
+      "properties": {
+        "ruleId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "ruleName": {
+          "type": "string"
+        },
+        "schedule": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ruleId",
+        "ruleName"
       ],
       "type": "object"
     },
@@ -3370,6 +3419,52 @@
       ],
       "type": "object"
     },
+    "ConversationSnoozeAction": {
+      "description": "How an account snoozes a conversation until a later time, or brings it back early.\nA snooze lasts until its deadline or until the conversation has later activity.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "finishedAt": {
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "snooze",
+              "type": "string"
+            },
+            "until": {
+              "description": "At most 30 days ahead.",
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "finishedAt",
+            "until"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "restore",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "CreateAgentInput": {
       "additionalProperties": false,
       "properties": {
@@ -3436,22 +3531,6 @@
       "required": [
         "definition",
         "enabled"
-      ],
-      "type": "object"
-    },
-    "CreateMissionInput": {
-      "additionalProperties": false,
-      "properties": {
-        "creationId": {
-          "format": "uuid",
-          "type": "string"
-        },
-        "settings": {
-          "$ref": "#/definitions/MissionSettings"
-        }
-      },
-      "required": [
-        "settings"
       ],
       "type": "object"
     },
@@ -3750,18 +3829,6 @@
       "type": "object"
     },
     "DeleteHookRuleOutput": {
-      "additionalProperties": false,
-      "properties": {
-        "deleted": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "deleted"
-      ],
-      "type": "object"
-    },
-    "DeleteMissionOutput": {
       "additionalProperties": false,
       "properties": {
         "deleted": {
@@ -4919,12 +4986,22 @@
           "description": "Whether this version may reach native agents and conversations.",
           "type": "boolean"
         },
+        "nextRun": {
+          "description": "Next scheduled occurrence for an active clock rule, in epoch milliseconds.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "revision": {
           "description": "Changes with every write, including state changes.",
           "type": "string"
         },
         "source": {
-          "pattern": "^(app|publicMcp|installationAgent|duplicate|template)$",
+          "pattern": "^(app|publicMcp|installationAgent|duplicate|template|migration)$",
           "type": "string"
         },
         "updatedAt": {
@@ -4986,6 +5063,11 @@
         "liftBudget": {
           "type": "boolean"
         },
+        "runNow": {
+          "default": false,
+          "description": "Trigger this clock rule immediately without waiting for its next occurrence.",
+          "type": "boolean"
+        },
         "viewDetails": {
           "description": "Whether the triggering history shows payloads and action results.",
           "type": "boolean"
@@ -4999,6 +5081,7 @@
         "delete",
         "emergencyPause",
         "liftBudget",
+        "runNow",
         "viewDetails"
       ],
       "type": "object"
@@ -5279,6 +5362,16 @@
         "name": {
           "type": "string"
         },
+        "nextRun": {
+          "description": "Next scheduled occurrence for an active clock rule, in epoch milliseconds.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "revision": {
           "type": "string"
         },
@@ -5404,6 +5497,44 @@
           "required": [
             "type",
             "hook"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Cairn's clock hook: a 5-field cron schedule or a single date in an IANA timezone.",
+          "properties": {
+            "at": {
+              "format": "int64",
+              "maximum": 253402300799999,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "cron": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timezone": {
+              "default": "Europe/Paris",
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": {
+              "const": "clock",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "timezone"
           ],
           "type": "object"
         }
@@ -5576,7 +5707,7 @@
           "type": "string"
         },
         "source": {
-          "pattern": "^(app|publicMcp|installationAgent|duplicate|template)$",
+          "pattern": "^(app|publicMcp|installationAgent|duplicate|template|migration)$",
           "type": "string"
         },
         "version": {
@@ -5830,7 +5961,7 @@
           "minimum": 0,
           "type": "integer"
         },
-        "missions": {
+        "hookRules": {
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -5854,7 +5985,7 @@
         "runsByStatus",
         "agents",
         "projects",
-        "missions",
+        "hookRules",
         "concurrency"
       ],
       "type": "object"
@@ -6320,25 +6451,6 @@
       },
       "required": [
         "mcps"
-      ],
-      "type": "object"
-    },
-    "ListMissionsInput": {
-      "additionalProperties": false,
-      "type": "object"
-    },
-    "ListMissionsOutput": {
-      "additionalProperties": false,
-      "properties": {
-        "tasks": {
-          "items": {
-            "$ref": "#/definitions/Mission"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "tasks"
       ],
       "type": "object"
     },
@@ -7764,343 +7876,6 @@
       ],
       "type": "object"
     },
-    "Mission": {
-      "properties": {
-        "agentId": {
-          "format": "uuid",
-          "type": "string"
-        },
-        "archived": {
-          "default": false,
-          "type": "boolean"
-        },
-        "authorAccessId": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "authorId": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "authorRemoved": {
-          "type": "boolean"
-        },
-        "createdAt": {
-          "format": "int64",
-          "maximum": 9007199254740991,
-          "minimum": 0,
-          "type": "integer"
-        },
-        "cron": {
-          "default": null,
-          "maxLength": 100,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "enabled": {
-          "default": true,
-          "type": "boolean"
-        },
-        "id": {
-          "format": "uuid",
-          "type": "string"
-        },
-        "name": {
-          "maxLength": 100,
-          "minLength": 1,
-          "type": "string"
-        },
-        "nativeAuthorityNodes": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "nativeParentAccess": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "nativeParentRunId": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "nativePluginGrants": {
-          "items": {
-            "$ref": "#/definitions/MissionPluginGrant"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "nativePrincipals": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "nativeProvenanceUnknown": {
-          "type": "boolean"
-        },
-        "nextRun": {
-          "format": "int64",
-          "maximum": 9007199254740991,
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "projectId": {
-          "default": null,
-          "format": "uuid",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "prompt": {
-          "maxLength": 50000,
-          "minLength": 1,
-          "type": "string"
-        },
-        "revision": {
-          "type": "string"
-        },
-        "scheduleFailure": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ScheduleFailure"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "scheduleWaitReason": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "skills": {
-          "default": null,
-          "items": {
-            "maxLength": 160,
-            "type": "string"
-          },
-          "maxItems": 100,
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "tags": {
-          "default": [],
-          "items": {
-            "maxLength": 30,
-            "type": "string"
-          },
-          "maxItems": 10,
-          "type": "array"
-        },
-        "timezone": {
-          "default": "Europe/Paris",
-          "maxLength": 100,
-          "minLength": 1,
-          "type": "string"
-        },
-        "worktree": {
-          "default": true,
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "id",
-        "name",
-        "prompt",
-        "agentId",
-        "projectId",
-        "skills",
-        "tags",
-        "cron",
-        "timezone",
-        "enabled",
-        "archived",
-        "worktree",
-        "revision",
-        "createdAt",
-        "nextRun",
-        "authorId",
-        "authorAccessId",
-        "authorRemoved",
-        "scheduleWaitReason",
-        "scheduleFailure",
-        "nativePrincipals",
-        "nativeAuthorityNodes",
-        "nativeParentRunId",
-        "nativeParentAccess",
-        "nativeProvenanceUnknown",
-        "nativePluginGrants"
-      ],
-      "type": "object"
-    },
-    "MissionInput": {
-      "additionalProperties": false,
-      "properties": {
-        "taskId": {
-          "format": "uuid",
-          "type": "string"
-        }
-      },
-      "required": [
-        "taskId"
-      ],
-      "type": "object"
-    },
-    "MissionPluginGrant": {
-      "additionalProperties": false,
-      "properties": {
-        "authorId": {
-          "type": "string"
-        },
-        "connectionId": {
-          "type": "string"
-        },
-        "revision": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "connectionId",
-        "revision",
-        "authorId"
-      ],
-      "type": "object"
-    },
-    "MissionSettings": {
-      "additionalProperties": false,
-      "properties": {
-        "agentId": {
-          "format": "uuid",
-          "type": "string"
-        },
-        "archived": {
-          "default": false,
-          "type": "boolean"
-        },
-        "cron": {
-          "default": null,
-          "maxLength": 100,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "enabled": {
-          "default": true,
-          "type": "boolean"
-        },
-        "name": {
-          "maxLength": 100,
-          "minLength": 1,
-          "type": "string"
-        },
-        "projectId": {
-          "default": null,
-          "format": "uuid",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "prompt": {
-          "maxLength": 50000,
-          "minLength": 1,
-          "type": "string"
-        },
-        "skills": {
-          "default": null,
-          "items": {
-            "maxLength": 160,
-            "type": "string"
-          },
-          "maxItems": 100,
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "tags": {
-          "default": [],
-          "items": {
-            "maxLength": 30,
-            "type": "string"
-          },
-          "maxItems": 10,
-          "type": "array"
-        },
-        "timezone": {
-          "default": "Europe/Paris",
-          "maxLength": 100,
-          "minLength": 1,
-          "type": "string"
-        },
-        "worktree": {
-          "default": true,
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "name",
-        "prompt",
-        "agentId",
-        "projectId",
-        "skills",
-        "tags",
-        "cron",
-        "timezone",
-        "enabled",
-        "archived",
-        "worktree"
-      ],
-      "type": "object"
-    },
-    "MissionStateInput": {
-      "additionalProperties": false,
-      "properties": {
-        "archived": {
-          "type": "boolean"
-        },
-        "enabled": {
-          "type": "boolean"
-        },
-        "revision": {
-          "type": "string"
-        },
-        "taskId": {
-          "format": "uuid",
-          "type": "string"
-        }
-      },
-      "required": [
-        "taskId",
-        "revision",
-        "enabled",
-        "archived"
-      ],
-      "type": "object"
-    },
     "ModelCatalog": {
       "properties": {
         "checkedAt": {
@@ -9176,91 +8951,6 @@
           "type": "object"
         }
       ]
-    },
-    "OutcomeAsideAction": {
-      "description": "How an account sets a blocked mission outcome aside. Each applies until the\nmission finishes again; input the agent asked for can only be snoozed.",
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "finishedAt": {
-              "format": "int64",
-              "maximum": 9007199254740991,
-              "minimum": 1,
-              "type": "integer"
-            },
-            "kind": {
-              "const": "dismiss",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "finishedAt"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "finishedAt": {
-              "format": "int64",
-              "maximum": 9007199254740991,
-              "minimum": 1,
-              "type": "integer"
-            },
-            "kind": {
-              "const": "snooze",
-              "type": "string"
-            },
-            "until": {
-              "description": "At most 30 days ahead.",
-              "format": "int64",
-              "maximum": 9007199254740991,
-              "minimum": 1,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "kind",
-            "finishedAt",
-            "until"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "restore",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "OutcomeDismissal": {
-      "additionalProperties": false,
-      "description": "An outcome set aside by the calling account: dismissed (`until` null) or snoozed.",
-      "properties": {
-        "until": {
-          "format": "int64",
-          "maximum": 9007199254740991,
-          "minimum": 1,
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "until"
-      ],
-      "type": "object"
     },
     "PackageVersion": {
       "additionalProperties": false,
@@ -12156,11 +11846,21 @@
       "additionalProperties": false,
       "properties": {
         "finishedAt": {
-          "description": "Observed Chat.readAt or mission finish time, including questions and errors. Later work stays unread.",
+          "description": "Observed Chat.readAt or finish time, including questions and errors. Later work stays unread.",
           "format": "int64",
           "maximum": 9007199254740991,
           "minimum": 1,
           "type": "integer"
+        },
+        "snoozedUntil": {
+          "description": "The observed deadline when explicitly marking a snoozed conversation as read.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "target": {
           "$ref": "#/definitions/ReadTarget"
@@ -12422,7 +12122,7 @@
       "type": "object"
     },
     "ReadTarget": {
-      "description": "Work an account can read: a conversation's latest turn or a mission's latest run.",
+      "description": "Work an account can read: a conversation's latest turn or pending question.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -12439,24 +12139,6 @@
           "required": [
             "kind",
             "chatId"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "mission",
-              "type": "string"
-            },
-            "taskId": {
-              "format": "uuid",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "taskId"
           ],
           "type": "object"
         }
@@ -12672,27 +12354,6 @@
         "ruleId",
         "revision",
         "definition"
-      ],
-      "type": "object"
-    },
-    "ReplaceMissionInput": {
-      "additionalProperties": false,
-      "properties": {
-        "revision": {
-          "type": "string"
-        },
-        "settings": {
-          "$ref": "#/definitions/MissionSettings"
-        },
-        "taskId": {
-          "format": "uuid",
-          "type": "string"
-        }
-      },
-      "required": [
-        "taskId",
-        "revision",
-        "settings"
       ],
       "type": "object"
     },
@@ -13716,6 +13377,20 @@
             "windowMinutes"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A conversation started by this rule has a turn queued, running or waiting for a wakeup.\nAn unanswered question alone does not count.",
+          "properties": {
+            "type": {
+              "const": "ruleConversationWorking",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -13977,17 +13652,6 @@
           "format": "int64",
           "type": "integer"
         },
-        "dismissal": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/OutcomeDismissal"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "environmentExpirationCause": {
           "default": null,
           "pattern": "^(inactivity|node-change|node-revocation|storage-migration)$",
@@ -14197,13 +13861,6 @@
             }
           ],
           "default": null
-        },
-        "sourceTaskId": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "startedAt": {
           "default": null,
@@ -14589,19 +14246,6 @@
         }
       ]
     },
-    "RunMissionInput": {
-      "additionalProperties": false,
-      "properties": {
-        "taskId": {
-          "format": "uuid",
-          "type": "string"
-        }
-      },
-      "required": [
-        "taskId"
-      ],
-      "type": "object"
-    },
     "RunPreview": {
       "properties": {
         "createdAt": {
@@ -14665,12 +14309,6 @@
         },
         "runId": {
           "type": "string"
-        },
-        "taskId": {
-          "type": [
-            "string",
-            "null"
-          ]
         }
       },
       "required": [
@@ -14960,176 +14598,28 @@
       "type": "object"
     },
     "RunTaskSnapshot": {
-      "description": "Presentation of task settings in a run snapshot. Chats synthesize the same typed\nsettings without creating a mission or a scheduled commitment.",
+      "description": "Frozen conversation prompt and identity metadata captured in a run snapshot.",
       "properties": {
         "agentId": {
-          "format": "uuid",
+          "default": "",
           "type": "string"
         },
-        "archived": {
-          "default": false,
-          "type": "boolean"
-        },
-        "authorAccessId": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "authorId": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "authorRemoved": {
-          "default": false,
-          "type": "boolean"
-        },
-        "createdAt": {
-          "default": null,
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "cron": {
-          "default": null,
-          "maxLength": 100,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "enabled": {
-          "default": true,
-          "type": "boolean"
-        },
         "id": {
-          "format": "uuid",
           "type": "string"
         },
         "name": {
-          "maxLength": 100,
-          "minLength": 1,
+          "default": "",
           "type": "string"
-        },
-        "nativeAuthorityNodes": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "nativeParentAccess": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "nativeParentRunId": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "nativePluginGrants": {
-          "default": null,
-          "items": {
-            "$ref": "#/definitions/MissionPluginGrant"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "nativePrincipals": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "nativeProvenanceUnknown": {
-          "default": false,
-          "type": "boolean"
-        },
-        "nextRun": {
-          "default": null,
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
         },
         "projectId": {
           "default": null,
-          "format": "uuid",
           "type": [
             "string",
             "null"
           ]
         },
         "prompt": {
-          "maxLength": 50000,
-          "minLength": 1,
-          "type": "string"
-        },
-        "revision": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "scheduleFailure": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ScheduleFailure"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "scheduleWaitReason": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "skills": {
-          "default": null,
-          "items": {
-            "maxLength": 160,
-            "type": "string"
-          },
-          "maxItems": 100,
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "tags": {
-          "default": [],
-          "items": {
-            "maxLength": 30,
-            "type": "string"
-          },
-          "maxItems": 10,
-          "type": "array"
-        },
-        "timezone": {
-          "default": "Europe/Paris",
-          "maxLength": 100,
-          "minLength": 1,
+          "default": "",
           "type": "string"
         },
         "worktree": {
@@ -15138,10 +14628,7 @@
         }
       },
       "required": [
-        "id",
-        "name",
-        "prompt",
-        "agentId"
+        "id"
       ],
       "type": "object"
     },
@@ -15233,41 +14720,23 @@
       ],
       "type": "object"
     },
-    "ScheduleFailure": {
-      "additionalProperties": false,
-      "properties": {
-        "at": {
-          "format": "int64",
-          "maximum": 9007199254740991,
-          "minimum": 0,
-          "type": "integer"
-        },
-        "message": {
-          "type": "string"
-        },
-        "scheduledFor": {
-          "format": "int64",
-          "maximum": 9007199254740991,
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "message",
-        "scheduledFor",
-        "at"
-      ],
-      "type": "object"
-    },
     "SchedulePreviewInput": {
       "additionalProperties": false,
       "properties": {
+        "count": {
+          "default": 5,
+          "format": "uint8",
+          "maximum": 20,
+          "minimum": 1,
+          "type": "integer"
+        },
         "cron": {
           "maxLength": 100,
           "minLength": 1,
           "type": "string"
         },
         "timezone": {
+          "default": "Europe/Paris",
           "maxLength": 100,
           "minLength": 1,
           "type": "string"
@@ -15275,7 +14744,8 @@
       },
       "required": [
         "cron",
-        "timezone"
+        "timezone",
+        "count"
       ],
       "type": "object"
     },
@@ -15285,15 +14755,17 @@
         "occurrences": {
           "items": {
             "format": "int64",
-            "maximum": 9007199254740991,
-            "minimum": 0,
             "type": "integer"
           },
           "type": "array"
+        },
+        "timezone": {
+          "type": "string"
         }
       },
       "required": [
-        "occurrences"
+        "occurrences",
+        "timezone"
       ],
       "type": "object"
     },
@@ -15392,6 +14864,46 @@
       ],
       "type": "object"
     },
+    "SetConversationSnoozeInput": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/ConversationSnoozeAction"
+        },
+        "chatId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "chatId",
+        "action"
+      ],
+      "type": "object"
+    },
+    "SetConversationSnoozeOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "snoozedUntil": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "chatId",
+        "snoozedUntil"
+      ],
+      "type": "object"
+    },
     "SetHookRuleEmergencyPauseInput": {
       "additionalProperties": false,
       "properties": {
@@ -15423,47 +14935,6 @@
       "required": [
         "ruleId",
         "enabled"
-      ],
-      "type": "object"
-    },
-    "SetOutcomeAsideInput": {
-      "additionalProperties": false,
-      "properties": {
-        "action": {
-          "$ref": "#/definitions/OutcomeAsideAction"
-        },
-        "taskId": {
-          "format": "uuid",
-          "type": "string"
-        }
-      },
-      "required": [
-        "taskId",
-        "action"
-      ],
-      "type": "object"
-    },
-    "SetOutcomeAsideOutput": {
-      "additionalProperties": false,
-      "properties": {
-        "dismissal": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/OutcomeDismissal"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "taskId": {
-          "format": "uuid",
-          "type": "string"
-        }
-      },
-      "required": [
-        "taskId",
-        "dismissal"
       ],
       "type": "object"
     },

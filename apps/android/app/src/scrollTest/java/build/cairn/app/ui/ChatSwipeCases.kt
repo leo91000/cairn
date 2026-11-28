@@ -326,10 +326,10 @@ abstract class ChatSwipeCases {
 
     @Test
     fun notificationReopensItsChatAfterSlowNeighborLoading() =
-        notificationJourney(slowActivity = true)
+        notificationJourney(slowNeighbor = true)
 
-    private fun notificationJourney(slowActivity: Boolean = false) =
-        withChats(slowActivity = slowActivity) {
+    private fun notificationJourney(slowNeighbor: Boolean = false) =
+        withChats(slowNeighbor = slowNeighbor) {
             open("Chat récent")
             history.performTouchInput { swipeLeft() }
             waitForChat("Chat intermédiaire")
@@ -403,7 +403,7 @@ abstract class ChatSwipeCases {
         single: Boolean = false,
         sideAnswer: Boolean = false,
         paginated: Boolean = false,
-        slowActivity: Boolean = false,
+        slowNeighbor: Boolean = false,
         test: () -> Unit,
     ) {
         MockWebServer().use { server ->
@@ -549,6 +549,10 @@ abstract class ChatSwipeCases {
                                     1,
                                     TimeUnit.SECONDS,
                                 )
+                                .apply {
+                                    if (slowNeighbor && chat?.title == "Chat intermédiaire")
+                                        setBodyDelay(750, TimeUnit.MILLISECONDS)
+                                }
                         }
                         val body =
                             when (path) {
@@ -587,10 +591,7 @@ abstract class ChatSwipeCases {
                                         """{"mcps":[]}"""
                                     else "[]"
                             }
-                        return MockResponse().setBody(body).apply {
-                            if (slowActivity && path.endsWith("/tasks/activity"))
-                                setBodyDelay(750, TimeUnit.MILLISECONDS)
-                        }
+                        return MockResponse().setBody(body)
                     }
                 }
             server.start()

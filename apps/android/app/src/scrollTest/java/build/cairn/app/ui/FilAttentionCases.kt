@@ -73,48 +73,27 @@ internal class FilAttentionCases(private val compose: ComposeContentTestRule) {
                 )
             )
         var reads = 0
-        var opens = 0
+        var snoozes = 0
         compose.setContent {
             CairnTheme {
                 FilRowActions(
                     item,
-                    enabled = true,
-                    open = { opens++ },
-                    retry = {},
                     markRead = {
                         reads++
                         item = item.copy(unread = false)
                     },
+                    snooze = { snoozes++ },
+                    restore = {},
                 )
             }
         }
-        compose
-            .onNodeWithContentDescription("Autres actions pour Résultat à lire")
-            .assertDoesNotExist()
-        compose.onNodeWithContentDescription("Marquer comme lu : Résultat à lire").performClick()
-        compose.runOnIdle {
-            assertEquals(1, reads)
-            assertEquals(0, opens)
-        }
-        compose
-            .onNodeWithContentDescription("Marquer comme lu : Résultat à lire")
-            .assertDoesNotExist()
-        compose
-            .onNodeWithContentDescription("Autres actions pour Résultat à lire")
-            .assertDoesNotExist()
-
-        compose.runOnIdle { item = item.copy(unread = true, readAt = 0) }
-        compose
-            .onNodeWithContentDescription("Marquer comme lu : Résultat à lire")
-            .assertDoesNotExist()
-
-        compose.runOnIdle {
-            item = item.copy(key = "task:mission", taskId = "mission", chatId = null, readAt = 1000)
-        }
         compose.onNodeWithContentDescription("Autres actions pour Résultat à lire").performClick()
-        compose.onNodeWithText("Marquer comme lu").assertIsDisplayed()
-        compose.onNodeWithText("Relancer").assertIsDisplayed()
-        compose.onNodeWithText("Archiver la mission").assertIsDisplayed()
+        compose.onNodeWithText("Marquer comme lu").performClick()
+        compose.runOnIdle { assertEquals(1, reads) }
+        compose.onNodeWithContentDescription("Autres actions pour Résultat à lire").performClick()
+        compose.onNodeWithText("Marquer comme lu").assertDoesNotExist()
+        compose.onNodeWithText("Reporter jusqu’à…").performClick()
+        compose.runOnIdle { assertEquals(1, snoozes) }
     }
 
     private fun markPixels(): IntArray {

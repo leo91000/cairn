@@ -22,7 +22,6 @@ private data class BackendMigrationState(
     val toBackend: String = "firecracker",
     val nodes: List<MigrationNode> = emptyList(),
     val conversion: Boolean = false,
-    val mission: Boolean = false,
     val pending: Boolean = false,
     val environmentExpired: Boolean = false,
     val reason: String? = null,
@@ -127,7 +126,7 @@ fun BackendMigration(vm: CairnViewModel, runId: String, onCompleted: () -> Unit 
                 if (value.environmentExpired)
                     "L’environnement précédent a expiré. Confirmez $target pour un environnement vide. L’historique, les pièces jointes et les artefacts sont conservés. La première admission attend la capacité sur la node choisie tant qu’elle reste autorisée."
                 else
-                    "Les fichiers de travail de cette conversation seront perdus. L’historique, les pièces jointes et les artefacts sont conservés. Le tour en cours s’arrête et les questions ouvertes sont closes. Le prochain environnement démarre sur la node choisie avec une nouvelle session et l’historique ; il y attend la capacité tant qu’elle reste autorisée. Les messages en file, les attentes planifiées et les missions actives y reprennent ; sinon, la conversation attend le prochain message.",
+                    "Les fichiers de travail de cette conversation seront perdus. L’historique, les pièces jointes et les artefacts sont conservés. Le tour en cours s’arrête et les questions ouvertes sont closes. Le prochain environnement démarre sur la node choisie avec une nouvelle session et l’historique ; il y attend la capacité tant qu’elle reste autorisée. Les messages en file et les attentes planifiées y reprennent ; sinon, la conversation attend le prochain message.",
             busy = busy,
             error = error,
             dismiss = { confirm = false },

@@ -279,8 +279,7 @@ test('selects installations, remembers the last one and honours deep workspace U
     expect(file.status()).toBe(200)
     expect(await file.text()).toBe('A relayed file')
     const chat = seed.store.list('chats').find(item => page.url().endsWith(item.slug || item.id))!
-    const task = seed.task({ name: 'Relayed files', prompt: 'Publish notes', agentId: chat.agentId })
-    const run = await seed.enqueue(task.id)
+    const run = seed.chatRun(chat.id, 'Relayed files')
     seed.store.updateRun(run.id, { status: 'succeeded', finishedAt: Date.now() })
     const artifact = {
       id: randomUUID(),

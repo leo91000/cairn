@@ -14,10 +14,13 @@ import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import build.cairn.contracts.HookRuleCatalog
 import build.cairn.contracts.HookRuleLimits
+import build.cairn.contracts.HookRuleTrigger
 import build.cairn.contracts.RuleCatalogAgent
 import build.cairn.contracts.RuleCatalogLimits
 import build.cairn.contracts.RuleCatalogTool
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
@@ -30,7 +33,7 @@ import org.junit.Test
 abstract class RulesCreationCases {
     @get:Rule val compose = createComposeRule()
 
-    private fun rootSchemaCatalog(composed: Boolean = false): HookRuleCatalog {
+    protected fun rootSchemaCatalog(composed: Boolean = false): HookRuleCatalog {
         val schema =
             wireJson.parseToJsonElement(
                 """{"type":"object","${'$'}ref":"#/${'$'}defs/Input","${'$'}defs":{"Input":{"type":"object","required":["text"],"properties":{"text":{"type":"string","title":"Message","minLength":1}}}}}"""
@@ -84,6 +87,39 @@ abstract class RulesCreationCases {
                 ),
             variables = emptyList(),
         )
+    }
+
+    @Test
+    fun openingAOneShotKeepsTheExactSavedInstant() {
+        val changes = AtomicBoolean(false)
+        val instant = java.time.Instant.parse("2028-10-29T01:30:25Z").toEpochMilli()
+        compose.setContent {
+            CairnTheme {
+                ClockScheduleFields(HookRuleTrigger.C(at = instant, timezone = "Europe/Paris")) {
+                    changes.set(true)
+                }
+            }
+        }
+        compose.onNodeWithText("Date unique").assertIsDisplayed()
+        compose.runOnIdle { assertFalse(changes.get()) }
+    }
+
+    @Test
+    fun oneShotTimezoneEditAllowsAnInvalidDraftWithoutThrowing() {
+        val edited = AtomicReference<HookRuleTrigger.C>()
+        compose.setContent {
+            CairnTheme {
+                ClockScheduleFields(
+                    HookRuleTrigger.C(at = 60_000, timezone = "UTC"),
+                    changed = edited::set,
+                )
+            }
+        }
+        compose.onNodeWithText("Fuseau horaire (IANA)").performTextReplacement("Europe/Paris")
+        compose.runOnIdle {
+            assertEquals("Europe/Paris", edited.get().timezone)
+            assertEquals(null, edited.get().at)
+        }
     }
 
     @Test
@@ -621,19 +657,35 @@ abstract class RulesCreationCases {
     fun aLostReplacementResponseDoesNotWriteAnotherVersion() =
         recoverCreation(false, replace = true)
 
+    @Test
+    fun acceptingAnIdenticalSavedDefinitionResetsTheClockFields() =
+        recoverCreation(false, replace = true, sameDefinitionConflict = true)
+
+    @Test
+    fun acceptingTheCompletedSaveResetsClockEditsMadeWhileSaving() =
+        recoverCreation(false, replace = true, sameDefinitionConflict = true, delaySave = true)
+
     private fun recoverCreation(
         restore: Boolean,
         reject: Boolean = false,
         replace: Boolean = false,
+        sameDefinitionConflict: Boolean = false,
+        delaySave: Boolean = false,
     ) {
         val id = "da2dd0ad-91ce-4566-b426-77c03628f59e"
         val unavailable = AtomicBoolean(true)
+        val releaseSave = CountDownLatch(1)
         val failureMessage =
             if (reject) "Creation rejected"
             else if (replace) "Uncertain replacement" else "Uncertain creation"
         val closed = AtomicBoolean(false)
         val stored = AtomicReference<JsonObject?>(null)
         val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
+        val initialTrigger =
+            if (sameDefinitionConflict)
+                """{"type":"clock","cron":"0 9 * * *","timezone":"Europe/Paris"}"""
+            else """{"type":"cairn","hook":"replyReady"}"""
+        val triggerTitle = if (sameDefinitionConflict) "Horloge" else "Réponse prête"
         fun record(definition: JsonObject, version: Int) = buildJsonObject {
             put("id", id)
             put("revision", "revision-$version")
@@ -645,7 +697,7 @@ abstract class RulesCreationCases {
             val initial =
                 wireJson
                     .parseToJsonElement(
-                        """{"name":"Original","description":"","trigger":{"type":"cairn","hook":"replyReady"},"executionAgentId":"$MAIN_AGENT_ID","limits":{"triggeringsPerHour":60,"conversationsPerHour":5},"steps":[{"type":"action","id":"save","action":{"type":"storeValue","scope":"rule","name":"last","value":{"type":"literal","value":0}}}]}"""
+                        """{"name":"Original","description":"","trigger":$initialTrigger,"executionAgentId":"$MAIN_AGENT_ID","limits":{"triggeringsPerHour":60,"conversationsPerHour":5},"steps":[{"type":"action","id":"save","action":{"type":"storeValue","scope":"rule","name":"last","value":{"type":"literal","value":0}}}]}"""
                     )
                     .jsonObject
             stored.set(record(initial, 1))
@@ -656,7 +708,7 @@ abstract class RulesCreationCases {
                 .setHeader("Content-Type", "application/json")
                 .setBody(body)
         val catalog =
-            """{"agents":[{"agentId":"$MAIN_AGENT_ID","name":"Assistant","native":false}],"hooks":[{"agentIds":["$MAIN_AGENT_ID"],"title":"Réponse prête","description":"","payloadSchema":null,"resourceFields":[],"trigger":{"type":"cairn","hook":"replyReady"}}],"tools":[],"actions":[],"conditions":[],"operators":[],"functions":[],"variables":[],"limits":{"defaultLimits":{"triggeringsPerHour":60,"conversationsPerHour":5},"maxTriggeringsPerHour":100,"maxConversationsPerHour":10,"maxChainDepth":8,"maxConversationValuesBytes":262144,"maxWaitSeconds":604800,"maxSteps":500,"maxToolCalls":100,"maxNodes":100}}"""
+            """{"agents":[{"agentId":"$MAIN_AGENT_ID","name":"Assistant","native":false}],"hooks":[{"agentIds":["$MAIN_AGENT_ID"],"title":"$triggerTitle","description":"","payloadSchema":null,"resourceFields":[],"trigger":$initialTrigger}],"tools":[],"actions":[],"conditions":[],"operators":[],"functions":[],"variables":[],"limits":{"defaultLimits":{"triggeringsPerHour":60,"conversationsPerHour":5},"maxTriggeringsPerHour":100,"maxConversationsPerHour":10,"maxChainDepth":8,"maxConversationValuesBytes":262144,"maxWaitSeconds":604800,"maxSteps":500,"maxToolCalls":100,"maxNodes":100}}"""
         MockWebServer().use { server ->
             server.dispatcher =
                 object : Dispatcher() {
@@ -680,9 +732,23 @@ abstract class RulesCreationCases {
                                 val body =
                                     wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
                                 writes += "PUT" to body
+                                if (sameDefinitionConflict && unavailable.getAndSet(false)) {
+                                    if (delaySave) {
+                                        stored.set(record(body.obj("definition")!!, 2))
+                                        if (!releaseSave.await(20, TimeUnit.SECONDS))
+                                            return json(
+                                                """{"error":"Pending save timed out"}""",
+                                                504,
+                                            )
+                                        return json(stored.get().toString())
+                                    }
+                                    stored.set(record(stored.get().obj("definition")!!, 2))
+                                    return json("""{"error":"Revision conflict"}""", 409)
+                                }
                                 if (body.text("revision") != stored.get().text("revision"))
                                     return json("""{"error":"Revision conflict"}""", 409)
-                                stored.set(record(body.obj("definition")!!, 2))
+                                val nextVersion = stored.get().text("version").toInt() + 1
+                                stored.set(record(body.obj("definition")!!, nextVersion))
                                 if (replace && unavailable.get())
                                     return json("""{"error":"$failureMessage"}""", 503)
                             }
@@ -741,6 +807,40 @@ abstract class RulesCreationCases {
             try {
                 waitFor {
                     compose.onAllNodesWithText("Nom de la règle").fetchSemanticsNodes().isNotEmpty()
+                }
+                if (sameDefinitionConflict) {
+                    compose
+                        .onNodeWithText("Modifier le déclencheur et l’agent")
+                        .performScrollTo()
+                        .performClick()
+                    val cron = compose.onNodeWithText("Cron (cinq champs)")
+                    if (!delaySave) cron.performScrollTo().performTextReplacement("15 10 * * *")
+                    val save = hasText("Enregistrer") and isEnabled()
+                    waitFor { compose.onAllNodes(save).fetchSemanticsNodes().isNotEmpty() }
+                    compose.onNode(save).performClick()
+                    if (delaySave) {
+                        waitFor { writes.isNotEmpty() }
+                        cron.performScrollTo().performTextReplacement("15 10 * * *")
+                        releaseSave.countDown()
+                    }
+                    val latest = "Utiliser la version enregistrée"
+                    waitFor {
+                        compose.onAllNodesWithText(latest).fetchSemanticsNodes().isNotEmpty()
+                    }
+                    compose.onNodeWithText(latest).performScrollTo().performClick()
+                    cron.assertTextContains("0 9 * * *")
+                    compose
+                        .onNodeWithText("Fuseau horaire (IANA)")
+                        .performScrollTo()
+                        .performTextReplacement("UTC")
+                    waitFor { compose.onAllNodes(save).fetchSemanticsNodes().isNotEmpty() }
+                    compose.onNode(save).performClick()
+                    waitFor { closed.get() }
+                    val trigger = writes.last().second.obj("definition").obj("trigger")
+                    assertEquals("0 9 * * *", trigger.text("cron"))
+                    assertEquals("UTC", trigger.text("timezone"))
+                    assertEquals("revision-2", writes.last().second.text("revision"))
+                    return
                 }
                 if (replace) {
                     compose.onNodeWithText("Nom de la règle").performTextReplacement("Latest draft")
@@ -845,6 +945,7 @@ abstract class RulesCreationCases {
                 assertEquals("Latest draft", update.obj("definition").text("name"))
                 assertEquals(2, stored.get()!!["version"]!!.jsonPrimitive.int)
             } finally {
+                releaseSave.countDown()
                 compose.runOnUiThread { mounted = false }
                 compose.waitForIdle()
                 compose.runOnUiThread { models.clear() }

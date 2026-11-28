@@ -156,12 +156,5 @@
     "name": "deleteChat",
     "output": "Chat",
     "path": "/chats/{chatId}"
-  },
-  {
-    "input": "RunInput",
-    "method": "POST",
-    "name": "convertRunToChat",
-    "output": "Chat",
-    "path": "/runs/{runId}/chat"
   }
 ]

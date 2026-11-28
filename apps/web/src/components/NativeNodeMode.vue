@@ -114,7 +114,7 @@ async function confirm() {
           </ul>
         </div>
         <div>
-          <strong>Scheduled tasks:</strong><ul>
+          <strong>Rules that can start conversations</strong><ul>
             <li v-for="task in preview.preview.tasks" :key="task.id">
               {{ task.name }}
             </li>

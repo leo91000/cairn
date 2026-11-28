@@ -31,11 +31,9 @@ export const runProgressSql = `SELECT r.id,r.status,r.finished_at AS finishedAt,
 
 export const canonicalWaitSql = `SELECT EXISTS(SELECT 1 FROM runs r
   WHERE r.id=? AND r.cancel_requested_at IS NULL AND r.recovery_pending=0 AND r.workspace_cleaned_at IS NULL
-    AND ((r.status='waiting' AND EXISTS(SELECT 1 FROM durable_wakeups w WHERE w.mission_run_id=r.id
-      AND w.message_id=json_extract(r.boundary,'$.missionTurnId') AND w.wake_at>?))
-    OR (r.status='succeeded' AND EXISTS(SELECT 1 FROM conversations c JOIN durable_wakeups w ON w.chat_id=c.id
+    AND r.status='succeeded' AND EXISTS(SELECT 1 FROM conversations c JOIN durable_wakeups w ON w.chat_id=c.id
       WHERE c.run_id=r.id AND c.lifecycle='active' AND c.paused=0 AND c.session_restart_requested=0
-        AND w.message_id=json_extract(r.boundary,'$.chatExecution.messageId') AND w.wake_at>?)))) AS valid`
+        AND w.message_id IS json_extract(r.boundary,'$.chatExecution.messageId') AND w.wake_at>?)) AS valid`
 
 function identity(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 256

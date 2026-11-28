@@ -77,7 +77,7 @@ abstract class UnifiedHeaderCases {
 
     private fun fixture(
         server: MockWebServer,
-        beforeTasksResponse: () -> Unit = {},
+        beforeAgentsResponse: () -> Unit = {},
     ): CairnViewModel {
         server.dispatcher =
             object : Dispatcher() {
@@ -102,7 +102,7 @@ abstract class UnifiedHeaderCases {
                                 )
                             )
                     }
-                    if (path == "/api/installations/fixture/api/tasks") beforeTasksResponse()
+                    if (path == "/api/installations/fixture/api/agents") beforeAgentsResponse()
 
                     val body =
                         when (path) {

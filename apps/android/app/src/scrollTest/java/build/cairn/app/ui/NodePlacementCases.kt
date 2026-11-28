@@ -644,7 +644,37 @@ abstract class NodePlacementCases {
     @Test fun suspendedRunTimelineAndResultDescribeThePause() = suspendedTimeline(false)
 
     @Test
-    fun aDelegatedRunCanBeReadThroughItsRequesterButItsWorktreeCannotBeCleanedWithoutAgentAccess() {
+    fun aDelegatedRunCanBeReadThroughItsRequesterButItsWorktreeCannotBeCleanedWithoutAgentAccess() =
+        delegatedRunWorktreeCleanup(hasAgentAccess = false)
+
+    @Test
+    fun aMemberWithAgentAccessCanCleanManagedWorktreesInAMultiProjectRun() =
+        delegatedRunWorktreeCleanup(hasAgentAccess = true)
+
+    @Test
+    fun pendingConversationInputKeepsManagedWorktrees() =
+        delegatedRunWorktreeCleanup(hasAgentAccess = true, pendingInput = true)
+
+    @Test
+    fun scheduledContinuationKeepsManagedWorktrees() =
+        delegatedRunWorktreeCleanup(
+            hasAgentAccess = true,
+            wakeup =
+                ChatWakeup(
+                    id = "wait",
+                    messageId = "turn",
+                    reason = "Reprendre après la vérification",
+                    createdAt = 2,
+                    seconds = 3600,
+                    wakeAt = 3_600_002,
+                ),
+        )
+
+    private fun delegatedRunWorktreeCleanup(
+        hasAgentAccess: Boolean,
+        wakeup: ChatWakeup? = null,
+        pendingInput: Boolean = false,
+    ) {
         val requesterAgentId = MAIN_AGENT_ID
         val privateAgentId = "00000000-0000-4000-8000-000000000096"
         val requestingChat =
@@ -688,12 +718,18 @@ abstract class NodePlacementCases {
             Run(
                 id = "00000000-0000-4000-8000-000000000099",
                 taskId = delegatedChatId,
-                status = "failed",
+                status = if (wakeup == null) "failed" else "succeeded",
                 trigger = "chat",
                 createdAt = 1,
                 startedAt = 1,
                 finishedAt = 2,
                 workspace = "/workspace/private",
+                wakeup = wakeup,
+                workspaces =
+                    listOf(
+                        RunWorkspace("worktree", "/workspace/private/first", "first-project"),
+                        RunWorkspace("worktree", "/workspace/private/second", "second-project"),
+                    ),
                 snapshot =
                     Snapshot(
                         task =
@@ -714,7 +750,11 @@ abstract class NodePlacementCases {
                         val path = request.path!!.substringBefore('?')
                         val live =
                             if (path == "/api/installations/fixture/api/runs/${run.id}/stream")
-                                LiveState(run = run)
+                                LiveState(
+                                    run = run,
+                                    runConversationPaused = wakeup != null,
+                                    workspaceCleanupBlockedByInput = pendingInput,
+                                )
                             else null
                         if (live != null) {
                             val frame =
@@ -734,7 +774,9 @@ abstract class NodePlacementCases {
                                 path == "/api/installations/fixture/api/usable-agents" ->
                                     wireJson.encodeToString(
                                         build.cairn.contracts.UsableAgentsOutput(
-                                            listOf(requesterAgentId)
+                                            if (hasAgentAccess)
+                                                listOf(requesterAgentId, privateAgentId)
+                                            else listOf(requesterAgentId)
                                         )
                                     )
                                 path == "/api/installations/fixture/api/overview" -> "{}"
@@ -767,7 +809,7 @@ abstract class NodePlacementCases {
                 }
                 CairnTheme {
                     androidx.compose.runtime.CompositionLocalProvider(
-                        LocalFilSnapshot provides FilSnapshot(conversations, null)
+                        LocalFilSnapshot provides FilSnapshot(conversations)
                     ) {
                         if (state.session.authenticated) RunScreen(vm, state, run.id, openRun = {})
                     }
@@ -780,10 +822,21 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isNotEmpty()
                 }
+                if (wakeup != null) {
+                    compose.onNodeWithContentDescription("Arrêter").assertExists()
+                    assertTrue(
+                        compose
+                            .onAllNodesWithText("Reprise programmée en pause")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    )
+                }
                 compose.onNodeWithContentDescription("Options de l’exécution").performClick()
-                compose.onNodeWithText("Mission et détails").performClick()
+                compose.onNodeWithText("Détails de l’exécution").performClick()
                 compose.onNodeWithText("Espace de travail").assertExists()
-                compose.onNodeWithText("Nettoyer le worktree").assertDoesNotExist()
+                val cleanup = compose.onNodeWithText("Nettoyer le worktree")
+                if (hasAgentAccess && wakeup == null && !pendingInput) cleanup.assertExists()
+                else cleanup.assertDoesNotExist()
             } finally {
                 vm.api.closeStreams()
             }

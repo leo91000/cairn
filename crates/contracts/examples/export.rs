@@ -483,13 +483,6 @@ fn main() {
                 "output": "Chat",
                 "method": "DELETE",
                 "path": "/chats/{chatId}"
-            },
-            {
-                "name": "convertRunToChat",
-                "input": "RunInput",
-                "output": "Chat",
-                "method": "POST",
-                "path": "/runs/{runId}/chat"
             }
         ]
     );
@@ -530,14 +523,6 @@ fn main() {
         {
             "name": "readRunHistory", "input": "ReadRunHistoryInput", "output": "HistoryPage",
             "method": "GET", "path": "/runs/{runId}/history", "query": ["before", "history"],
-        },
-        {
-            "name": "runMission", "input": "RunMissionInput", "output": "Run",
-            "method": "POST", "path": "/tasks/{taskId}/run",
-        },
-        {
-            "name": "retryRun", "input": "RunInput", "output": "Run",
-            "method": "POST", "path": "/runs/{runId}/retry",
         },
         {
             "name": "cancelRun", "input": "RunInput", "output": "CancelRunOutput",
@@ -586,7 +571,6 @@ fn main() {
     export::<RunState>(root, &mut generator, Contract::Serialize);
     export::<Retry>(root, &mut generator, Contract::Serialize);
     export::<RunInput>(root, &mut generator, Contract::Deserialize);
-    export::<RunMissionInput>(root, &mut generator, Contract::Deserialize);
     export::<CancelRunOutput>(root, &mut generator, Contract::Serialize);
     export::<CleanupRunOutput>(root, &mut generator, Contract::Serialize);
     export::<ResumeExecutionSelection>(root, &mut generator, Contract::Deserialize);
@@ -642,10 +626,14 @@ fn main() {
     export::<ListHookRuleTemplatesOutput>(root, &mut generator, Contract::Serialize);
     export::<InstallHookRuleTemplateInput>(root, &mut generator, Contract::Deserialize);
     export::<InstallHookRuleTemplateOutput>(root, &mut generator, Contract::Serialize);
+    export::<SchedulePreviewInput>(root, &mut generator, Contract::Deserialize);
+    export::<SchedulePreviewOutput>(root, &mut generator, Contract::Serialize);
+    export::<RunTaskSnapshot>(root, &mut generator, Contract::Serialize);
     fs::write(root.join("rule-clients.json"), serde_json::to_string_pretty(&serde_json::json!([
         { "name": "listHookRules", "input": "ListHookRulesInput", "output": "ListHookRulesOutput", "method": "GET", "path": "/hook-rules", "query": ["agentId", "instanceId"], "optionalQuery": ["agentId", "instanceId"] },
         { "name": "getHookRuleCatalog", "input": "GetHookRuleCatalogInput", "output": "HookRuleCatalog", "method": "GET", "path": "/hook-rules/catalog", "query": ["agentId"], "optionalQuery": ["agentId"] },
         { "name": "validateHookRule", "input": "ValidateHookRuleInput", "output": "ValidateHookRuleOutput", "method": "POST", "path": "/hook-rules/validate" },
+        { "name": "previewSchedule", "input": "SchedulePreviewInput", "output": "SchedulePreviewOutput", "method": "POST", "path": "/hook-rules/schedule/preview" },
         { "name": "listHookRuleTemplates", "input": "ListHookRuleTemplatesInput", "output": "ListHookRuleTemplatesOutput", "method": "GET", "path": "/hook-rules/templates", "query": ["instanceId"], "optionalQuery": ["instanceId"] },
         { "name": "installHookRuleTemplate", "input": "InstallHookRuleTemplateInput", "output": "InstallHookRuleTemplateOutput", "method": "POST", "path": "/hook-rules/templates/install" },
         { "name": "getHookRule", "input": "HookRuleInput", "output": "HookRule", "method": "GET", "path": "/hook-rules/{ruleId}" },
@@ -657,124 +645,10 @@ fn main() {
         { "name": "setHookRuleEnabled", "input": "SetHookRuleEnabledInput", "output": "HookRule", "method": "POST", "path": "/hook-rules/{ruleId}/enabled" },
         { "name": "setHookRuleEmergencyPause", "input": "SetHookRuleEmergencyPauseInput", "output": "HookRule", "method": "POST", "path": "/hook-rules/{ruleId}/emergency-pause" },
         { "name": "liftHookRuleBudget", "input": "HookRuleInput", "output": "HookRule", "method": "POST", "path": "/hook-rules/{ruleId}/budget" },
+        { "name": "runHookRule", "input": "HookRuleInput", "output": "HookRuleTriggering", "method": "POST", "path": "/hook-rules/{ruleId}/run" },
         { "name": "duplicateHookRule", "input": "DuplicateHookRuleInput", "output": "HookRule", "method": "POST", "path": "/hook-rules/{ruleId}/duplicate" },
         { "name": "deleteHookRule", "input": "HookRuleInput", "output": "DeleteHookRuleOutput", "method": "DELETE", "path": "/hook-rules/{ruleId}" }
     ])).unwrap() + "\n").unwrap();
-    export::<CreateMissionInput>(root, &mut generator, Contract::Deserialize);
-    export::<ReplaceMissionInput>(root, &mut generator, Contract::Deserialize);
-    export::<MissionStateInput>(root, &mut generator, Contract::Deserialize);
-    export::<MissionInput>(root, &mut generator, Contract::Deserialize);
-    export::<ListMissionsInput>(root, &mut generator, Contract::Deserialize);
-    export::<ListMissionsOutput>(root, &mut generator, Contract::Serialize);
-    export::<DeleteMissionOutput>(root, &mut generator, Contract::Serialize);
-    export::<RunTaskSnapshot>(root, &mut generator, Contract::Serialize);
-    export::<Mission>(root, &mut generator, Contract::Serialize);
-    export::<SchedulePreviewInput>(root, &mut generator, Contract::Deserialize);
-    export::<SchedulePreviewOutput>(root, &mut generator, Contract::Serialize);
-    let clients = serde_json::json!([
-        {
-            "name": "listMissions",
-            "input": "ListMissionsInput",
-            "output": "ListMissionsOutput",
-            "method": "GET",
-            "path": "/tasks"
-        },
-        {
-            "name": "getMission",
-            "input": "MissionInput",
-            "output": "Mission",
-            "method": "GET",
-            "path": "/tasks/{taskId}"
-        },
-        {
-            "name": "createMission",
-            "input": "CreateMissionInput",
-            "output": "Mission",
-            "method": "POST",
-            "path": "/tasks"
-        },
-        {
-            "name": "replaceMission",
-            "input": "ReplaceMissionInput",
-            "output": "Mission",
-            "method": "PUT",
-            "path": "/tasks/{taskId}"
-        },
-        {
-            "name": "setMissionState",
-            "input": "MissionStateInput",
-            "output": "Mission",
-            "method": "POST",
-            "path": "/tasks/{taskId}/state"
-        },
-        {
-            "name": "deleteMission",
-            "input": "MissionInput",
-            "output": "DeleteMissionOutput",
-            "method": "DELETE",
-            "path": "/tasks/{taskId}"
-        },
-        {
-            "name": "previewSchedule",
-            "input": "SchedulePreviewInput",
-            "output": "SchedulePreviewOutput",
-            "method": "POST",
-            "path": "/schedule/preview"
-        }
-    ]);
-    fs::write(
-        root.join("mission-clients.json"),
-        serde_json::to_string_pretty(&clients).unwrap() + "\n",
-    )
-    .unwrap();
-    let missions: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/mission-contracts.json"
-    ))
-    .unwrap();
-    let creates: Vec<CreateMissionInput> = missions["creates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| serde_json::from_value(v.clone()).unwrap())
-        .collect();
-    let views: Vec<Mission> = creates
-        .iter()
-        .map(|input| Mission {
-            id: MissionId(uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap()),
-            settings: input.settings.clone(),
-            revision: "revision".into(),
-            created_at: 9007199254740991,
-            next_run: None,
-            author_id: Some("owner".into()),
-            author_access_id: Some("membership".into()),
-            author_removed: false,
-            schedule_wait_reason: None,
-            schedule_failure: Some(ScheduleFailure {
-                message: "Unavailable".into(),
-                scheduled_for: 1,
-                at: 9007199254740991,
-            }),
-            native_principals: Vec::new(),
-            native_authority_nodes: Vec::new(),
-            native_parent_run_id: None,
-            native_parent_access: None,
-            native_provenance_unknown: true,
-            native_plugin_grants: input.settings.archived.then(|| {
-                vec![MissionPluginGrant {
-                    connection_id: "00000000-0000-4000-8000-000000000003".into(),
-                    revision: "connection-revision".into(),
-                    author_id: "external-person".into(),
-                }]
-            }),
-        })
-        .collect();
-    fs::write(
-        root.join("mission-wire.json"),
-        serde_json::to_string_pretty(&serde_json::json!({"creates":creates,"views":views}))
-            .unwrap()
-            + "\n",
-    )
-    .unwrap();
     export::<McpInput>(root, &mut generator, Contract::Deserialize);
     export::<McpIdInput>(root, &mut generator, Contract::Deserialize);
     export::<UpdateMcpInput>(root, &mut generator, Contract::Deserialize);
@@ -1254,10 +1128,9 @@ fn main() {
     export::<ReadMark>(root, &mut generator, Contract::Deserialize);
     export::<MarkReadInput>(root, &mut generator, Contract::Deserialize);
     export::<MarkReadOutput>(root, &mut generator, Contract::Serialize);
-    export::<OutcomeAsideAction>(root, &mut generator, Contract::Deserialize);
-    export::<SetOutcomeAsideInput>(root, &mut generator, Contract::Deserialize);
-    export::<OutcomeDismissal>(root, &mut generator, Contract::Serialize);
-    export::<SetOutcomeAsideOutput>(root, &mut generator, Contract::Serialize);
+    export::<ConversationSnoozeAction>(root, &mut generator, Contract::Deserialize);
+    export::<SetConversationSnoozeInput>(root, &mut generator, Contract::Deserialize);
+    export::<SetConversationSnoozeOutput>(root, &mut generator, Contract::Serialize);
     export::<GetInstallationSettingsInput>(root, &mut generator, Contract::Deserialize);
     export::<GetChatPlanSettingsInput>(root, &mut generator, Contract::Deserialize);
     export::<ChatPlanSettings>(root, &mut generator, Contract::Deserialize);
@@ -1290,7 +1163,7 @@ fn main() {
         { "name": "previewCodingAgentConfiguration", "input": "EditCodingAgentConfigurationInput", "output": "CodingAgentConfiguration", "method": "POST", "path": "/settings/coding-agents/preview" },
         { "name": "saveCodingAgentConfiguration", "input": "EditCodingAgentConfigurationInput", "output": "CodingAgentConfiguration", "method": "PUT", "path": "/settings/coding-agents" },
         { "name": "markRead", "input": "MarkReadInput", "output": "MarkReadOutput", "method": "POST", "path": "/reads" },
-        { "name": "setOutcomeAside", "input": "SetOutcomeAsideInput", "output": "SetOutcomeAsideOutput", "method": "POST", "path": "/dismissals" },
+        { "name": "snoozeChat", "input": "SetConversationSnoozeInput", "output": "SetConversationSnoozeOutput", "method": "POST", "path": "/snoozes" },
         { "name": "getInstallationSettings", "input": "GetInstallationSettingsInput", "output": "InstallationSettings", "method": "GET", "path": "/settings" },
         { "name": "getInstallationOverview", "input": "GetInstallationOverviewInput", "output": "InstallationOverview", "method": "GET", "path": "/overview" },
         { "name": "listAudit", "input": "ListAuditInput", "output": "ListAuditOutput", "method": "GET", "path": "/audit" }
@@ -1323,6 +1196,7 @@ fn main() {
                 | "ChatCompaction"
                 | "CodingAgentSwitch"
                 | "ChatRequester"
+                | "ChatRuleOrigin"
                 | "ConversationRequester"
                 | "ContextUsage"
         ) {

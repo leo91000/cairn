@@ -14,6 +14,7 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+import { startConversation } from './schedule-fixture'
 
 let existingAccountIds: Set<string>
 let existingChatIds: Set<string>
@@ -411,8 +412,7 @@ test('Claude agents, chats, questions and scheduled work run on a connected Clau
   await workspace.api(`/api/chats/${chat.id}/questions/${question.id}/answer`, 'POST', { id: crypto.randomUUID(), answers: { approach: { selected: ['small'], comment: 'Keep it focused' } } })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).questions.find((q: { id: string }) => q.id === question.id)?.status).toBe('answered')
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
-  const task = await workspace.api('/api/tasks', 'POST', { settings: { name: 'Claude scheduled work', prompt: 'Review the workspace', agentId: agent.id } })
-  const run = await workspace.api(`/api/tasks/${task.id}/run`, 'POST')
+  const { run } = await startConversation(workspace, 'Claude scheduled work', 'Review the workspace', agent.id)
   await expect.poll(async () => (await workspace.api(`/api/runs/${run.id}`)).status, { timeout: 20000 }).toBe('succeeded')
   // The run is recorded with the Claude account it used.
   const completed = await workspace.api(`/api/runs/${run.id}`)
