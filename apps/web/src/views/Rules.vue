@@ -156,6 +156,7 @@ async function changed(rule: HookRule | null) {
           blocks: rule.blocks,
           allowed: rule.allowed,
           updatedAt: rule.updatedAt,
+          nextRun: rule.nextRun,
         }
       : entry)
   }
@@ -318,6 +319,9 @@ onBeforeUnmount(() => {
                 <span class="size-1.5 rounded-full" :class="rule.blocks.length ? 'bg-coral' : 'bg-success'" />
                 <span :class="rule.blocks.length ? 'font-semibold text-coral' : ''">{{ rule.blocks.length ? blockTitles[rule.blocks[0].kind] : 'Active' }}</span>
                 <span>· v{{ rule.version }} · {{ creatorName(rule.creatorAccountId) }} · {{ relativeTime(rule.updatedAt) }}</span>
+              </p>
+              <p v-if="rule.nextRun != null" class="m-0! mt-1! text-xs text-muted">
+                Next run <time :datetime="new Date(rule.nextRun).toISOString()">{{ new Date(rule.nextRun).toLocaleString() }}</time>
               </p>
             </div>
           </article>

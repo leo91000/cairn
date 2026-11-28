@@ -56,7 +56,32 @@ struct MigratedMission {
 struct MigratedRun {
     chat_id: String,
     activity_at: i64,
-    needs_review: bool,
+    review: LegacyReview,
+}
+
+#[derive(PartialEq, Eq)]
+enum LegacyReview {
+    None,
+    SnoozeOnly,
+    Dismissible,
+}
+
+fn legacy_review(run: &LegacyRun, outcome: &Value) -> LegacyReview {
+    if run.status != "succeeded" || run.finished_at.is_none() {
+        return LegacyReview::None;
+    }
+    match outcome["status"].as_str() {
+        None | Some("completed") => LegacyReview::None,
+        Some("needs_input") => LegacyReview::SnoozeOnly,
+        Some(_) => LegacyReview::Dismissible,
+    }
+}
+
+fn normalize_outcome(mut outcome: Value) -> Value {
+    if outcome["status"] == "needs_input" {
+        outcome["status"] = "blocked".into();
+    }
+    outcome
 }
 
 struct LegacyRun {
@@ -227,13 +252,6 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
     }
 
     rebuild_rule_tables(&tx)?;
-
-    // Older outcomes retain their reason and evidence under the unresolved status.
-    tx.execute(
-        "UPDATE runs SET boundary=json_set(boundary,'$.outcome.status','blocked') \
-         WHERE json_extract(boundary,'$.outcome.status')='needs_input'",
-        [],
-    )?;
 
     let at = now();
     let known_owner = known_owner_account(&tx)?;
@@ -636,7 +654,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                     "finishedAt": run.finished_at,
                     "summary": finished.then_some(&run.summary),
                     "error": if finished { run.error.as_deref() } else { None },
-                    "outcome": if finished { &boundary["outcome"] } else { &Value::Null },
+                    "outcome": finished.then(|| normalize_outcome(boundary["outcome"].clone())),
                 },
             })
             .to_string();
@@ -781,17 +799,14 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 )?;
             }
 
+            let review = legacy_review(&run, &boundary["outcome"]);
             migrated_chats_by_mission
                 .entry(run.task_id)
                 .or_default()
                 .push(MigratedRun {
                     chat_id,
                     activity_at: updated_at,
-                    needs_review: run.finished_at.is_some()
-                        && matches!(
-                            boundary["outcome"]["status"].as_str(),
-                            Some("blocked" | "needs_input")
-                        ),
+                    review,
                 });
         }
     }
@@ -858,7 +873,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 for chat in chats {
                     // Opening a mission result did not acknowledge its blocked outcome.
                     // The separate dismissal table carries that decision.
-                    if !chat.needs_review && chat.activity_at <= finished_at {
+                    if chat.review == LegacyReview::None && chat.activity_at <= finished_at {
                         tx.execute(
                             "INSERT INTO account_reads_v39(account_id,chat_id,finished_at) VALUES(?1,?2,?3) \
                              ON CONFLICT(account_id,chat_id) DO UPDATE SET finished_at=max(finished_at,excluded.finished_at)",
@@ -891,19 +906,16 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             let Some(chats) = migrated_chats_by_mission.get(&mission_id) else {
                 continue;
             };
-            for chat in chats
-                .iter()
-                .filter(|chat| chat.needs_review && chat.activity_at <= finished_at)
-            {
+            for chat in chats.iter().filter(|chat| chat.activity_at <= finished_at) {
                 match snoozed_until {
-                    Some(until) if until > finished_at => {
+                    Some(until) if until > finished_at && chat.review != LegacyReview::None => {
                         tx.execute(
                             "INSERT INTO account_snoozes(account_id,chat_id,finished_at,snoozed_until) VALUES(?1,?2,?3,?4) \
                              ON CONFLICT(account_id,chat_id) DO UPDATE SET finished_at=excluded.finished_at,snoozed_until=excluded.snoozed_until",
                             params![account_id, chat.chat_id, finished_at, until],
                         )?;
                     }
-                    None => {
+                    None if chat.review == LegacyReview::Dismissible => {
                         // ADR-0094: dismiss becomes mark read.
                         tx.execute(
                             "INSERT INTO account_reads(account_id,chat_id,finished_at) VALUES(?1,?2,?3) \
@@ -977,6 +989,15 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         )?;
     }
 
+    // Classify v38 personal state first, then normalize the current outcome and
+    // the saved reply an interrupted compaction can restore after the upgrade.
+    tx.execute_batch(
+        "UPDATE runs SET boundary=json_set(boundary,'$.outcome.status','blocked')
+         WHERE json_extract(boundary,'$.outcome.status')='needs_input';
+         UPDATE runs SET boundary=json_set(boundary,'$.chatExecution.previous.outcome.status','blocked')
+         WHERE json_extract(boundary,'$.chatExecution.previous.outcome.status')='needs_input';",
+    )?;
+
     // Drop retired mission tables.
     tx.execute_batch(
         "DROP TABLE IF EXISTS hook_rule_task_depths;
@@ -1043,7 +1064,8 @@ fn link_converted_mission_runs(
         let outcome = row
             .get::<_, Option<String>>(8)?
             .map(|value| serde_json::from_str::<Value>(&value))
-            .transpose()?;
+            .transpose()?
+            .map(normalize_outcome);
         let origin = json!({
             "hook": "clock",
             "ruleName": rule_name,

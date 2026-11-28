@@ -140,7 +140,14 @@ fun RulesScreen(
                     if (entry.text("id") != saved.text("id")) entry
                     else
                         entry.patch(
-                            *listOf("revision", "version", "blocks", "allowed", "updatedAt")
+                            *listOf(
+                                    "revision",
+                                    "version",
+                                    "blocks",
+                                    "allowed",
+                                    "updatedAt",
+                                    "nextRun",
+                                )
                                 .map { it to saved[it] }
                                 .toTypedArray()
                         )
@@ -269,6 +276,12 @@ fun RulesScreen(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
+                                rule["nextRun"]?.jsonPrimitive?.longOrNull?.let { next ->
+                                    Text(
+                                        "Prochaine exécution ${upcomingStamp(next)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
                             }
                         }
                     }
@@ -423,6 +436,12 @@ internal fun RuleDetailPanel(
                     "${trigger.first} · ${trigger.second}",
                     style = MaterialTheme.typography.titleSmall,
                 )
+                rule["nextRun"]?.jsonPrimitive?.longOrNull?.let { next ->
+                    Text(
+                        "Prochaine exécution ${upcomingStamp(next)}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 Text(
                     "Avec les droits de ${ruleAgentName(state, definition.text("executionAgentId"))}",
                     style = MaterialTheme.typography.bodySmall,

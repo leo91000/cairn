@@ -1316,8 +1316,11 @@ pub(crate) async fn triggerings(
     let viewer = actor.viewer();
     s.store
         .read(move |db| {
+            let snapshot = db.0.unchecked_transaction()?;
             actor.authorize(db)?;
-            engine::list(db, &input, &viewer)
+            let history = engine::list(db, &input, &viewer)?;
+            snapshot.commit()?;
+            Ok(history)
         })
         .await
 }
@@ -1332,8 +1335,11 @@ pub(crate) async fn triggering(
     let viewer = actor.viewer();
     s.store
         .read(move |db| {
+            let snapshot = db.0.unchecked_transaction()?;
             actor.authorize(db)?;
-            engine::get(db, &input.triggering_id.to_string(), &viewer)
+            let triggering = engine::get(db, &input.triggering_id.to_string(), &viewer)?;
+            snapshot.commit()?;
+            Ok(triggering)
         })
         .await
 }

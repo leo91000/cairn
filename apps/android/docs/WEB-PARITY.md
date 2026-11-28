@@ -6,6 +6,7 @@ Web et Android ouvrent **Programmer un agent** depuis les Règles. Le formulaire
 choisit l’agent, le projet, le brief et un cron à cinq champs ou une date unique
 avec fuseau IANA. Android utilise les sélecteurs natifs de date et d’heure.
 Les deux éditeurs prévisualisent les prochaines dates d’un cron dans son fuseau.
+La liste et le détail affichent la prochaine échéance enregistrée par le serveur.
 Le formulaire crée une règle Horloge avec une condition de chevauchement que
 l’éditeur complet peut modifier. **Lancer maintenant** apparaît lorsque le
 serveur l’autorise et ouvre l’historique de la règle.

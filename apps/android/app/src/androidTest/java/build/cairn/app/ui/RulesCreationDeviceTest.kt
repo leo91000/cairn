@@ -54,7 +54,7 @@ class RulesCreationDeviceTest : RulesCreationCases() {
         fun saved(input: JsonObject) =
             """
             {"id":"$id","creatorAccountId":"fixture-account","definition":${input.getValue("definition")},
-             "source":"app","revision":"revision","version":1,"createdAt":0,"updatedAt":0,
+             "source":"app","revision":"revision","version":1,"createdAt":0,"updatedAt":0,"nextRun":1796000000000,
              "nativeAuthority":false,"allowed":{"runNow":true,"edit":true,"enable":false,
              "disable":true,"duplicate":true,"delete":true,"emergencyPause":true,
              "liftBudget":false,"viewDetails":true},"blocks":[],"warnings":[]}
@@ -157,6 +157,7 @@ class RulesCreationDeviceTest : RulesCreationCases() {
                         .isNotEmpty()
                 }
                 val definition = requestBody.get().obj("definition")!!
+                compose.onNodeWithText("Prochaine exécution", substring = true).assertExists()
                 assertEquals("clock", definition.obj("trigger").text("type"))
                 assertEquals("0 9 * * *", definition.obj("trigger").text("cron"))
                 assertEquals(

@@ -1109,6 +1109,23 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         ],
     )
     .unwrap();
+    let failed_with_report = id();
+    let later_blocked_run = id();
+    for (run, status, finished_at) in [
+        (&failed_with_report, "failed", t0 + 4_000),
+        (&later_blocked_run, "succeeded", t0 + 6_000),
+    ] {
+        conn.execute(
+            "INSERT INTO runs(id,task_id,status,trigger,created_at,finished_at,snapshot,boundary,
+             recovery_pending,resume_available,resume_count)
+             VALUES(?1,?2,?3,'schedule',?4,?5,?6,?7,0,0,0)",
+            params![
+                run, active_mission_id, status, t0, finished_at,
+                json!({ "agent": agent }).to_string(),
+                json!({ "outcome": { "status": "blocked", "reason": "A separate outcome", "evidence": [] } }).to_string(),
+            ],
+        ).unwrap();
+    }
     conn.execute(
         "INSERT INTO records(kind,id,data,updated_at) VALUES('environment-retirements','old-workspace',?1,?2)",
         params![json!({
@@ -1303,7 +1320,23 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             original_run_created_at,
             t0 + 1000,
             json!({ "agent": agent, "task": { "name": "Existing chat", "prompt": "Old brief", "worktree": false } }).to_string(),
-            json!({ "sourceTaskId": active_mission_id, "sourceTaskPrompt": "Old brief" }).to_string(),
+            json!({
+                "sourceTaskId": active_mission_id,
+                "sourceTaskPrompt": "Old brief",
+                "chatExecution": {
+                    "messageId": "legacy-compaction",
+                    "operation": "compact",
+                    "previous": {
+                        "summary": "Previous ordinary reply",
+                        "finishedAt": t0 + 500,
+                        "outcome": {
+                            "status": "needs_input",
+                            "reason": "Needs the saved input",
+                            "evidence": ["retained compaction evidence"],
+                        },
+                    },
+                },
+            }).to_string(),
         ],
     ).unwrap();
     conn.execute(
@@ -1471,7 +1504,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     .unwrap();
     conn.execute(
         "INSERT INTO account_dismissals VALUES('member-acct',?1,?2,NULL)",
-        params![active_mission_id, t0 + 5000],
+        params![active_mission_id, t0 + 6000],
     )
     .unwrap();
 
@@ -1721,7 +1754,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     // Reads & snoozes migrated cleanly:
     // - regular chat read preserved
     // - owner active snooze -> account_snoozes on blocked_chat_id
-    // - member permanent dismiss -> account_reads on blocked_chat_id
+    // - member permanent dismiss -> account_reads on the later blocked run
     let regular_read: i64 = migrated
         .query_row(
             "SELECT finished_at FROM account_reads WHERE account_id='owner-acct' AND chat_id=?1",
@@ -1739,7 +1772,22 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     ).unwrap();
     assert_eq!(
         converted,
-        (converted_run, active_mission_id.clone(), true, None)
+        (converted_run.clone(), active_mission_id.clone(), true, None)
+    );
+    let saved_compaction_outcome: String = migrated
+        .query_row(
+            "SELECT json_extract(boundary,'$.chatExecution.previous.outcome') FROM runs WHERE id=?",
+            [&converted_run],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&saved_compaction_outcome).unwrap(),
+        json!({
+            "status": "blocked",
+            "reason": "Needs the saved input",
+            "evidence": ["retained compaction evidence"],
+        })
     );
     let previous_origin: (String, String) = migrated.query_row(
         "SELECT rule_id,json_extract(origin,'$.ruleName') FROM hook_rule_conversations WHERE chat_id=?",
@@ -1884,12 +1932,42 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
 
     let member_read: i64 = migrated
         .query_row(
-            "SELECT finished_at FROM account_reads WHERE account_id='member-acct' AND chat_id=?1",
-            [&blocked_chat_id],
+            "SELECT r.finished_at FROM account_reads r JOIN conversations c ON c.id=r.chat_id
+             WHERE r.account_id='member-acct' AND c.run_id=?1",
+            [&later_blocked_run],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(member_read, t0 + 5000);
+    assert_eq!(member_read, t0 + 6000);
+    let member_read_older_question: bool = migrated.query_row(
+        "SELECT EXISTS(SELECT 1 FROM account_reads WHERE account_id='member-acct' AND chat_id=?1)",
+        [&blocked_chat_id], |row| row.get(0),
+    ).unwrap();
+    assert!(
+        !member_read_older_question,
+        "v38 never permanently dismissed needs_input"
+    );
+    let failed_read: i64 = migrated
+        .query_row(
+            "SELECT r.finished_at FROM account_reads r JOIN conversations c ON c.id=r.chat_id
+         WHERE r.account_id='opened-acct' AND c.run_id=?1",
+            [&failed_with_report],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(failed_read, t0 + 5000);
+    let failed_snooze: bool = migrated
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM account_snoozes s JOIN conversations c ON c.id=s.chat_id
+         WHERE s.account_id='owner-acct' AND c.run_id=?1)",
+            [&failed_with_report],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !failed_snooze,
+        "v38 applied snoozes only to successful results"
+    );
     let merely_opened: bool = migrated
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM account_reads WHERE account_id='opened-acct' AND chat_id=?1)",

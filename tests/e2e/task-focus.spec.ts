@@ -24,6 +24,8 @@ test('a schedule opens an ordinary conversation that can accept a follow-up', as
   await expect(dialog).toHaveCount(0)
   const rule = (await workspace.api('/api/hook-rules')).rules.find((rule: { name: string }) => rule.name === 'Daily dependency report')
   expect(rule.trigger).toMatchObject({ type: 'clock', timezone: 'Europe/Paris' })
+  expect(rule.nextRun).toBeGreaterThan(Date.now())
+  await expect(page.locator('time[aria-label="Next run"]')).toHaveAttribute('datetime', new Date(rule.nextRun).toISOString())
   await page.getByRole('button', { name: 'Run now' }).click()
   await expect(page.getByRole('button', { name: 'History', exact: true })).toHaveAttribute('aria-pressed', 'true')
 

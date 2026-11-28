@@ -177,6 +177,9 @@ const sources: Record<string, string> = {
         <span class="min-w-0">
           <span class="block text-2xs font-bold tracking-wide text-muted uppercase">When</span>
           <span class="block truncate text-sm font-semibold">{{ trigger.source }} · {{ trigger.title }}</span>
+          <span v-if="rule.nextRun != null" class="block text-xs text-muted">
+            Next run <time aria-label="Next run" :datetime="new Date(rule.nextRun).toISOString()">{{ new Date(rule.nextRun).toLocaleString() }}</time>
+          </span>
         </span>
         <Icon :name="Webhook" :size="15" class="ml-auto text-muted" />
       </div>
