@@ -900,6 +900,18 @@ async fn a_retired_disk_blocks_only_readmission_to_its_own_node_until_deleted() 
 #[tokio::test]
 async fn an_idle_conversation_keeps_its_wakeup_when_changing_node() {
     let change = Change::new(RunStatus::Succeeded).await;
+    change
+        .owner
+        .service
+        .store
+        .event(
+            &change.run,
+            &cairn_contracts::EventKind::ChatUser,
+            "Keep working",
+            None,
+        )
+        .await
+        .unwrap();
     let wakeup = change
         .due_wakeup("Wait for the scheduled continuation")
         .await;
