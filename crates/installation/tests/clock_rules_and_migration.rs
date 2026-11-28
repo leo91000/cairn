@@ -154,6 +154,61 @@ async fn clock_rules_cannot_bind_or_steer_a_conversation_for_reuse() {
 }
 
 #[tokio::test]
+async fn run_now_records_a_capacity_refusal() {
+    let app = App::new().await;
+    let definition = schedule_rule_definition(
+        "Busy schedule",
+        &json!({ "type": "clock", "cron": "0 9 * * *", "timezone": "UTC" }),
+    );
+    let (status, rule) = app
+        .request(
+            &app.owner,
+            "POST",
+            "/api/hook-rules",
+            json!({ "definition": definition }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{rule}");
+    let rule_id = text(&rule, "id").to_owned();
+    let queued_rule = rule_id.clone();
+    app.service
+        .store
+        .transaction(move |db| {
+            db.0.execute(
+            "WITH RECURSIVE queue(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM queue WHERE n<1000) \
+             INSERT INTO hook_rule_triggerings(id,rule_id,version,event_id,event,status,cursor, \
+                in_flight,actions,tool_calls,verify,created_at,updated_at) \
+             SELECT 'pending-'||n,?1,1,'event-'||n,'{}','running','{}',0,0,0,0,?2,?2 FROM queue",
+            params![queued_rule, now()],
+        )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (status, refused) = app
+        .request(
+            &app.owner,
+            "POST",
+            &format!("/api/hook-rules/{rule_id}/run"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    let recorded: i64 =
+        app.service
+            .store
+            .read(move |db| {
+                Ok(db.0.query_row(
+            "SELECT coalesce(sum(not_admitted),0) FROM hook_rule_quiet_hours WHERE rule_id=?",
+            [&rule_id], |row| row.get(0),
+        )?)
+            })
+            .await
+            .unwrap();
+    assert_eq!(recorded, 1);
+}
+
+#[tokio::test]
 async fn clock_cron_rule_catches_up_once_guards_overlap_and_runs_now() {
     let app = App::new().await;
 
@@ -831,6 +886,29 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     )
     .unwrap();
 
+    // Removing a mission did not remove a conversation previously converted from it.
+    let deleted_mission_id = id();
+    let converted_orphan = id();
+    let converted_orphan_run = id();
+    conn.execute(
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,finished_at,snapshot,boundary, \
+          recovery_pending,resume_available,resume_count) \
+         VALUES(?1,?2,'succeeded','chat',?3,?3,?4,?5,0,0,0)",
+        params![
+            converted_orphan_run,
+            converted_orphan,
+            t0,
+            json!({ "agent": agent, "task": { "name": "Deleted mission" } }).to_string(),
+            json!({ "sourceTaskId": deleted_mission_id }).to_string(),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO conversations(id,slug,agent_id,title,run_id,paused,lifecycle,revision,created_at,updated_at,persisted_at,session_restart_requested,cancelled_by_deletion) \
+         VALUES(?1,'renamed-chat',?2,'Renamed chat',?3,0,'active','r1',?4,?4,?4,0,0)",
+        params![converted_orphan, MAIN_AGENT_ID, converted_orphan_run, t0],
+    ).unwrap();
+
     let interrupted_run = id();
     conn.execute(
         "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,session_id,snapshot,boundary, \
@@ -1080,6 +1158,15 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     assert_eq!(
         converted,
         (converted_run, active_mission_id.clone(), true, None)
+    );
+    let previous_origin: (String, String) = migrated.query_row(
+        "SELECT rule_id,json_extract(origin,'$.ruleName') FROM hook_rule_conversations WHERE chat_id=?",
+        [&converted_orphan],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(
+        previous_origin,
+        (deleted_mission_id, "Deleted mission".into())
     );
     let owner_snooze: i64 = migrated
         .query_row(

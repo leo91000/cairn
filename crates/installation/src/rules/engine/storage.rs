@@ -72,6 +72,34 @@ pub(super) fn triggering(row: &rusqlite::Row<'_>) -> rusqlite::Result<Triggering
 }
 
 impl Db<'_> {
+    pub(super) fn insert_rule_triggering(
+        &self,
+        rule: &str,
+        version: u32,
+        event: &str,
+        recorded: &str,
+        at: i64,
+    ) -> Result<Option<String>> {
+        let triggering = id();
+        let written = self.0.prepare_cached(
+            "INSERT OR IGNORE INTO hook_rule_triggerings( \
+             id,rule_id,version,event_id,event,status,cursor,pending,in_flight, \
+             actions,tool_calls,counted_at,verify,verify_since,next_at,lease_until, \
+             error,created_at,updated_at,finished_at,recorded_bytes) \
+             VALUES(?1,?2,?3,?4,?5,'running',?6,NULL,0,0,0,NULL,0,NULL,NULL,NULL,NULL,?7,?7,NULL,?8)",
+        )?.execute(params![
+            triggering,
+            rule,
+            version,
+            event,
+            recorded,
+            serde_json::to_string(&Cursor::default())?,
+            at,
+            (recorded.len() + 256) as i64,
+        ])?;
+        Ok((written > 0).then_some(triggering))
+    }
+
     pub(super) fn hook_triggering(&self, id: &str) -> Result<Option<Triggering>> {
         Ok(self
             .0

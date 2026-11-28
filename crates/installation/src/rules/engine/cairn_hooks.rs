@@ -739,24 +739,9 @@ fn fanout(
             "INSERT OR IGNORE INTO hook_rule_receipts(rule_id,event_id) VALUES(?1,?2)",
             params![rule, event],
         )?;
-        db.0.prepare_cached(
-            "INSERT OR IGNORE INTO hook_rule_triggerings( \
-             id,rule_id,version,event_id,event,status,cursor,pending,in_flight, \
-             actions,tool_calls,counted_at,verify,verify_since,next_at,lease_until, \
-             error,created_at,updated_at,finished_at,recorded_bytes) \
-             VALUES(?1,?2,?3,?4,?5,'running',?6,NULL,0,0,0,NULL,0,NULL,NULL,NULL,NULL,?7,?7,NULL,?8)",
-        )?
-        .execute(params![
-            id(),
-            rule,
-            version.version,
-            event,
-            recorded,
-            serde_json::to_string(&Cursor::default())?,
-            now(),
-            recorded_bytes as i64
-        ])?;
-        delivered = true;
+        delivered |= db
+            .insert_rule_triggering(&rule, version.version, &event, &recorded, now())?
+            .is_some();
     }
     Ok(delivered.then_some(event))
 }

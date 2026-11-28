@@ -443,7 +443,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         }
     }
 
-    link_converted_mission_runs(&tx, &mission_meta)?;
+    link_converted_mission_runs(&tx, &mission_meta, known_owner.as_deref())?;
 
     // Read full snapshots in bounded batches. Only the small read-mark and
     // dismissal mapping survives a batch.
@@ -873,12 +873,11 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
 fn link_converted_mission_runs(
     tx: &Connection,
     missions: &HashMap<String, MigratedMission>,
+    known_owner: Option<&str>,
 ) -> Result<()> {
-    if missions.is_empty() {
-        return Ok(());
-    }
     let mut converted = tx.prepare(
-        "SELECT c.id,c.agent_id,c.created_at,r.id,json_extract(r.boundary,'$.sourceTaskId') \
+        "SELECT c.id,c.agent_id,c.created_at,r.id,json_extract(r.boundary,'$.sourceTaskId'), \
+            coalesce(nullif(r.task_name,''),c.title) \
          FROM conversations c JOIN runs r ON r.id=c.run_id \
          WHERE r.trigger='chat' AND json_type(r.boundary,'$.sourceTaskId')='text'",
     )?;
@@ -890,23 +889,35 @@ fn link_converted_mission_runs(
     )?;
     while let Some(row) = rows.next()? {
         let mission_id: String = row.get(4)?;
-        let Some(mission) = missions.get(&mission_id) else {
-            continue;
-        };
+        let historical_title: String = row.get(5)?;
+        let (rule_id, rule_name, creator) = missions.get(&mission_id).map_or(
+            (
+                mission_id.as_str(),
+                historical_title.as_str(),
+                known_owner.unwrap_or("owner"),
+            ),
+            |mission| {
+                (
+                    mission.rule_id.as_str(),
+                    mission.name.as_str(),
+                    mission.creator.as_str(),
+                )
+            },
+        );
         let chat_id: String = row.get(0)?;
         let agent_id: String = row.get(1)?;
         let created_at: i64 = row.get(2)?;
         let run_id: String = row.get(3)?;
         let origin = json!({
             "hook": "clock",
-            "ruleName": mission.name,
+            "ruleName": rule_name,
             "schedule": true,
         });
         insert.execute(params![
             chat_id,
-            mission.creator,
+            creator,
             agent_id,
-            mission.rule_id,
+            rule_id,
             origin.to_string(),
             run_id,
             created_at,

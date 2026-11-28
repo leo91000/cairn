@@ -193,25 +193,7 @@ fn insert_triggering(
     if received == 0 {
         return Ok(None);
     }
-    let triggering_id = id();
-    db.0.prepare_cached(
-        "INSERT OR IGNORE INTO hook_rule_triggerings( \
-         id,rule_id,version,event_id,event,status,cursor,pending,in_flight, \
-         actions,tool_calls,counted_at,verify,verify_since,next_at,lease_until, \
-         error,created_at,updated_at,finished_at,recorded_bytes) \
-         VALUES(?1,?2,?3,?4,?5,'running',?6,NULL,0,0,0,NULL,0,NULL,NULL,NULL,NULL,?7,?7,NULL,?8)",
-    )?
-    .execute(params![
-        triggering_id,
-        rule_id,
-        version,
-        event_id,
-        recorded,
-        serde_json::to_string(&Cursor::default())?,
-        at,
-        recorded_bytes as i64
-    ])?;
-    Ok(Some(triggering_id))
+    db.insert_rule_triggering(rule_id, version, event_id, &recorded, at)
 }
 
 fn advance_schedule(
@@ -421,7 +403,8 @@ pub(crate) async fn run_now(
                 return Err(Error::conflict(reason));
             }
             let depth = if agent_author.is_some() {
-                let legacy_depth = db.hook_rule_schedule(&rule_id)?
+                let legacy_depth = db
+                    .hook_rule_schedule(&rule_id)?
                     .map_or(0, |schedule| schedule.legacy_chain_depth.saturating_sub(1));
                 depth.max(legacy_depth)
             } else {
@@ -430,20 +413,24 @@ pub(crate) async fn run_now(
             let at = now();
             let event_id = format!("clock-manual:{}", id());
             let record = clock_event(&event_id, None, at, timezone, true, depth)?;
-            let triggering_id =
+            let Some(triggering_id) =
                 insert_triggering(db, &rule_id, version.version, &event_id, &record, at)?
-                    .ok_or_else(|| {
-                        Error::conflict(
-                            "This rule has reached its pending capacity. Wait for current triggerings to finish.",
-                        )
-                    })?;
+            else {
+                // Commit the recorded refusal along with the admission decision.
+                return Ok(None);
+            };
             db.audit(
                 "hook_rule.run_now",
                 &json!({ "ruleId": rule_id, "triggeringId": triggering_id }),
             )?;
-            steps::get(db, &triggering_id, &viewer)
+            steps::get(db, &triggering_id, &viewer).map(Some)
         })
         .await?;
+    let triggering = triggering.ok_or_else(|| {
+        Error::conflict(
+            "This rule has reached its pending capacity. Wait for current triggerings to finish.",
+        )
+    })?;
     s.rules.wake.notify_one();
     Ok(triggering)
 }
