@@ -140,6 +140,7 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                 .deferred_cleanup_observers
                 .lock()
                 .await
+                .in_flight
                 .is_empty()
             {
                 tokio::time::sleep(Duration::from_millis(10)).await;

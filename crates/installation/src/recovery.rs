@@ -328,7 +328,7 @@ async fn fence_attempt_authorized(
                     && now() >= deferred.until
                     && !s.shutdown.is_cancelled()
                 {
-                    deferred.state = DeferredCleanupState::Expired;
+                    deferred.state = DeferredCleanupState::Unconfirmed;
                 }
                 FencedCleanup::Deferred(deferred)
             }
@@ -497,7 +497,7 @@ const NATIVE_CLEANUP_FOLLOW_UP_MS: i64 = 5 * 60 * 1_000;
 pub(crate) enum DeferredCleanupState {
     Observing,
     Retired,
-    Expired,
+    Unconfirmed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -574,7 +574,7 @@ pub(crate) async fn observe_pending_native_cleanup(
     };
     let mut verdict = pending.clone();
     if now() >= pending.until {
-        verdict.state = DeferredCleanupState::Expired;
+        verdict.state = DeferredCleanupState::Unconfirmed;
     } else if retired {
         verdict.state = DeferredCleanupState::Retired;
     } else {

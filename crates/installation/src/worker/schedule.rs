@@ -18,7 +18,7 @@ use cairn_contracts::EventKind;
 use cairn_contracts::RunState;
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
@@ -457,8 +457,43 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
     Ok(false)
 }
 
+const MAX_DEFERRED_CLEANUP_OBSERVERS: usize = 16;
+
+#[derive(Default)]
+pub(super) struct DeferredCleanupObservers {
+    pub(super) in_flight: HashSet<String>,
+    waiting: VecDeque<String>,
+}
+
+impl DeferredCleanupObservers {
+    fn admit(&mut self, candidates: Vec<(String, RunCheckpoint)>) -> Vec<(String, RunCheckpoint)> {
+        let eligible: HashSet<&str> = candidates.iter().map(|(id, _)| id.as_str()).collect();
+        self.waiting
+            .retain(|id| eligible.contains(id.as_str()) && !self.in_flight.contains(id));
+
+        let mut waiting: HashSet<String> = self.waiting.iter().cloned().collect();
+        for (id, _) in &candidates {
+            if !self.in_flight.contains(id) && waiting.insert(id.clone()) {
+                self.waiting.push_back(id.clone());
+            }
+        }
+
+        let slots = MAX_DEFERRED_CLEANUP_OBSERVERS.saturating_sub(self.in_flight.len());
+        let mut candidates: HashMap<_, _> = candidates.into_iter().collect();
+        let mut admitted = Vec::new();
+        for id in self.waiting.drain(..self.waiting.len().min(slots)) {
+            if let Some(saved) = candidates.remove(&id) {
+                self.in_flight.insert(id.clone());
+                admitted.push((id, saved));
+            }
+        }
+        admitted
+    }
+}
+
 /// A lost controller must not delay unrelated sends while completed chats fence.
 pub(super) async fn recover_completed_environments(s: &Arc<Service>) -> Result<()> {
+    let mut ready = Vec::new();
     for id in s.store.read(|db| db.completed_recovery_ids()).await? {
         if s.shutdown.is_cancelled() {
             break;
@@ -485,32 +520,29 @@ pub(super) async fn recover_completed_environments(s: &Arc<Service>) -> Result<(
                 .pending_native_cleanup()
                 .is_some_and(crate::recovery::PendingNativeCleanup::needs_observation)
         {
-            schedule_native_cleanup_observation(s, id, saved).await;
+            ready.push((id, saved));
             continue;
         }
         recover_or_wait(s, &run).await?;
         s.worker.notify();
     }
-    Ok(())
-}
-
-async fn schedule_native_cleanup_observation(s: &Arc<Service>, id: String, saved: RunCheckpoint) {
-    // Slow controller calls must not occupy the environment detachment loop
-    // or delay a different run. Keep one observer per run and bound the pool.
-    let mut active = s.worker.deferred_cleanup_observers.lock().await;
-    if active.len() >= 16 || !active.insert(id.clone()) {
-        return;
+    let admitted = s
+        .worker
+        .deferred_cleanup_observers
+        .lock()
+        .await
+        .admit(ready);
+    for (id, saved) in admitted {
+        let service = s.clone();
+        s.worker.spawn_recovery(async move {
+            let result = recovery::observe_pending_native_cleanup(&service, &id, saved).await;
+            service.worker.deferred_cleanup_observers.lock().await.in_flight.remove(&id);
+            if let Err(error) = result {
+                tracing::warn!(run_id = id, message = %error.message, "Native cleanup observation failed");
+            }
+        });
     }
-    drop(active);
-
-    let service = s.clone();
-    s.worker.spawn_recovery(async move {
-        let result = recovery::observe_pending_native_cleanup(&service, &id, saved).await;
-        service.worker.deferred_cleanup_observers.lock().await.remove(&id);
-        if let Err(error) = result {
-            tracing::warn!(run_id = id, message = %error.message, "Native cleanup observation failed");
-        }
-    });
+    Ok(())
 }
 
 // A provider retry is paid by Retry::next, not by the controller recovery
@@ -937,6 +969,28 @@ fn recovery_observation_limit(deadline: Option<i64>) -> Duration {
     })
 }
 
+/// Environment detachment replaces the execution checkpoint. Settle a fenced
+/// turn with its durable verdict before that transaction discards the receipt.
+pub(crate) fn finish_deferred_cleanup_before_detach(
+    db: &Db<'_>,
+    run_id: &str,
+    saved: &RunCheckpoint,
+) -> Result<bool> {
+    use crate::recovery::DeferredCleanupState;
+
+    let Some(pending) = saved.pending_native_cleanup() else {
+        return Ok(false);
+    };
+    let mut pending = pending.clone();
+    if pending.state == DeferredCleanupState::Observing {
+        pending.state = DeferredCleanupState::Unconfirmed;
+    }
+    let mut saved = saved.clone();
+    saved.pending_native_cleanup = Some(pending);
+    finish_recovery(db, run_id, Some(&saved))?;
+    Ok(true)
+}
+
 /// Cancellation and the final recovery state commit together. In particular,
 /// a completed provider turn must never restore a wait cancellation removed.
 pub(super) fn finish_recovery(
@@ -979,7 +1033,7 @@ pub(super) fn finish_recovery(
         {
             match pending.state {
                 DeferredCleanupState::Observing => return Ok(false),
-                DeferredCleanupState::Expired => saved.record_controller_result(
+                DeferredCleanupState::Unconfirmed => saved.record_controller_result(
                     db,
                     id,
                     &pending.attempt,

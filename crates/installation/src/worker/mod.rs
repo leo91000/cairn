@@ -13,6 +13,7 @@ mod retry;
 mod schedule;
 
 pub use control::routes;
+pub(crate) use schedule::finish_deferred_cleanup_before_detach;
 
 use crate::{
     config::now,
@@ -43,7 +44,7 @@ pub(crate) struct ResumeSelectionContext {
 pub struct Worker {
     pub active: Mutex<HashMap<String, CancellationToken>>,
     held: Mutex<std::collections::HashSet<String>>,
-    deferred_cleanup_observers: Mutex<std::collections::HashSet<String>>,
+    deferred_cleanup_observers: Mutex<schedule::DeferredCleanupObservers>,
     pub(crate) job_redactions: Mutex<HashMap<String, crate::accounts::output_redactions::History>>,
     tick_lock: Mutex<()>,
     preparation: Arc<Mutex<()>>,

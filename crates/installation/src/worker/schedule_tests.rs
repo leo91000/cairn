@@ -4,6 +4,30 @@ use super::*;
 use crate::agent_fixture::AgentFixture;
 use std::{future::Future, task::Poll};
 
+#[test]
+fn waiting_native_cleanup_gets_the_next_available_observer() {
+    let mut observers = DeferredCleanupObservers::default();
+    let eligible = || {
+        (0..=MAX_DEFERRED_CLEANUP_OBSERVERS)
+            .map(|index| (index.to_string(), RunCheckpoint::default()))
+            .collect()
+    };
+    let first = observers.admit(eligible());
+    assert_eq!(first.len(), MAX_DEFERRED_CLEANUP_OBSERVERS);
+    assert!(observers.admit(eligible()).is_empty());
+
+    // The first run became inconclusive, but it has already had a probe.
+    observers.in_flight.remove(&first[0].0);
+    let next = observers.admit(eligible());
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].0, MAX_DEFERRED_CLEANUP_OBSERVERS.to_string());
+
+    observers.in_flight.remove(&next[0].0);
+    let retried = observers.admit(eligible());
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0].0, first[0].0);
+}
+
 #[tokio::test]
 async fn maintenance_removes_checkpoints_after_run_history_expires() {
     let (_root, service, _chat, run, _workspace) = fixture().await;
