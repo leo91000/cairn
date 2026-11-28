@@ -634,8 +634,7 @@ async fn settle_native_cleanup(s: &Service, id: String, expected: RunCheckpoint)
             }
             if let Some(pending) = current.pending_native_cleanup()
                 && pending.state == DeferredCleanupState::Observing
-                && (!pending.needs_observation()
-                    || crate::environment_expiration::pending(db, &id)?)
+                && !pending.needs_observation()
             {
                 let mut pending = pending.clone();
                 pending.state = DeferredCleanupState::Unconfirmed;
@@ -1135,56 +1134,17 @@ pub(crate) fn finish_native_cleanup_before_detach(
     run_id: &str,
     saved: &RunCheckpoint,
 ) -> Result<bool> {
-    use crate::recovery::DeferredCleanupState;
-
-    let Some(run) = db
-        .run_state(run_id)?
-        .filter(|run| run.status == RunStatus::Succeeded && run.recovery_pending)
-    else {
+    let Some(run) = db.run_state(run_id)? else {
         return Ok(false);
     };
-    if let Some(pending) = saved.pending_native_cleanup() {
-        if pending.awaiting_retirement() {
-            return Ok(false);
-        }
-        let mut saved = saved.clone();
-        if pending.state == DeferredCleanupState::Observing {
-            let mut pending = pending.clone();
-            pending.state = DeferredCleanupState::Unconfirmed;
-            saved.pending_native_cleanup = Some(pending);
-        }
-        finish_recovery(db, run_id, Some(&saved))?;
-        return Ok(true);
-    }
-    if run.trigger != "chat" || !RunCheckpoint::finishing_native_turn_in(db, run_id, true)? {
+    if !super::control::native_cleanup_pending_in(db, &run)?
+        || saved
+            .pending_native_cleanup()
+            .is_some_and(crate::recovery::PendingNativeCleanup::awaiting_retirement)
+    {
         return Ok(false);
     }
-
-    let finished_at = saved
-        .settled()
-        .and_then(|turn| turn.finished_at)
-        .or(run.finished_at);
-    if run.cancel_requested_at.is_some() {
-        cancel_recovery(db, run_id, &run, finished_at)?;
-        return Ok(true);
-    }
-    let failure = saved
-        .runner_id()
-        .filter(|attempt| saved.finalization_failure_attempt.as_deref() == Some(*attempt))
-        .and_then(|_| saved.finalization_error());
-    if failure.is_none() && saved.native_flush_confirmed() {
-        finish_recovery(db, run_id, Some(saved))?;
-        return Ok(true);
-    }
-    crate::chats::continuation::cancel_for_run(db, run_id)?;
-    let mut outcome = Settled::failure(
-        RunStatus::Failed,
-        failure.unwrap_or(
-            "Native disk cleanup could not be confirmed before the environment expired.",
-        ),
-    );
-    outcome.finished_at = finished_at.or(outcome.finished_at);
-    db.change_run(run_id, outcome.run_changes())?;
+    finish_recovery_in(db, run_id, Some(saved), true)?;
     Ok(true)
 }
 
@@ -1195,20 +1155,33 @@ pub(super) fn finish_recovery(
     id: &str,
     checkpoint: Option<&RunCheckpoint>,
 ) -> Result<bool> {
+    finish_recovery_in(db, id, checkpoint, false)
+}
+
+fn finish_recovery_in(
+    db: &Db<'_>,
+    id: &str,
+    checkpoint: Option<&RunCheckpoint>,
+    detaching: bool,
+) -> Result<bool> {
     let record = db
         .run_record(id)?
         .ok_or_else(|| Error::not_found("Run not found"))?;
     let current = &record.state;
+    let expiring_native = record.native_cleanup_pending
+        && (detaching || crate::environment_expiration::pending(db, id)?);
+    let has_native_fence = checkpoint.is_some_and(|saved| saved.pending_native_cleanup().is_some());
     let observed_control_failure = if let Some(saved) = checkpoint {
         super::held::take_observed_control_failure(db, id, saved)?
     } else {
         None
     };
     let cleanup_finished_at = checkpoint
-        .filter(|saved| saved.pending_native_cleanup().is_some() || saved.native_cleanup_failure())
+        .filter(|saved| expiring_native || has_native_fence || saved.native_cleanup_failure())
         .and_then(RunCheckpoint::settled)
         .filter(|settled| settled.status == RunStatus::Succeeded)
-        .and_then(|settled| settled.finished_at);
+        .and_then(|settled| settled.finished_at)
+        .or_else(|| current.finished_at.filter(|_| expiring_native));
     let cleanup_failure = |message| {
         let mut failure = Settled::failure(RunStatus::Failed, message);
         // Messages queued after the completed turn still belong to the next turn.
@@ -1232,13 +1205,14 @@ pub(super) fn finish_recovery(
             && current.recovery_pending
         {
             match pending.state {
-                DeferredCleanupState::Observing => return Ok(false),
-                DeferredCleanupState::Unconfirmed => saved.record_controller_result(
-                    db,
-                    id,
-                    &pending.attempt,
-                    Some(pending.clone().failure()),
-                )?,
+                DeferredCleanupState::Observing if !expiring_native => return Ok(false),
+                DeferredCleanupState::Observing | DeferredCleanupState::Unconfirmed => saved
+                    .record_controller_result(
+                        db,
+                        id,
+                        &pending.attempt,
+                        Some(pending.clone().failure()),
+                    )?,
                 DeferredCleanupState::Retired | DeferredCleanupState::AwaitingRetirement => {}
             }
         }
@@ -1282,6 +1256,16 @@ pub(super) fn finish_recovery(
             crate::chats::continuation::cancel_for_run(db, id)?;
             db.event(id, &EventKind::Error, &message, None)?;
             db.change_run(id, cleanup_failure(&message))?;
+            return Ok(false);
+        }
+        if expiring_native && !has_native_fence && !checkpoint.native_flush_confirmed() {
+            crate::chats::continuation::cancel_for_run(db, id)?;
+            db.change_run(
+                id,
+                cleanup_failure(
+                    "Native disk cleanup could not be confirmed before the environment expired.",
+                ),
+            )?;
             return Ok(false);
         }
         if let Some(settled) = checkpoint.settled() {

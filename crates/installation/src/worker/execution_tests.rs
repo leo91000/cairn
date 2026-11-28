@@ -122,28 +122,53 @@ async fn delete_cleanup_evidence_survives_live_checkpoint_persistence() {
 
 #[tokio::test]
 async fn stop_and_expiration_during_native_delete_preserve_the_fence() {
-    for stop in [true, false] {
-        request_during_native_delete(stop).await;
+    for (stop, response) in [
+        (true, NativeDeleteResponse::Deferred),
+        (false, NativeDeleteResponse::Deferred),
+        (false, NativeDeleteResponse::Stopped),
+        (true, NativeDeleteResponse::Stopped),
+        (false, NativeDeleteResponse::FlushFailed),
+        (false, NativeDeleteResponse::Flushed),
+    ] {
+        request_during_native_delete(stop, response).await;
     }
 }
 
-async fn request_during_native_delete(stop: bool) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NativeDeleteResponse {
+    Deferred,
+    Stopped,
+    FlushFailed,
+    Flushed,
+}
+
+async fn request_during_native_delete(stop: bool, response: NativeDeleteResponse) {
     use crate::environment_expiration::Expiration;
-    use axum::{Json, Router, routing::delete};
+    use axum::{
+        Json, Router,
+        routing::{delete, post},
+    };
     use tokio::sync::Notify;
 
     let attempt = crate::config::id();
     let arrived = Arc::new(Notify::new());
     let reply = Arc::new(Notify::new());
-    let receipt = json!({
-        "StatusCode": crate::runner::CONTROLLER_FAILED,
-        "FinalizationFailed": true,
-        "NativeCleanup": {
-            "attemptId": attempt, "workloadFenced": true,
-            "cleanupStatusProtocol": crate::runner::NATIVE_CLEANUP_STATUS_PROTOCOL,
-            "message": "Native disk cleanup is still in progress."
-        }
-    });
+    let receipt = match response {
+        NativeDeleteResponse::Deferred => json!({
+            "StatusCode": crate::runner::CONTROLLER_FAILED,
+            "FinalizationFailed": true,
+            "NativeCleanup": {
+                "attemptId": attempt, "workloadFenced": true,
+                "cleanupStatusProtocol": crate::runner::NATIVE_CLEANUP_STATUS_PROTOCOL,
+                "message": "Native disk cleanup is still in progress."
+            }
+        }),
+        NativeDeleteResponse::FlushFailed => json!({
+            "StatusCode": crate::runner::CONTROLLER_FAILED,
+            "FinalizationFailed": true,
+        }),
+        NativeDeleteResponse::Stopped | NativeDeleteResponse::Flushed => json!({}),
+    };
     let app = Router::new().route(
         "/runs/{attempt}",
         delete({
@@ -156,6 +181,14 @@ async fn request_during_native_delete(stop: bool) {
             }
         }),
     );
+    let app = if response == NativeDeleteResponse::Flushed {
+        app.route(
+            "/runs/{attempt}/wait",
+            post(|| async { Json(json!({ "StatusCode": 0, "PhysicalFinalized": true })) }),
+        )
+    } else {
+        app
+    };
     let (_root, service, server) = fence_service(app).await;
     let id = crate::config::id();
     let fixture = id.clone();
@@ -221,9 +254,7 @@ async fn request_during_native_delete(stop: bool) {
                 })
                 .await
                 .unwrap();
-            if stop {
-                service.worker.cancel(&service, &id).await.unwrap();
-            } else {
+            if !stop || response != NativeDeleteResponse::Deferred {
                 service
                     .expire_environment(
                         &id,
@@ -232,6 +263,9 @@ async fn request_during_native_delete(stop: bool) {
                     )
                     .await
                     .unwrap();
+            }
+            if stop {
+                service.worker.cancel(&service, &id).await.unwrap();
             }
             let current = service.store.run(&id).await.unwrap();
             assert_eq!(current["cancelRequestedAt"].is_number(), stop);
@@ -244,10 +278,9 @@ async fn request_during_native_delete(stop: bool) {
     .await
     .unwrap();
     let fenced = service.store.run(&id).await.unwrap();
-    assert!(fenced["environmentAdmissionRevision"].is_string());
-    assert_ne!(
-        fenced["environmentAdmissionRevision"],
-        revision_before_fence
+    assert_eq!(
+        fenced["environmentAdmissionRevision"] != revision_before_fence,
+        response == NativeDeleteResponse::Deferred,
     );
     release(&service, &checkpoint, None, true).await.unwrap();
 
@@ -255,14 +288,33 @@ async fn request_during_native_delete(stop: bool) {
         .await
         .unwrap();
     let stopped = service.store.run_state(&id).await.unwrap();
-    if stop {
-        assert_eq!(stopped.status, RunStatus::Cancelled);
+    let expected = if stop {
+        RunStatus::Cancelled
+    } else if response == NativeDeleteResponse::Flushed {
+        RunStatus::Succeeded
     } else {
-        assert_eq!(stopped.status, RunStatus::Failed);
-        assert_eq!(
-            stopped.error.as_deref(),
-            Some("Native disk cleanup is still in progress.")
-        );
+        RunStatus::Failed
+    };
+    assert_eq!(stopped.status, expected);
+    if !stop {
+        match response {
+            NativeDeleteResponse::Deferred => assert_eq!(
+                stopped.error.as_deref(),
+                Some("Native disk cleanup is still in progress."),
+            ),
+            NativeDeleteResponse::Stopped => assert_eq!(
+                stopped.error.as_deref(),
+                Some("Native disk cleanup could not be confirmed before the environment expired."),
+            ),
+            NativeDeleteResponse::FlushFailed => assert!(
+                stopped
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("filesystem could not be flushed"),
+            ),
+            NativeDeleteResponse::Flushed => assert!(stopped.error.is_none()),
+        }
     }
     assert_eq!(stopped.finished_at, Some(42));
     assert!(!stopped.recovery_pending);
@@ -270,12 +322,17 @@ async fn request_during_native_delete(stop: bool) {
         .await
         .unwrap()
         .unwrap();
-    assert!(
+    assert_eq!(
         retained
             .pending_native_cleanup()
-            .unwrap()
-            .awaiting_retirement()
+            .is_some_and(crate::recovery::PendingNativeCleanup::awaiting_retirement),
+        response == NativeDeleteResponse::Deferred,
     );
+    service.worker.active.lock().await.remove(&id);
+    service.detach_stopped_environments().await.unwrap();
+    let detached = service.store.run_state(&id).await.unwrap();
+    assert_eq!(detached.status, expected);
+    assert_eq!(detached.finished_at, Some(42));
     server.abort();
 }
 

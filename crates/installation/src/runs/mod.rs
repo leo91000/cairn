@@ -184,7 +184,7 @@ pub(crate) struct RunRecord {
     pub boundary: Value,
     pub wakeup: Option<cairn_contracts::ChatWakeup>,
     pub placement: Box<crate::nodes::run_placement::RunPlacement>,
-    native_cleanup_pending: bool,
+    pub(crate) native_cleanup_pending: bool,
 }
 
 impl RunRecord {

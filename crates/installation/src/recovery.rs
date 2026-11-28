@@ -667,17 +667,20 @@ async fn fence_runner(
             let mut status_protocol = None;
             if let Ok(value) = response.json::<Value>().await {
                 cleanup = crate::runner::client_cleanup_result(&value, attempt);
+                let plain = crate::runner::plain_finalization(&value);
                 if may_defer
                     && cleanup.is_none()
                     && value["FinalizationFailed"] != true
                     && (value["NativeCleanupRetired"]["attemptId"].as_str() == Some(attempt)
-                        || value["PhysicalFinalized"] == true)
+                        || plain
+                            .as_ref()
+                            .is_some_and(|result| result.physical_finalized))
                 {
                     return Ok(FencedCleanup::FlushedNative);
                 }
                 status_protocol = value["NativeCleanup"]["cleanupStatusProtocol"].as_u64();
                 if cleanup.is_none() {
-                    cleanup = crate::runner::plain_finalization_failure(&value);
+                    cleanup = plain.filter(|result| result.finalization_failed);
                 }
             }
             if let Some(message) = cleanup
@@ -702,14 +705,22 @@ async fn fence_runner(
                 // Both controllers expose explicit flush failures through the
                 // terminal result. DELETE may only acknowledge that they stopped.
                 authorize.recheck().await?;
-                cleanup = tokio::time::timeout(
+                let observed = tokio::time::timeout(
                     Duration::from_secs(2),
-                    crate::runner::observe_plain_finalization_failure(&s.http, &url, &credential),
+                    crate::runner::observe_plain_finalization(&s.http, &url, &credential),
                 )
                 .await
                 .ok()
                 .and_then(Result::ok)
                 .flatten();
+                if may_defer
+                    && observed
+                        .as_ref()
+                        .is_some_and(|result| result.physical_finalized)
+                {
+                    return Ok(FencedCleanup::FlushedNative);
+                }
+                cleanup = observed.filter(|result| result.finalization_failed);
             }
             true
         }
