@@ -106,6 +106,7 @@ fn account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
         revision: row.get(17)?,
         usage: None,
         exhausted: None,
+        loaded_exhaustion_at: Some(None),
     })
 }
 
@@ -188,8 +189,10 @@ impl Db<'_> {
         while let Some(row) = rows.next()? {
             let key: String = row.get(0)?;
             if let Some(i) = indexes.get(&key) {
+                let at = row.get(1)?;
+                accounts[*i].loaded_exhaustion_at = Some(Some(at));
                 accounts[*i].exhausted = Some(Exhaustion {
-                    at: row.get(1)?,
+                    at,
                     model: row.get(2)?,
                     usage: None,
                 });
@@ -260,27 +263,48 @@ impl Db<'_> {
     }
 
     pub fn save_coding_account(&self, a: &Account) -> Result<()> {
+        // A managed Antigravity turn can record exhaustion while a refresh
+        // holds an account snapshot across provider I/O. The refresh still
+        // saves current usage, but can only replace the exhaustion it observed.
+        let mut write_exhaustion = true;
+        if a.provider == Provider::Antigravity
+            && let Some(observed) = a.loaded_exhaustion_at
+        {
+            let stored = self
+                .0
+                .prepare_cached("SELECT at FROM account_exhaustion WHERE account_id=?")?
+                .query_row([&a.id], |row| row.get::<_, i64>(0))
+                .optional()?;
+            write_exhaustion = observed == stored;
+        }
         let state = match a.state {
             AccountState::Pending => "pending",
             AccountState::Ready => "ready",
             AccountState::Error => "error",
         };
         self.0.execute("INSERT INTO coding_agent_accounts(id,provider,name,enabled,email,plan,identity,created_at,checked_at,state,error,last_used_at,max_concurrent_runs,reset_error,priority,model_provider,model_provider_name,revision,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19) ON CONFLICT(id) DO UPDATE SET name=excluded.name,enabled=excluded.enabled,email=excluded.email,plan=excluded.plan,identity=excluded.identity,checked_at=excluded.checked_at,state=excluded.state,error=excluded.error,last_used_at=excluded.last_used_at,max_concurrent_runs=excluded.max_concurrent_runs,reset_error=excluded.reset_error,priority=excluded.priority,model_provider=excluded.model_provider,model_provider_name=excluded.model_provider_name,revision=excluded.revision,updated_at=excluded.updated_at",params![a.id,a.provider.as_str(),a.name,a.enabled,a.email,a.plan,a.identity,a.created_at,a.checked_at,state,a.error,a.last_used_at,a.max_concurrent_runs.map(|n|n as i64),a.reset_error,a.priority.map(|n|n as i64),a.model_provider,a.model_provider_name,a.revision,now()])?;
-        self.0
-            .execute("DELETE FROM account_usage WHERE account_id=?", [&a.id])?;
-        self.0
-            .execute("DELETE FROM account_exhaustion WHERE account_id=?", [&a.id])?;
-        if let Some(e) = &a.exhausted {
-            self.0.execute(
-                "INSERT INTO account_exhaustion(account_id,at,model) VALUES (?,?,?)",
-                params![a.id, e.at, e.model],
-            )?;
+        self.0.execute(
+            "DELETE FROM account_usage WHERE account_id=? AND (phase='current' OR ?)",
+            params![a.id, write_exhaustion],
+        )?;
+        if write_exhaustion {
+            self.0
+                .execute("DELETE FROM account_exhaustion WHERE account_id=?", [&a.id])?;
+            if let Some(e) = &a.exhausted {
+                self.0.execute(
+                    "INSERT INTO account_exhaustion(account_id,at,model) VALUES (?,?,?)",
+                    params![a.id, e.at, e.model],
+                )?;
+            }
         }
         for (phase, usage) in [
             ("current", a.usage.as_ref()),
             (
                 "exhausted",
-                a.exhausted.as_ref().and_then(|e| e.usage.as_ref()),
+                a.exhausted
+                    .as_ref()
+                    .filter(|_| write_exhaustion)
+                    .and_then(|e| e.usage.as_ref()),
             ),
         ] {
             let Some(u) = usage else {
@@ -326,6 +350,42 @@ impl Db<'_> {
             )?
             .query_map([], lease_row)?
             .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Record the quota refusal against its Antigravity lease in the
+    /// transaction publishing the managed turn's authenticated output.
+    pub(crate) fn exhaust_managed_antigravity_account(&self, run_id: &str) -> Result<()> {
+        let lease = self
+            .0
+            .prepare_cached(
+                "SELECT account_id,model FROM account_leases WHERE run_id=? AND provider='antigravity'",
+            )?
+            .query_row([run_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .optional()?;
+        if let Some((account_id, model)) = lease {
+            self.exhaust_coding_account(&account_id, &model)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn exhaust_coding_account(&self, id: &str, model: &str) -> Result<()> {
+        let mut account = crate::error::required(self.coding_account(id)?, "Account not found.")?;
+        let mut at = now();
+        if account.provider == Provider::Antigravity
+            && let Some(prior) = &account.exhausted
+        {
+            // Concurrent snapshots must distinguish even same-millisecond refusals.
+            at = at.max(prior.at.saturating_add(1));
+        }
+        account.exhausted = Some(Exhaustion {
+            at,
+            model: model.to_owned(),
+            usage: account.usage.clone(),
+        });
+        self.save_coding_account(&account)?;
+        self.audit("account.exhausted", &serde_json::json!({ "id": id }))
     }
 
     pub fn reserve_account_lease(&self, lease: &Lease) -> Result<()> {

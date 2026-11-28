@@ -450,7 +450,11 @@ impl Execution<'_> {
         launch: Launch,
         log_total: &mut usize,
     ) -> Result<Exit> {
-        let previously_launched = self.checkpoint.read(RunCheckpoint::launched).await;
+        let attempt = output::Attempt {
+            previously_launched: self.checkpoint.read(RunCheckpoint::launched).await,
+            managed_antigravity: self.provider == Provider::Antigravity
+                && workspace.env.contains_key("CAIRN_PROVIDER_TURN"),
+        };
         workspace.authorization.recheck().await?;
         let mut child = Supervised::spawn(
             &launch.binary,
@@ -537,7 +541,7 @@ impl Execution<'_> {
             &mut child,
             &mut events,
             log_total,
-            previously_launched,
+            attempt,
             observed.then_some(reports),
         ))
         .instrument(span)
@@ -569,7 +573,7 @@ impl Execution<'_> {
         child: &mut Supervised,
         events: &mut mpsc::Receiver<output::Output>,
         log_total: &mut usize,
-        previously_launched: bool,
+        attempt: output::Attempt,
         mut reports: Option<output::Reports>,
     ) -> Result<Exit> {
         let s = self.s;
@@ -640,7 +644,7 @@ impl Execution<'_> {
                             s,
                             &output,
                             self.checkpoint,
-                            previously_launched,
+                            attempt,
                             &self.sensitive.snapshot(),
                             log_total,
                             &mut activity,

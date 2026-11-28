@@ -1974,6 +1974,7 @@ async fn intact_provider_failure_is_paid_after_restart_without_controller_charge
                 super::super::checkpoint::EventChanges {
                     run: None,
                     failure: Some(("Provider busy".into(), Some(cause), true)),
+                    antigravity_quota_refusal: false,
                     antigravity_probe_failed: false,
                     completed: false,
                     progress_complete: true,
@@ -2853,7 +2854,7 @@ async fn completed_turn_with_late_controller_failure_settles_without_relaunch() 
                 received: tokio::time::Instant::now(),
             },
             &checkpoint,
-            false,
+            super::super::output::Attempt::default(),
             &[],
             &mut log_total,
             &mut activity,

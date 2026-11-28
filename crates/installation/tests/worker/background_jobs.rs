@@ -7,12 +7,16 @@ use cairn_installation::background_jobs::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
+const QUOTA_FAILURE: &str =
+    "Usage limit reached for Antigravity. Check this account's quota or connect another account.";
+
 struct JobsController {
     legacy: Arc<Controller>,
     root: PathBuf,
     jobs: tokio::sync::Mutex<Registry>,
     turns: tokio::sync::Mutex<Vec<(Value, Vec<Value>, bool)>>,
     turn_completed: tokio::sync::Notify,
+    quota_wait_started: tokio::sync::Notify,
     activity: tokio::sync::Notify,
     disconnect_activity: Option<tokio_util::sync::CancellationToken>,
     close_started: tokio::sync::Notify,
@@ -63,11 +67,18 @@ impl JobsController {
             } else {
                 json!({"id":"answer","type":"agent_message","text":if index == 0 {"Background work started"} else {"Background completion observed"}})
             };
-            let output = format!(
-                "{}\n{}\n",
-                json!({"type":"item.completed","item":item}),
-                json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}})
-            );
+            let output = if state.root.join("fail-provider-quota").exists() {
+                format!(
+                    "{}\n",
+                    json!({"type":"turn.failed","error":{"message":QUOTA_FAILURE}})
+                )
+            } else {
+                format!(
+                    "{}\n{}\n",
+                    json!({"type":"item.completed","item":item}),
+                    json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}})
+                )
+            };
             let mut turns = state.turns.lock().await;
             turns[index].1.push(json!({"offset":2,"event":{"type":"output","stderr":false,"data":STANDARD.encode(output)}}));
             turns[index].2 = true;
@@ -215,7 +226,7 @@ async fn serve_jobs_controller(
                             attempt_id: text(plan, "id").into(),
                             generation: "fixture-generation".into(),
                             turn_id: turn.into(),
-                            code: 0,
+                            code: i32::from(state.root.join("fail-provider-quota").exists()),
                             log_start: 0,
                             log_end: 2,
                         })
@@ -297,6 +308,15 @@ async fn serve_jobs_controller(
             return Json(json!({ "StatusCode": 70, "FinalizationFailed": true })).into_response();
         }
         return Json(json!({})).into_response();
+    }
+    if path.ends_with("/wait") && state.root.join("fail-provider-quota").exists() {
+        // The provider turn has a receipt, while its environment is still
+        // alive. A full execution wait can only finish after manager cleanup.
+        state.quota_wait_started.notify_one();
+        while !state.deleted.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        return Json(json!({ "StatusCode": 143, "PhysicalFinalized": true })).into_response();
     }
     if path.ends_with("/wait")
         && matches!(
@@ -411,6 +431,7 @@ async fn jobs_fixture(
         )),
         turns: tokio::sync::Mutex::new(Vec::new()),
         turn_completed: tokio::sync::Notify::new(),
+        quota_wait_started: tokio::sync::Notify::new(),
         activity: tokio::sync::Notify::new(),
         disconnect_activity: matches!(
             deadline,
@@ -452,6 +473,119 @@ async fn jobs_fixture(
         .await
         .unwrap();
     (fixture, state, server)
+}
+
+#[tokio::test]
+async fn managed_turn_quota_failure_exhausts_the_account_without_replaying() {
+    verify_managed_turn_quota_failure(false).await;
+}
+
+#[tokio::test]
+async fn managed_turn_quota_exhaustion_survives_manager_restart() {
+    verify_managed_turn_quota_failure(true).await;
+}
+
+async fn verify_managed_turn_quota_failure(restart: bool) {
+    let (mut fixture, state, server) = jobs_fixture(None).await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.antigravity_bin = common::fixture("antigravity.mjs");
+    })
+    .await;
+    let service = fixture.service.clone();
+    let account = service
+        .accounts
+        .connect_api_key(
+            &service,
+            Provider::Antigravity,
+            "Antigravity fixture",
+            "gemini",
+            "synthetic-gemini-key-never-a-real-credential",
+            None,
+        )
+        .await
+        .unwrap();
+    let model = "gemini-4-neon";
+    let agent = service
+        .agent_fixture(
+            json!({
+                "name": "Antigravity fixture",
+                "provider": "antigravity",
+                "model": model,
+                "access": {"sandbox": "yolo", "backend": "firecracker"},
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let chat = service
+        .chat_create(json!({"agentId":agent["id"]}))
+        .await
+        .unwrap();
+    let chat = text(&chat, "id");
+    service
+        .chat_send(chat, message("Run a managed turn"))
+        .await
+        .unwrap();
+    fixture.start().await;
+    let run = fixture.chat_run(chat).await;
+    let running = fixture
+        .until(&run, |run| run["sessionId"] == "fixture-session")
+        .await;
+    assert_eq!(state.turns.lock().await[0].0["environmentProtocol"], 1);
+    tokio::fs::write(state.root.join("fail-provider-quota"), "")
+        .await
+        .unwrap();
+    tokio::fs::write(state.root.join("finish-provider"), "")
+        .await
+        .unwrap();
+
+    if restart {
+        tokio::time::timeout(Duration::from_secs(15), state.quota_wait_started.notified())
+            .await
+            .unwrap();
+        assert_eq!(fixture.checkpoint(&run).await["lastError"], QUOTA_FAILURE);
+        fixture.stop(true).await;
+        fixture.start().await;
+    }
+
+    let failed = fixture.until_finished(&run).await;
+    assert_eq!(failed["status"], RunStatus::Failed);
+    assert_eq!(failed["error"], QUOTA_FAILURE);
+    assert_eq!(failed["sessionId"], running["sessionId"]);
+    assert_eq!(failed["workspace"], running["workspace"]);
+    assert_eq!(failed["resumeAvailable"], true);
+    eventually(
+        Duration::from_secs(15),
+        Duration::from_millis(30),
+        async || {
+            let released = service
+                .accounts
+                .lease(&service, &run)
+                .await
+                .unwrap()
+                .is_none();
+            (released && state.deleted.load(Ordering::SeqCst)).then_some(())
+        },
+    )
+    .await;
+    assert_eq!(state.turns.lock().await.len(), 1);
+    let account = service
+        .accounts
+        .account(&service, &account.id)
+        .await
+        .unwrap();
+    let exhaustion = account
+        .exhausted
+        .expect("the failed turn must exhaust its account");
+    assert_eq!(exhaustion.model, model);
+    let next = service
+        .accounts
+        .acquire(&service, &id(), Provider::Antigravity, model)
+        .await
+        .unwrap_err();
+    assert!(next.is_conflict(), "{next:?}");
+    fixture.stop(false).await;
+    server.abort();
 }
 
 #[tokio::test]

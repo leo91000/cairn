@@ -723,16 +723,7 @@ impl Accounts {
         let _guard = self.lock(id).await;
         let (id, model) = (id.to_owned(), model.to_owned());
         s.store
-            .transaction(move |db| {
-                let mut account = required(db.coding_account(&id)?, "Account not found.")?;
-                account.exhausted = Some(Exhaustion {
-                    at: now(),
-                    model,
-                    usage: account.usage.clone(),
-                });
-                db.save_coding_account(&account)?;
-                db.audit("account.exhausted", &json!({ "id": id }))
-            })
+            .transaction(move |db| db.exhaust_coding_account(&id, &model))
             .await
     }
 
