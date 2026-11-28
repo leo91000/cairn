@@ -81,6 +81,11 @@ whether the workspace is available for reuse.
 If a compatible controller or relay stops serving that endpoint during an
 upgrade or rollback, the manager can use the bounded legacy retirement check
 for the same attempt. The original settlement deadline still applies.
+The existing retirement wait carries current workspace reuse evidence through
+older relays as a separate receipt. That receipt releases later work after
+settlement and preserves the original flush verdict. A controller whose only
+proof is a clean flush keeps other recovered disks gated until a compatible
+controller confirms reuse or the environment is explicitly retired.
 The recovery loop settles each run independently. A clean flush and current
 quarantine clearance establish success. A missing proof at the deadline
 publishes the original cleanup failure and keeps the original turn end. Later

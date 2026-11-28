@@ -510,6 +510,14 @@ pub(crate) async fn observe_cleanup_retirement(
     wait_result(http, url, token, NATIVE_CLEANUP_RETIREMENT_QUERY).await
 }
 
+pub(crate) async fn read_cleanup_retirement(
+    http: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<Value> {
+    wait_value(http, url, token, NATIVE_CLEANUP_RETIREMENT_QUERY).await
+}
+
 /// Plain, attempt-scoped flush failure. A structured Native receipt must be
 /// evaluated against current cleanup state by the controller's DELETE path.
 pub(crate) fn plain_finalization_failure(value: &Value) -> Option<ControllerResult> {

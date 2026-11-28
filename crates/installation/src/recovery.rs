@@ -518,6 +518,7 @@ pub(crate) async fn fence_retired(
 
 // Bound settlement of the completed turn while the manager observes retirement.
 const NATIVE_CLEANUP_FOLLOW_UP_MS: i64 = 5 * 60 * 1_000;
+const LEGACY_NATIVE_CLEANUP_GRACE: Duration = Duration::from_secs(7);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -604,19 +605,11 @@ pub(crate) async fn observe_pending_native_cleanup(
         }
         if matches!(
             status.status(),
-            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::SERVICE_UNAVAILABLE
         ) {
-            // A compatible controller or relay may have rolled back after the
-            // receipt. The legacy route still requires exact evidence from
-            // both the retirement wait and the current quarantine check.
-            return Ok(confirm_late_native_cleanup(
-                s,
-                &url,
-                attempt,
-                &credential,
-                &crate::authorization::Authorization::default(),
-            )
-            .await);
+            // Older relays report an unsupported controller operation as 503.
+            // The retirement wait uses a route they already allow.
+            return Ok(observe_legacy_native_cleanup(s, &url, pending, &credential).await);
         }
         Ok::<_, Error>(false)
     };
@@ -651,6 +644,41 @@ pub(crate) async fn observe_pending_native_cleanup(
             Ok(())
         })
         .await
+}
+
+async fn observe_legacy_native_cleanup(
+    s: &Service,
+    url: &str,
+    pending: &PendingNativeCleanup,
+    credential: &str,
+) -> bool {
+    let observe = async {
+        let attempt = pending.attempt.as_str();
+        let result = crate::runner::read_cleanup_retirement(&s.http, url, credential).await?;
+        if crate::runner::client_cleanup_result(&result, attempt).is_none() {
+            return Ok(false);
+        }
+        if pending.awaiting_retirement()
+            && result["NativeCleanupReusable"]["attemptId"].as_str() == Some(attempt)
+        {
+            return Ok(true);
+        }
+        if result["NativeCleanup"]["retired"] != true {
+            return Ok(false);
+        }
+        confirm_native_retirement(
+            s,
+            url,
+            attempt,
+            credential,
+            &crate::authorization::Authorization::default(),
+        )
+        .await
+    };
+    matches!(
+        tokio::time::timeout(LEGACY_NATIVE_CLEANUP_GRACE, observe).await,
+        Ok(Ok(true))
+    )
 }
 
 async fn fence_runner(
@@ -765,7 +793,7 @@ async fn confirm_late_native_cleanup(
     };
     tokio::select! {
         () = s.shutdown.cancelled() => false,
-        result = tokio::time::timeout(Duration::from_secs(7), observe) => {
+        result = tokio::time::timeout(LEGACY_NATIVE_CLEANUP_GRACE, observe) => {
             matches!(result, Ok(Ok(true)))
         }
     }

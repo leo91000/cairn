@@ -180,18 +180,29 @@ impl Controller {
 
     pub(super) async fn reconcile_wait_result(&self, id: &str, mut result: Value) -> Value {
         if crate::runner::client_cleanup_result(&result, id).is_some() {
-            let retired = tokio::time::timeout(
-                WAIT_RETIREMENT_PROBE,
-                self.cleanup_receipt_superseded(id, Some(id)),
-            )
-            .await
-            .unwrap_or(false);
+            result
+                .as_object_mut()
+                .unwrap()
+                .remove("NativeCleanupReusable");
+            let (retired, reusable_without_flush) =
+                tokio::time::timeout(WAIT_RETIREMENT_PROBE, async {
+                    if self.cleanup_flushed(id).await {
+                        (self.cleanup_reusable(id, Some(id)).await, false)
+                    } else {
+                        (false, self.cleanup_reusable(id, None).await)
+                    }
+                })
+                .await
+                .unwrap_or_default();
             let cleanup = result["NativeCleanup"].as_object_mut().unwrap();
             cleanup.remove("retired");
             if retired {
                 // Older managers still need the original failure fields to
                 // suppress replay. The attempt-bound extension attests closure.
                 cleanup.insert("retired".into(), true.into());
+            }
+            if reusable_without_flush {
+                result["NativeCleanupReusable"] = json!({ "attemptId": id });
             }
         }
         result
@@ -814,12 +825,19 @@ mod tests {
             .record_cleanup_pending(&attempt, "cleanup pending")
             .await
             .unwrap();
+        let exit = controller.stopped_result(&attempt).await;
         super::super::super::cleanup::quarantine(&controller.state, &run, &attempt).unwrap();
 
         let status = |flushed, reusable| json!({ "attemptId": attempt, "flushed": flushed, "reusable": reusable });
         assert_eq!(
             controller.cleanup_status(&attempt).await.unwrap(),
             status(false, false)
+        );
+        assert_eq!(
+            controller
+                .reconcile_wait_result(&attempt, exit.clone())
+                .await,
+            exit
         );
         tokio::fs::remove_file(controller.file(&attempt, "active"))
             .await
@@ -858,6 +876,14 @@ mod tests {
                 controller.cleanup_status(&attempt).await.unwrap(),
                 status(flushed, true)
             );
+            let observation = controller
+                .reconcile_wait_result(&attempt, exit.clone())
+                .await;
+            assert_eq!(observation["NativeCleanup"]["retired"] == true, flushed);
+            assert_eq!(
+                observation["NativeCleanupReusable"]["attemptId"].as_str(),
+                (!flushed).then_some(attempt.as_str()),
+            );
         }
         let other = crate::config::id();
         super::super::super::cleanup::quarantine(&controller.state, &run, &other).unwrap();
@@ -885,31 +911,33 @@ mod tests {
             .unwrap();
         let pending = controller.stopped_result(&attempt).await;
         assert!(crate::runner::client_cleanup_result(&pending, &attempt).is_some());
+        let mut reusable = pending.clone();
+        reusable["NativeCleanupReusable"] = json!({ "attemptId": attempt });
         let waiting = async || {
             let body = axum::body::to_bytes(controller.wait(&attempt, true).into_body(), 4096)
                 .await
                 .unwrap();
             serde_json::from_slice::<Value>(&body).unwrap()
         };
-        assert_eq!(waiting().await, pending);
+        assert_eq!(waiting().await, reusable);
 
         let completion = controller.file(&attempt, "cleanup-result");
         let flushed = br#"{"completion":"Flushed"}"#;
         let other_completion = controller.file(&other_attempt, "cleanup-result");
         tokio::fs::write(&other_completion, flushed).await.unwrap();
         assert_eq!(controller.stopped_result(&attempt).await, pending);
-        assert_eq!(waiting().await, pending);
+        assert_eq!(waiting().await, reusable);
         tokio::fs::hard_link(&other_completion, &completion)
             .await
             .unwrap();
         assert_eq!(controller.stopped_result(&attempt).await, pending);
-        assert_eq!(waiting().await, pending);
+        assert_eq!(waiting().await, reusable);
         tokio::fs::remove_file(&completion).await.unwrap();
         tokio::fs::symlink(&other_completion, &completion)
             .await
             .unwrap();
         assert_eq!(controller.stopped_result(&attempt).await, pending);
-        assert_eq!(waiting().await, pending);
+        assert_eq!(waiting().await, reusable);
         tokio::fs::remove_file(&completion).await.unwrap();
         for bytes in [
             b"malformed".as_slice(),
@@ -921,7 +949,7 @@ mod tests {
         ] {
             tokio::fs::write(&completion, bytes).await.unwrap();
             assert_eq!(controller.stopped_result(&attempt).await, pending);
-            assert_eq!(waiting().await, pending);
+            assert_eq!(waiting().await, reusable);
         }
 
         tokio::fs::write(&completion, flushed).await.unwrap();

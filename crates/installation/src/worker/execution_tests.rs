@@ -345,7 +345,7 @@ async fn request_during_native_delete(stop: bool, response: NativeDeleteResponse
 }
 
 #[tokio::test]
-async fn native_cleanup_can_read_legacy_retirement_after_a_controller_rollback() {
+async fn native_cleanup_reads_legacy_evidence_through_an_older_controller_or_relay() {
     use crate::recovery::DeferredCleanupState;
     use axum::{
         Json, Router,
@@ -354,11 +354,52 @@ async fn native_cleanup_can_read_legacy_retirement_after_a_controller_rollback()
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    for (status, awaiting_retirement, matching) in [
-        (StatusCode::NOT_FOUND, false, true),
-        (StatusCode::BAD_REQUEST, true, true),
-        (StatusCode::NOT_FOUND, false, false),
-        (StatusCode::SERVICE_UNAVAILABLE, false, true),
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Evidence {
+        Clean,
+        Reusable,
+        Pending,
+    }
+
+    for (status, awaiting_retirement, evidence, matching, expect_retired) in [
+        (StatusCode::NOT_FOUND, false, Evidence::Clean, true, true),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            false,
+            Evidence::Clean,
+            true,
+            true,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            true,
+            Evidence::Reusable,
+            true,
+            true,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            false,
+            Evidence::Reusable,
+            true,
+            false,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            true,
+            Evidence::Reusable,
+            false,
+            false,
+        ),
+        (StatusCode::NOT_FOUND, false, Evidence::Clean, false, false),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            true,
+            Evidence::Pending,
+            true,
+            false,
+        ),
+        (StatusCode::BAD_REQUEST, false, Evidence::Clean, true, false),
     ] {
         let attempt = crate::config::id();
         let observed = Arc::new(AtomicUsize::new(0));
@@ -369,6 +410,7 @@ async fn native_cleanup_can_read_legacy_retirement_after_a_controller_rollback()
             crate::config::id()
         };
         let wait_attempt = attempt.clone();
+        let reuse_attempt = receipt_attempt.clone();
         let app = Router::new()
             .route(
                 "/runs/{attempt}/cleanup-status",
@@ -381,14 +423,23 @@ async fn native_cleanup_can_read_legacy_retirement_after_a_controller_rollback()
                         uri.query(),
                         Some(crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY)
                     );
-                    Json(json!({
+                    let mut receipt = json!({
                         "StatusCode": crate::runner::CONTROLLER_FAILED,
                         "FinalizationFailed": true,
                         "NativeCleanup": {
                             "attemptId": wait_attempt, "workloadFenced": true,
-                            "retired": true, "message": "Native disk cleanup was pending.",
+                            "message": "Native disk cleanup was pending.",
                         },
-                    }))
+                    });
+                    match evidence {
+                        Evidence::Clean => receipt["NativeCleanup"]["retired"] = true.into(),
+                        Evidence::Reusable => {
+                            receipt["NativeCleanupReusable"] =
+                                json!({ "attemptId": reuse_attempt });
+                        }
+                        Evidence::Pending => {}
+                    }
+                    Json(receipt)
                 }),
             )
             .route(
@@ -437,11 +488,14 @@ async fn native_cleanup_can_read_legacy_retirement_after_a_controller_rollback()
             .await
             .unwrap()
             .unwrap();
-        let used_legacy = status != StatusCode::SERVICE_UNAVAILABLE;
-        assert_eq!(observed.load(Ordering::Relaxed), usize::from(used_legacy));
+        let confirmed_clean = status != StatusCode::BAD_REQUEST && evidence == Evidence::Clean;
+        assert_eq!(
+            observed.load(Ordering::Relaxed),
+            usize::from(confirmed_clean)
+        );
         assert_eq!(
             saved.pending_native_cleanup().unwrap().state,
-            if used_legacy && matching {
+            if expect_retired {
                 DeferredCleanupState::Retired
             } else {
                 initial
@@ -792,8 +846,8 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                         Some(crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY)
                     );
                     let observed = route_observations.fetch_add(1, Ordering::Relaxed);
-                    assert!(!after_grace);
-                    if observed > 0 {
+                    assert!(!after_grace || retirement == Retirement::FirstProbeUnavailable);
+                    if !after_grace && observed > 0 {
                         result["NativeCleanup"]["retired"] = true.into();
                     }
                 }
@@ -879,7 +933,10 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
             assert_eq!(still_pending.status, RunStatus::Succeeded);
             assert!(still_pending.recovery_pending);
             assert_eq!(stops.load(Ordering::Relaxed), 1);
-            assert_eq!(observations.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                observations.load(Ordering::Relaxed),
+                1 + usize::from(retirement == Retirement::FirstProbeUnavailable)
+            );
 
             if retirement == Retirement::Expired {
                 let saved = RunCheckpoint::load(&service.store, &id)
