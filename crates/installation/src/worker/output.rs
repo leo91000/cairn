@@ -28,6 +28,12 @@ pub(super) struct Output {
     pub received: Instant,
 }
 
+#[derive(Clone, Copy, Default)]
+pub(super) struct Attempt {
+    pub previously_launched: bool,
+    pub managed_antigravity: bool,
+}
+
 impl Output {
     fn new(diagnostic: bool, raw: String) -> Self {
         Self {
@@ -269,7 +275,7 @@ pub(super) async fn record(
     s: &Service,
     output: &Output,
     checkpoint: &Checkpoint,
-    previously_launched: bool,
+    attempt: Attempt,
     secrets: &[String],
     log_total: &mut usize,
     activity: &mut crate::performance::Activity,
@@ -347,7 +353,7 @@ pub(super) async fn record(
                                 == Some(retry.message_id.as_str())
                     });
                 (
-                    !previously_launched && without_session,
+                    !attempt.previously_launched && without_session,
                     probe_retry && without_session,
                 )
             })
@@ -425,7 +431,16 @@ pub(super) async fn record(
         if !conversation && !activity_item {
             *log_total = log_total.saturating_add(serialized.len());
         }
-        store_event(s, id, &serialized, &event, &stored, checkpoint, secrets).await?;
+        store_event(
+            s,
+            &serialized,
+            &event,
+            &stored,
+            checkpoint,
+            secrets,
+            attempt.managed_antigravity && exhausted,
+        )
+        .await?;
     }
     if event["type"] == "turn.completed" {
         // Title failures cannot change the outcome of the user's turn.
@@ -527,17 +542,36 @@ async fn handle_chat_control(
     Ok(true)
 }
 
-/// Derives checkpoint and run changes from the redacted adapter frame. The
-/// transaction that publishes the event also owns all of these durable changes.
-async fn apply_event(
+/// Publishes a redacted adapter event and its durable effects together.
+async fn store_event(
     s: &Service,
+    raw: &str,
     event: &Value,
     stored: &Value,
     checkpoint: &Checkpoint,
-    kind: EventKind,
-    text_value: String,
     secrets: &[String],
+    antigravity_quota_refusal: bool,
 ) -> Result<()> {
+    let value = stored["item"]
+        .get("text")
+        .or_else(|| stored["item"].get("aggregated_output"))
+        .or_else(|| stored["error"].get("message"));
+    let text_value = value.map_or_else(
+        || raw.to_owned(),
+        |v| v.as_str().map_or_else(|| v.to_string(), str::to_owned),
+    );
+    let kind = match text(stored, "type") {
+        "" => "output",
+        kind => kind,
+    };
+    let kind = EventKind::from_adapter(kind);
+    if matches!(kind, EventKind::External(_)) {
+        tracing::warn!(
+            run_id = checkpoint.id,
+            "Unknown coding-agent event retained as redacted adapter data"
+        );
+    }
+
     let provider_failure = event["type"] == "turn.failed";
     let controller_failure = event["type"] == "runner.failed";
     let antigravity_probe_failed =
@@ -594,6 +628,7 @@ async fn apply_event(
             EventChanges {
                 run: changed.then_some(changes),
                 failure: failure.map(|(message, cause)| (message, cause, provider_failure)),
+                antigravity_quota_refusal: antigravity_quota_refusal && provider_failure,
                 antigravity_probe_failed,
                 completed,
                 progress_complete: super::progress::same_semantics(event, stored),
@@ -656,37 +691,6 @@ async fn speed_notice(
         ),
     };
     Ok((message, record))
-}
-
-async fn store_event(
-    s: &Service,
-    id: &str,
-    raw: &str,
-    source: &Value,
-    event: &Value,
-    checkpoint: &Checkpoint,
-    secrets: &[String],
-) -> Result<()> {
-    let value = event["item"]
-        .get("text")
-        .or_else(|| event["item"].get("aggregated_output"))
-        .or_else(|| event["error"].get("message"));
-    let value = value.map_or_else(
-        || raw.to_owned(),
-        |v| v.as_str().map_or_else(|| v.to_string(), str::to_owned),
-    );
-    let kind = match text(event, "type") {
-        "" => "output",
-        kind => kind,
-    };
-    let kind = EventKind::from_adapter(kind);
-    if matches!(kind, EventKind::External(_)) {
-        tracing::warn!(
-            run_id = id,
-            "Unknown coding-agent event retained as redacted adapter data"
-        );
-    }
-    apply_event(s, source, event, checkpoint, kind, value, secrets).await
 }
 
 fn truncate(value: &str, limit: usize) -> String {

@@ -409,7 +409,7 @@ async fn provider_failure_with_lost_terminal_result_never_replays() {
                 received: tokio::time::Instant::now(),
             },
             &checkpoint,
-            false,
+            super::super::output::Attempt::default(),
             &[],
             &mut total,
             &mut activity,

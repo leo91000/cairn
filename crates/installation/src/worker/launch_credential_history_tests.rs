@@ -351,7 +351,7 @@ async fn historical_rotation_fixture(aggregate: bool) {
                 &mut child,
                 &mut events,
                 &mut log_total,
-                false,
+                output::Attempt::default(),
                 aggregate.then_some(reports)
             )
         );

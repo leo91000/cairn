@@ -59,7 +59,10 @@ async fn check_antigravity_probe_rejection(capacity_rejection: bool) {
             .to_string(),
         ),
         &f.checkpoint,
-        true,
+        Attempt {
+            previously_launched: true,
+            ..Attempt::default()
+        },
         &[],
         &mut f.log_total,
         &mut f.activity,
@@ -172,7 +175,7 @@ impl Fixture {
             &self.service,
             &output,
             &self.checkpoint,
-            false,
+            Attempt::default(),
             &["sensitive-tool-credential".into()],
             &mut self.log_total,
             &mut self.activity,
@@ -1214,7 +1217,7 @@ async fn side_answers_are_stored_redacted() {
                 &fixture.service,
                 &Output::new(false, event.to_string()),
                 &fixture.checkpoint,
-                false,
+                Attempt::default(),
                 &["sensitive-tool-credential".into(), collision.into()],
                 &mut fixture.log_total,
                 &mut fixture.activity,
@@ -1680,6 +1683,90 @@ async fn context_usage_survives_log_budget_and_keeps_the_latest_snapshot_on_the_
 }
 
 #[tokio::test]
+async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() {
+    use crate::accounts::usage::Usage;
+
+    let mut f = Fixture::new().await;
+    let s = &f.service;
+    let account_id =
+        crate::accounts::broker::tests::add_account(s, Provider::Antigravity, "Quota").await;
+    let mut account = s.accounts.account(s, &account_id).await.unwrap();
+    account.usage = Some(Usage::from_value(&json!({
+        "allowed": true, "windows": [{ "id": "primary", "usedPercent": 99 }],
+    })));
+    s.store.save_coding_account(&account).await.unwrap();
+    let lease = crate::accounts::Lease {
+        account_id: account_id.clone(),
+        provider: Provider::Antigravity,
+        run_id: f.id.clone(),
+        model: "fixture-model".into(),
+        home: s.config.home.join("quota-fixture"),
+    };
+    s.store
+        .transaction(move |db| {
+            db.reserve_account_lease(&lease)?;
+            db.change_run(
+                &lease.run_id,
+                crate::runs::RunChanges {
+                    status: Some(crate::run_status::RunStatus::Running),
+                    // The quota frame was still in transit when Stop was accepted.
+                    cancel_requested_at: Some(Some(crate::config::now())),
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        .unwrap();
+
+    let _refresh = s.accounts.lock(&account_id).await;
+    let mut stale = s.accounts.account(s, &account_id).await.unwrap();
+    let event = Output::new(
+        false,
+        json!({"type":"turn.failed","error":{"code":"usage_limit_reached","message":"Quota reached"}}).to_string(),
+    );
+    let exhausted = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        record(
+            s,
+            &event,
+            &f.checkpoint,
+            Attempt {
+                managed_antigravity: true,
+                ..Attempt::default()
+            },
+            &[],
+            &mut f.log_total,
+            &mut f.activity,
+        ),
+    )
+    .await
+    .expect("the quota frame waited for the account lock")
+    .unwrap();
+    assert!(exhausted);
+    assert!(f.checkpoint.snapshot().await.provider_failed());
+    stale.usage = Some(Usage::from_value(&json!({
+        "allowed": true, "windows": [{ "id": "primary", "usedPercent": 100 }],
+    })));
+    s.store.save_coding_account(&stale).await.unwrap();
+    let account = s.accounts.account(s, &account_id).await.unwrap();
+    assert_eq!(account.usage().remaining("fixture-model"), Some(0.));
+    let exhaustion = account.exhausted.unwrap();
+    assert_eq!(exhaustion.model, "fixture-model");
+    assert_eq!(
+        exhaustion.usage.unwrap().remaining("fixture-model"),
+        Some(1.)
+    );
+    let mut next = s.accounts.lease(s, &f.id).await.unwrap().unwrap();
+    next.run_id = crate::config::id();
+    let admission = s
+        .store
+        .transaction(move |db| db.reserve_account_lease(&next))
+        .await
+        .unwrap_err();
+    assert!(admission.is_conflict());
+}
+
+#[tokio::test]
 async fn failed_event_publication_rolls_back_the_checkpoint_and_does_not_notify() {
     let mut fixture = Fixture::new().await;
     let before = fixture.service.store.revision();
@@ -1695,7 +1782,7 @@ async fn failed_event_publication_rolls_back_the_checkpoint_and_does_not_notify(
         &fixture.service,
         &output,
         &fixture.checkpoint,
-        false,
+        Attempt::default(),
         &[],
         &mut fixture.log_total,
         &mut fixture.activity,
@@ -1773,7 +1860,7 @@ async fn display_redaction_cannot_change_engine_lifecycle_or_session_identity() 
             &fixture.service,
             &output,
             &fixture.checkpoint,
-            false,
+            Attempt::default(),
             &["completed".into(), "text".into(), "session".into()],
             &mut fixture.log_total,
             &mut fixture.activity,
@@ -1850,7 +1937,7 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
         &fixture.service,
         &Output::new(false, json!({"type":"turn.started"}).to_string()),
         &fixture.checkpoint,
-        false,
+        Attempt::default(),
         &[],
         &mut fixture.log_total,
         &mut fixture.activity,
@@ -1898,7 +1985,7 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
         &fixture.service,
         &Output::new(false, item.to_string()),
         &fixture.checkpoint,
-        false,
+        Attempt::default(),
         &["stable-private".into()],
         &mut fixture.log_total,
         &mut fixture.activity,
@@ -1923,7 +2010,7 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
         .update(|saved| saved.completed = Some(false))
         .await
         .unwrap();
-    record(&fixture.service, &Output::new(false, json!({"type":"item.updated","item":{"id":"late","type":"agent_message","text":"late snapshot"}}).to_string()), &restarted, false, &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
+    record(&fixture.service, &Output::new(false, json!({"type":"item.updated","item":{"id":"late","type":"agent_message","text":"late snapshot"}}).to_string()), &restarted, Attempt::default(), &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
     restarted.persist().await.unwrap();
     record(
         &fixture.service,
@@ -1933,7 +2020,7 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
                 .to_string(),
         ),
         &restarted,
-        false,
+        Attempt::default(),
         &[],
         &mut fixture.log_total,
         &mut fixture.activity,
@@ -1949,7 +2036,7 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
             .finalized_at
             .is_none()
     );
-    record(&fixture.service, &Output::new(false, json!({"type":"runner.finalized","attemptId":"progress-attempt","physicalFinalized":true}).to_string()), &restarted, false, &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
+    record(&fixture.service, &Output::new(false, json!({"type":"runner.finalized","attemptId":"progress-attempt","physicalFinalized":true}).to_string()), &restarted, Attempt::default(), &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
     let mut saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
         .await
         .unwrap()
@@ -1966,7 +2053,7 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
         &fixture.service,
         &Output::new(false, json!({"type":"turn.started"}).to_string()),
         &restarted,
-        false,
+        Attempt::default(),
         &[],
         &mut fixture.log_total,
         &mut fixture.activity,

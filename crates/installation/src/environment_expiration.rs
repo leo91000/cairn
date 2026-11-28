@@ -1146,6 +1146,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retiring_an_environment_preserves_account_quota_through_the_cooldown() {
+        use crate::accounts::{Account, AccountState, Lease};
+        use crate::provider::Provider;
+        use crate::worker::checkpoint::{Checkpoint, EventChanges};
+
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        let run = id();
+        let account = Account::new(Provider::Antigravity, "Quota fixture", AccountState::Ready);
+        let lease = Lease {
+            account_id: account.id.clone(),
+            provider: Provider::Antigravity,
+            run_id: run.clone(),
+            model: "fixture-model".into(),
+            home: root.path().join("account"),
+        };
+        let saved = RunCheckpoint {
+            runner_id: Some(Some(id())),
+            ..RunCheckpoint::default()
+        };
+        let (initial_lease, initial_checkpoint) = (lease.clone(), saved.clone());
+        store.transaction(move |db| {
+            let run = &initial_lease.run_id;
+            db.add_run_fixture(&json!({ "id": run, "taskId": "chat", "trigger": "chat", "status": "running", "sessionId": "saved-session" }), None)?;
+            db.save_conversation_boundary(&json!({ "id": "chat", "runId": run }))?;
+            db.save_coding_account(&account)?;
+            db.reserve_account_lease(&initial_lease)?;
+            initial_checkpoint.store_in(db, run)
+        }).await.unwrap();
+
+        let checkpoint = Checkpoint::new(store.clone(), run.clone(), saved);
+        checkpoint
+            .record_event(
+                EventKind::TurnFailed,
+                "Usage limit reached".into(),
+                json!({"type":"turn.failed"}),
+                EventChanges {
+                    run: None,
+                    failure: Some(("Usage limit reached".into(), None, true)),
+                    antigravity_quota_refusal: true,
+                    antigravity_probe_failed: false,
+                    completed: false,
+                    progress_complete: true,
+                    last_message: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .transaction(move |db| {
+                let exhausted = db.coding_account(&lease.account_id)?.unwrap().exhausted;
+                assert_eq!(exhausted.as_ref().unwrap().model, lease.model);
+                request_in(db, &run, &Expiration::new(Cause::NodeChange), false)?;
+                assert!(db.run_state(&run)?.unwrap().session_id.is_none());
+                assert!(
+                    RunCheckpoint::load_in(db, &run)?
+                        .unwrap()
+                        .runner_id()
+                        .is_none()
+                );
+
+                let mut next = lease;
+                next.run_id = id();
+                assert!(db.reserve_account_lease(&next).unwrap_err().is_conflict());
+
+                let driver = Provider::Antigravity.driver();
+                let mut account = db.coding_account(&next.account_id)?.unwrap();
+                assert!(account.usage.is_none());
+                crate::accounts::replenish(&mut account, driver);
+                assert!(account.exhausted.is_some());
+
+                account.exhausted.as_mut().unwrap().at = now() - driver.fresh_for();
+                db.save_coding_account(&account)?;
+                let mut account = db.coding_account(&next.account_id)?.unwrap();
+                crate::accounts::replenish(&mut account, driver);
+                assert!(account.exhausted.is_none());
+                db.save_coding_account(&account)?;
+                // The other slot becomes usable even if the old controller
+                // remains unreachable and still owns the retiring lease.
+                db.reserve_account_lease(&next)?;
+                db.remove_account_lease(&run)?;
+                let account = db.coding_account(&next.account_id)?.unwrap();
+                assert!(account.exhausted.is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn late_engine_session_events_keep_history_without_reattaching_the_expired_environment() {
         use crate::worker::checkpoint::{Checkpoint, EventChanges};
         let root = tempfile::tempdir().unwrap();
@@ -1176,6 +1267,7 @@ mod tests {
                     }),
                     completed: false,
                     failure: None,
+                    antigravity_quota_refusal: false,
                     antigravity_probe_failed: false,
                     progress_complete: true,
                     last_message: None,

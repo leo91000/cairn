@@ -164,7 +164,7 @@ async fn rpc_flood_on_service(
             &mut Supervised::exited_fixture(),
             &mut events,
             &mut 0,
-            false,
+            output::Attempt::default(),
             Some(reports),
         )
         .await
