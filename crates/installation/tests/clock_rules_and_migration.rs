@@ -1066,6 +1066,41 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     )
     .unwrap();
 
+    let pending_wait_run_id = id();
+    conn.execute(
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,session_id,snapshot,boundary,
+          recovery_pending,resume_available,resume_count)
+         VALUES(?1,?2,'queued','schedule',?3,?3,'fencing-session',?4,'{}',1,1,0)",
+        params![
+            pending_wait_run_id,
+            deleted_mission_id,
+            t0 + 12_000,
+            json!({ "agent": agent, "task": { "name": "Deleted mission" } }).to_string(),
+        ],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO run_checkpoints(run_id,state) VALUES(?1,?2)",
+        params![
+            pending_wait_run_id,
+            json!({
+                "launched": true,
+                "completed": true,
+                "settled": {
+                    "status": "waiting",
+                    "summary": null,
+                    "finishedAt": null,
+                },
+            })
+            .to_string(),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO durable_wakeups(key,chat_id,mission_run_id,id,reason,seconds,created_at,wake_at,time_kind,time_seconds)
+         VALUES(2,NULL,?1,'fenced-wait','Wait while the old attempt fences',60,?2,?3,'delay',60)",
+        params![pending_wait_run_id, t0 + 12_000, t0 + 72_000],
+    ).unwrap();
+
     let interrupted_run = id();
     conn.execute(
         "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,session_id,snapshot,boundary, \
@@ -1303,6 +1338,19 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         )
         .unwrap();
     assert_eq!(waiting_status, "succeeded");
+    let pending_settlement: (String, bool, String, i64) = migrated
+        .query_row(
+            "SELECT r.status,r.recovery_pending,json_extract(k.state,'$.settled.status'),
+                json_extract(k.state,'$.settled.finishedAt')
+         FROM runs r JOIN run_checkpoints k ON k.run_id=r.id WHERE r.id=?",
+            [&pending_wait_run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        pending_settlement,
+        ("queued".into(), true, "succeeded".into(), t0 + 12_000),
+    );
 
     // Reads & snoozes migrated cleanly:
     // - regular chat read preserved

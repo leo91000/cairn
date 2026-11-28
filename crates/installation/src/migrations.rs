@@ -673,6 +673,15 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                  WHERE mission_run_id=?3",
                     params![chat_id, turn, run.id],
                 )?;
+                // Fencing may still replay a saved mission settlement. A
+                // conversation holds its wakeup after a successful turn.
+                tx.execute(
+                    "UPDATE run_checkpoints SET state=json_set(
+                       state,'$.settled.status','succeeded',
+                       '$.settled.finishedAt',coalesce(json_extract(state,'$.settled.finishedAt'),?2)
+                     ) WHERE run_id=?1 AND json_extract(state,'$.settled.status')='waiting'",
+                    params![run.id, updated_at],
+                )?;
             }
 
             migrated_chats_by_mission
