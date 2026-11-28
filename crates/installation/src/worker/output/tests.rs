@@ -1683,6 +1683,68 @@ async fn context_usage_survives_log_budget_and_keeps_the_latest_snapshot_on_the_
 }
 
 #[tokio::test]
+async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() {
+    let mut f = Fixture::new().await;
+    let s = &f.service;
+    let account_id = crate::accounts::broker::tests::add_account(s, Provider::Codex, "Quota").await;
+    let lease = crate::accounts::Lease {
+        account_id: account_id.clone(),
+        provider: Provider::Codex,
+        run_id: f.id.clone(),
+        model: "fixture-model".into(),
+        home: s.config.home.join("quota-fixture"),
+    };
+    s.store
+        .transaction(move |db| {
+            db.reserve_account_lease(&lease)?;
+            db.change_run(
+                &lease.run_id,
+                crate::runs::RunChanges {
+                    status: Some(crate::run_status::RunStatus::Running),
+                    session_id: Some(Some("fixture-session".into())),
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        .unwrap();
+
+    let _refresh = s.accounts.lock(&account_id).await;
+    let event = Output::new(
+        false,
+        json!({"type":"turn.failed","error":{"code":"usage_limit_reached","message":"Quota reached"}}).to_string(),
+    );
+    let exhausted = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        record(
+            s,
+            &event,
+            &f.checkpoint,
+            Attempt {
+                managed_turn: true,
+                ..Attempt::default()
+            },
+            &[],
+            &mut f.log_total,
+            &mut f.activity,
+        ),
+    )
+    .await
+    .expect("the quota frame waited for the account lock")
+    .unwrap();
+    assert!(exhausted);
+    assert!(f.checkpoint.snapshot().await.provider_failed());
+    let mut next = s.accounts.lease(s, &f.id).await.unwrap().unwrap();
+    next.run_id = crate::config::id();
+    let admission = s
+        .store
+        .transaction(move |db| db.reserve_account_lease(&next))
+        .await
+        .unwrap_err();
+    assert!(admission.is_conflict());
+}
+
+#[tokio::test]
 async fn failed_event_publication_rolls_back_the_checkpoint_and_does_not_notify() {
     let mut fixture = Fixture::new().await;
     let before = fixture.service.store.revision();

@@ -324,9 +324,13 @@ impl Accounts {
         self.initialized
             .get_or_try_init(|| async {
                 // Runtime credentials and their leases never survive a manager restart.
+                // Release each lease through the usual transaction so observed quota
+                // refusals are applied before admission starts.
                 s.store
                     .transaction(|db| {
-                        db.0.execute("DELETE FROM account_leases", [])?;
+                        for lease in db.account_leases()? {
+                            db.remove_account_lease(&lease.run_id)?;
+                        }
                         Ok(())
                     })
                     .await?;
@@ -393,11 +397,8 @@ impl Accounts {
     }
 
     pub async fn lease(&self, s: &Service, run_id: &str) -> Result<Option<Lease>> {
-        Ok(s.store
-            .read(|db| db.account_leases())
-            .await?
-            .into_iter()
-            .find(|lease| lease.run_id == run_id))
+        let run_id = run_id.to_owned();
+        s.store.read(move |db| db.account_lease(&run_id)).await
     }
 
     /// The account's leases, ordered by run.
@@ -439,10 +440,12 @@ impl Accounts {
     ) -> Result<Vec<Account>> {
         let driver = provider.driver();
         let connecting = self.connecting.lock().await.clone();
+        let pending_quota = s.store.read(|db| db.pending_quota_accounts()).await?;
         let mut candidates = Vec::new();
         for account in self.of(s, provider).await? {
             let id = account.id.as_str();
             if schedulable(&account, driver, model)
+                && !pending_quota.contains(id)
                 && running(leases, id) < account.parallel_runs()
                 && connecting.as_deref() != Some(id)
                 && !self.recovering(s, id).await?
@@ -723,15 +726,22 @@ impl Accounts {
         let _guard = self.lock(id).await;
         let (id, model) = (id.to_owned(), model.to_owned());
         s.store
-            .transaction(move |db| Self::exhausted_in(db, &id, &model))
+            .transaction(move |db| Self::exhausted_in(db, &id, &model, now()))
             .await
     }
 
     /// Records exhaustion as part of an existing transaction under the account lock.
-    pub(crate) fn exhausted_in(db: &Db<'_>, id: &str, model: &str) -> Result<()> {
+    fn exhausted_in(db: &Db<'_>, id: &str, model: &str, at: i64) -> Result<()> {
         let mut account = required(db.coding_account(id)?, "Account not found.")?;
+        if account
+            .exhausted
+            .as_ref()
+            .is_some_and(|previous| previous.at >= at)
+        {
+            return Ok(());
+        }
         account.exhausted = Some(Exhaustion {
-            at: now(),
+            at,
             model: model.to_owned(),
             usage: account.usage.clone(),
         });

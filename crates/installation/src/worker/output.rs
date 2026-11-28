@@ -573,15 +573,6 @@ async fn store_event(
     }
 
     let provider_failure = event["type"] == "turn.failed";
-    let lease = if managed_quota && provider_failure {
-        s.accounts.lease(s, &checkpoint.id).await?
-    } else {
-        None
-    };
-    let account_guard = match &lease {
-        Some(lease) => Some(s.accounts.lock(&lease.account_id).await),
-        None => None,
-    };
     let controller_failure = event["type"] == "runner.failed";
     let antigravity_probe_failed =
         provider_failure && event["error"]["code"] == crate::antigravity::CLI_UNAVAILABLE_CODE;
@@ -637,7 +628,7 @@ async fn store_event(
             EventChanges {
                 run: changed.then_some(changes),
                 failure: failure.map(|(message, cause)| (message, cause, provider_failure)),
-                managed_quota_lease: lease,
+                managed_quota: managed_quota && provider_failure,
                 antigravity_probe_failed,
                 completed,
                 progress_complete: super::progress::same_semantics(event, stored),
@@ -645,7 +636,6 @@ async fn store_event(
             },
         )
         .await?;
-    drop(account_guard);
     if completed {
         let run = s.store.run(&checkpoint.id).await?;
         let outcome = &run["outcome"];

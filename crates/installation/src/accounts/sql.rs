@@ -1,6 +1,6 @@
 //! Account persistence through the existing SQLite writer. No document store fallback.
 use super::{
-    Account, AccountState, Exhaustion, Lease,
+    Account, AccountState, Accounts, Exhaustion, Lease,
     usage::{Resets, Usage, Window},
 };
 use crate::{
@@ -10,6 +10,7 @@ use crate::{
     store::{Db, Store},
 };
 use rusqlite::{OptionalExtension, params};
+use std::collections::HashSet;
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE coding_agent_accounts(
@@ -72,6 +73,12 @@ CREATE INDEX account_leases_account ON account_leases(account_id,run_id);
 ";
 
 const COLUMNS: &str = "id,provider,name,enabled,email,plan,identity,created_at,checked_at,state,error,last_used_at,max_concurrent_runs,reset_error,priority,model_provider,model_provider_name,revision";
+
+const PENDING_QUOTA_JOIN: &str = "FROM account_leases lease
+     JOIN run_checkpoints checkpoint ON checkpoint.run_id=lease.run_id
+     WHERE json_extract(checkpoint.state,'$.managedQuotaFailure.accountId')=lease.account_id
+     AND json_extract(checkpoint.state,'$.managedQuotaFailure.model')=lease.model
+     AND json_type(checkpoint.state,'$.managedQuotaFailure.at')='integer'";
 
 fn account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
     let provider: String = row.get(1)?;
@@ -328,6 +335,26 @@ impl Db<'_> {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    pub fn account_lease(&self, run: &str) -> Result<Option<Lease>> {
+        Ok(self
+            .0
+            .prepare_cached(
+                "SELECT run_id,account_id,provider,model,home FROM account_leases WHERE run_id=?",
+            )?
+            .query_row([run], lease_row)
+            .optional()?)
+    }
+
+    pub fn pending_quota_accounts(&self) -> Result<HashSet<String>> {
+        Ok(self
+            .0
+            .prepare_cached(&format!(
+                "SELECT DISTINCT lease.account_id {PENDING_QUOTA_JOIN}"
+            ))?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn reserve_account_lease(&self, lease: &Lease) -> Result<()> {
         let account = crate::error::required(
             self.coding_account(&lease.account_id)?,
@@ -340,6 +367,7 @@ impl Db<'_> {
         )?;
         if !account.is_active()
             || account.exhausted.is_some()
+            || self.pending_quota_accounts()?.contains(&lease.account_id)
             || used >= account.parallel_runs() as i64
             || account.provider != lease.provider
         {
@@ -379,6 +407,21 @@ impl Db<'_> {
     }
 
     pub fn remove_account_lease(&self, run: &str) -> Result<()> {
+        let pending: Option<(String, String, i64)> = self
+            .0
+            .prepare_cached(&format!(
+                "SELECT lease.account_id,lease.model,json_extract(checkpoint.state,'$.managedQuotaFailure.at')
+                 {PENDING_QUOTA_JOIN} AND lease.run_id=?"
+            ))?
+            .query_row([run], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .optional()?;
+        if let Some((account, model, at)) = pending {
+            Accounts::exhausted_in(self, &account, &model, at)?;
+            self.0.execute(
+                "UPDATE run_checkpoints SET state=json_remove(state,'$.managedQuotaFailure') WHERE run_id=?",
+                [run],
+            )?;
+        }
         self.0
             .execute("DELETE FROM account_leases WHERE run_id=?", [run])?;
         Ok(())

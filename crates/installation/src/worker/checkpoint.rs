@@ -2,7 +2,6 @@
 mod terminal_tests;
 
 use crate::{
-    accounts::{Accounts, Lease},
     config::now,
     error::Result,
     recovery::ProcessIdentity,
@@ -28,6 +27,15 @@ pub(crate) struct AntigravityProbeRetry {
     /// A launched wrapper may have reached the provider until a trusted
     /// controller rejection proves that it did not start.
     pub started: bool,
+}
+
+/// A terminal quota refusal observed under the managed turn's live account lease.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ManagedQuotaFailure {
+    pub account_id: String,
+    pub model: String,
+    pub at: i64,
 }
 
 /// Restart state persisted once in `run_checkpoints`, serialized from this type.
@@ -104,6 +112,8 @@ pub struct RunCheckpoint {
     /// The adapter confirmed failure, independently of controller transport/exit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_failed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) managed_quota_failure: Option<ManagedQuotaFailure>,
     /// The adapter stopped in Antigravity's CLI probe, before sending input.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub antigravity_probe_failed: Option<bool>,
@@ -848,7 +858,7 @@ impl RunCheckpoint {
 pub struct EventChanges {
     pub run: Option<crate::runs::RunChanges>,
     pub failure: Option<(String, Option<crate::run_retry::Cause>, bool)>,
-    pub managed_quota_lease: Option<Lease>,
+    pub managed_quota: bool,
     pub antigravity_probe_failed: bool,
     pub completed: bool,
     pub progress_complete: bool,
@@ -1080,9 +1090,8 @@ impl Checkpoint {
         let failure = changes.failure.filter(|(_, _, provider)| {
             state.last_error().is_empty() || (*provider && !state.provider_failed())
         });
-        let managed_quota_lease = changes
-            .managed_quota_lease
-            .filter(|_| failure.as_ref().is_some_and(|(_, _, provider)| *provider));
+        let managed_quota =
+            changes.managed_quota && failure.as_ref().is_some_and(|(_, _, provider)| *provider);
         let mut progress = state.progress.clone();
         let progress_changed = progress.as_mut().is_some_and(|progress| {
             if !changes.progress_complete {
@@ -1167,23 +1176,24 @@ impl Checkpoint {
                     // reattach a session to the environment already detached.
                     db.change_run(&id, changes)?;
                 }
-                if let Some(saved) = &saved {
+                if let Some(saved) = &mut saved {
+                    // Record the refusal with the terminal frame. Account
+                    // refresh may hold its lock across provider I/O, so the
+                    // worker applies exhaustion when it releases the lease.
+                    if managed_quota
+                        && let Some(run) = db.run_state(&id)?
+                        && run.status == RunStatus::Running
+                        && run.session_id.is_some()
+                        && run.cancel_requested_at.is_none()
+                        && let Some(lease) = db.account_lease(&id)?
+                    {
+                        saved.managed_quota_failure = Some(ManagedQuotaFailure {
+                            account_id: lease.account_id,
+                            model: lease.model,
+                            at: now(),
+                        });
+                    }
                     saved.store_in(db, &id)?;
-                }
-                // Commit the quota refusal before a controller wait or restart
-                // can release its lease. Match the lease again under its lock.
-                if let Some(lease) = managed_quota_lease
-                    && let Some(run) = db.run_state(&id)?
-                    && run.status == RunStatus::Running
-                    && run.session_id.is_some()
-                    && run.cancel_requested_at.is_none()
-                    && db.account_leases()?.iter().any(|current| {
-                        current.run_id == id
-                            && current.account_id == lease.account_id
-                            && current.model == lease.model
-                    })
-                {
-                    Accounts::exhausted_in(db, &lease.account_id, &lease.model)?;
                 }
                 db.event(&id, &kind, &text, Some(&payload))?;
                 Ok(saved)

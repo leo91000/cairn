@@ -1974,7 +1974,7 @@ async fn intact_provider_failure_is_paid_after_restart_without_controller_charge
                 super::super::checkpoint::EventChanges {
                     run: None,
                     failure: Some(("Provider busy".into(), Some(cause), true)),
-                    managed_quota_lease: None,
+                    managed_quota: false,
                     antigravity_probe_failed: false,
                     completed: false,
                     progress_complete: true,
