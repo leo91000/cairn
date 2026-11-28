@@ -46,7 +46,7 @@ async function account(page: Page, authenticated = true) {
     const lists: Record<string, unknown> = {
       agents: { agents: [] },
       projects: { projects: [] },
-      tasks: { tasks: [] },
+      accounts: { accounts: [] },
       skills: [],
       mcps: { mcps: [] },
       activity: [],

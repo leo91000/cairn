@@ -266,6 +266,9 @@ async fn native_chat_turns_reuse_the_same_run_and_conversation() {
 #[tokio::test]
 async fn sleeping_chat_survives_worker_restart_and_releases_capacity_before_waking() {
     let mut fixture = Fixture::with_concurrency(1).await;
+    fixture.stop(false).await;
+    fixture.clock = Some(FixtureClock::new(fixture.root.path()));
+    fixture.start().await;
     let s = fixture.service.clone();
     let chat = fixture
         .start_chat(message(
@@ -329,6 +332,9 @@ async fn sleeping_chat_survives_worker_restart_and_releases_capacity_before_waki
         "succeeded"
     );
     assert_eq!(s.chat_detail(&chat).await.unwrap()["wakeup"], wake);
+    // Cross the persisted deadline only after the restarted worker has used the slot.
+    let clock = fixture.clock.as_mut().unwrap();
+    clock.advance(wake["wakeAt"].as_i64().unwrap() - clock.millis + 1);
     let resumed = fixture
         .until(&run, |r| {
             r["status"] == "succeeded"

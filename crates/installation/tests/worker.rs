@@ -207,10 +207,9 @@ fn require_fixture_hooks(fixtures: Option<&std::ffi::OsStr>) {
     );
 }
 
-// Readiness is emitted only after the manager has initialized durable state,
-// bound its socket, and started the worker. Allow slow storage to finish while
-// still bounding a child that never becomes ready.
-const WORKER_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+// Bound fixture synchronization on shared CI runners, from startup through
+// admission, controller observation, and graceful shutdown.
+const WORKER_FIXTURE_TIMEOUT: Duration = Duration::from_secs(60);
 
 async fn wait_for_worker_ready(child: &mut Child, limit: Duration) -> Result<String, String> {
     let stdout = child
@@ -304,7 +303,7 @@ impl Fixture {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        self.url = wait_for_worker_ready(&mut child, WORKER_STARTUP_TIMEOUT)
+        self.url = wait_for_worker_ready(&mut child, WORKER_FIXTURE_TIMEOUT)
             .await
             .unwrap_or_else(|error| panic!("{error}"));
         self.process = Some(child);
@@ -323,9 +322,9 @@ impl Fixture {
         unsafe {
             libc::kill(pid, libc::SIGTERM);
         }
-        tokio::time::timeout(Duration::from_secs(15), process.wait())
+        tokio::time::timeout(WORKER_FIXTURE_TIMEOUT, process.wait())
             .await
-            .unwrap()
+            .expect("worker fixture did not stop after SIGTERM")
             .unwrap();
     }
 
@@ -417,7 +416,7 @@ impl Fixture {
     /// Waits until the chat has a run and returns its id.
     async fn chat_run(&self, chat_id: &str) -> String {
         eventually(
-            Duration::from_secs(10),
+            WORKER_FIXTURE_TIMEOUT,
             Duration::from_millis(30),
             async || {
                 self.service.chat_detail(chat_id).await.unwrap()["runId"]
