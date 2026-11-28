@@ -40,6 +40,9 @@ struct LegacyMission {
     native_parent_access: Option<String>,
     native_provenance_unknown: bool,
     native_plugin_grants: Option<String>,
+    failure_message: Option<String>,
+    failure_scheduled_for: Option<i64>,
+    failure_at: Option<i64>,
 }
 
 struct MigratedMission {
@@ -231,7 +234,8 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 "SELECT id,agent_id,project_id,name,prompt,cron,timezone,enabled,archived,next_run,\
                  author_id,author_access_id,author_removed,created_at,updated_at,\
                  native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,\
-                 native_provenance_unknown,native_plugin_grants FROM missions ORDER BY created_at,id",
+                 native_provenance_unknown,native_plugin_grants,failure_message,failure_scheduled_for,failure_at \
+                 FROM missions ORDER BY created_at,id",
             )?;
             stmt.query_map([], |r| {
                 Ok(LegacyMission {
@@ -256,6 +260,9 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                     native_parent_access: r.get(18)?,
                     native_provenance_unknown: r.get(19)?,
                     native_plugin_grants: r.get(20)?,
+                    failure_message: r.get(21)?,
+                    failure_scheduled_for: r.get(22)?,
+                    failure_at: r.get(23)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
@@ -454,6 +461,20 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 fired_at: cron.is_none().then(|| mission.created_at.max(1)),
                 legacy_chain_depth,
             })?;
+            if let (Some(message), Some(scheduled_for), Some(failed_at)) = (
+                &mission.failure_message,
+                mission.failure_scheduled_for,
+                mission.failure_at,
+            ) {
+                crate::rules::engine::clock::record_migrated_failure(
+                    &db,
+                    &row.id,
+                    &timezone,
+                    scheduled_for,
+                    failed_at,
+                    message,
+                )?;
+            }
         }
     }
 

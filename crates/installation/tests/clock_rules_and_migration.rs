@@ -802,6 +802,12 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     )
     .unwrap();
     conn.execute(
+        "UPDATE missions SET failure_message='The selected node was unavailable',
+           failure_scheduled_for=?2,failure_at=?3 WHERE id=?1",
+        params![active_mission_id, t0, t0 + 1_000],
+    )
+    .unwrap();
+    conn.execute(
         "INSERT INTO missions(id,agent_id,name,prompt,cron,timezone,enabled,archived,author_id,author_access_id,author_removed,revision,created_at,updated_at, \
          worktree,skills_inherited,native_principals,native_authority_nodes,native_provenance_unknown) \
          VALUES(?1,?2,'Paused mission','Do work','0 10 * * *','UTC',0,1,'owner-acct','acc-1',0,'r1',?3,?3,1,1,'[]','[]',0)",
@@ -1236,6 +1242,23 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .unwrap();
     assert_eq!(next_run, Some(t0 + 60_000));
     assert_eq!(legacy_depth, 8);
+    let failure: (String, String, i64, String) = migrated
+        .query_row(
+            "SELECT status,error,finished_at,json_extract(event,'$.payload.scheduledAt')
+         FROM hook_rule_triggerings WHERE rule_id=?",
+            [&active_mission_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(failure.0, "failed");
+    assert_eq!(failure.1, "The selected node was unavailable");
+    assert_eq!(failure.2, t0 + 1_000);
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(&failure.3)
+            .unwrap()
+            .timestamp_millis(),
+        t0
+    );
 
     // Disabled/archived -> disabled_at set; removed author -> membership_ended_at set;
     // a suspended author still needs current agent access; one-shot -> disabled_at set (no cron).

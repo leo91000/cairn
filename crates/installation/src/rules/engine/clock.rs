@@ -222,6 +222,34 @@ fn advance_schedule(
     db.save_hook_rule_schedule(&schedule)
 }
 
+/// Carries a v38 preparation failure that was stored on its mission without a run.
+pub(crate) fn record_migrated_failure(
+    db: &Db<'_>,
+    rule: &str,
+    timezone: &str,
+    scheduled_for: i64,
+    failed_at: i64,
+    message: &str,
+) -> Result<()> {
+    let event_id = format!("clock:{rule}:{scheduled_for}");
+    let event = clock_event(
+        &event_id,
+        Some(scheduled_for),
+        failed_at,
+        timezone,
+        false,
+        0,
+    )?;
+    if let Some(triggering) = insert_triggering(db, rule, 1, &event_id, &event, failed_at)? {
+        let error: String = message.chars().take(4000).collect();
+        db.0.execute(
+            "UPDATE hook_rule_triggerings SET status='failed',error=?2,finished_at=?3 WHERE id=?1",
+            params![triggering, error, failed_at],
+        )?;
+    }
+    Ok(())
+}
+
 /// Emits one triggering for each due clock rule. After an interruption, missed slots
 /// produce a single triggering carrying the missed scheduled time, and the next slot
 /// is computed from now (ADR-0094).
