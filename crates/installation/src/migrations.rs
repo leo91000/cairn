@@ -73,15 +73,12 @@ struct LegacyRun {
     status: String,
     session_id: Option<String>,
     checkpoint: Option<String>,
-    retry_initial_brief: bool,
 }
 
 fn legacy_run_batch(tx: &Connection, cursor: &(i64, String)) -> Result<Vec<LegacyRun>> {
     let mut stmt = tx.prepare_cached(
         "SELECT r.id,r.task_id,r.project_id,r.created_at,r.started_at,r.finished_at,\
-             r.task_name,r.agent_name,r.snapshot,r.boundary,r.status,r.session_id,k.state,
-             r.status='queued' AND r.retry_attempt IS NOT NULL AND r.retry_next_at IS NOT NULL
-             AND (coalesce(json_extract(r.retry_cause,'$.startup'),0)=0 OR r.session_id IS NULL)
+             r.task_name,r.agent_name,r.snapshot,r.boundary,r.status,r.session_id,k.state \
              FROM runs r LEFT JOIN run_checkpoints k ON k.run_id=r.id \
              WHERE (r.created_at,r.id)>(?1,?2) AND r.trigger!='chat' \
              AND NOT EXISTS(SELECT 1 FROM conversations c WHERE c.run_id=r.id) \
@@ -103,7 +100,6 @@ fn legacy_run_batch(tx: &Connection, cursor: &(i64, String)) -> Result<Vec<Legac
                 status: r.get(10)?,
                 session_id: r.get(11)?,
                 checkpoint: r.get(12)?,
-                retry_initial_brief: r.get(13)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -682,13 +678,11 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 && (checkpoint["launched"] == true
                     || checkpoint["launchedTurn"].is_string()
                     || (run.started_at.is_some() && run.session_id.is_some()));
-            // An initial Antigravity refusal may leave a session without the
-            // brief. Its authorized retry still sends the original input.
-            let initial_antigravity_retry = run.retry_initial_brief
-                && snapshot["agent"]["provider"] == "antigravity"
+            let initial_antigravity_turn = snapshot["agent"]["provider"] == "antigravity"
                 && !boundary["missionTurnId"].is_string()
-                && !boundary["waitContinuation"]["reason"].is_string();
-            let recovery = launched && run.status != "succeeded" && !initial_antigravity_retry;
+                && !boundary["waitContinuation"]["reason"].is_string()
+                && wakeup_id.is_none();
+            let recovery = launched && run.status != "succeeded";
             let text = boundary["waitContinuation"]["reason"].as_str().map_or_else(
                 || {
                     if recovery {
@@ -720,8 +714,9 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
              status=CASE WHEN status='waiting' AND ?2 THEN 'succeeded' ELSE status END, \
              finished_at=CASE WHEN status='waiting' AND ?2 THEN coalesce(finished_at,?3) ELSE finished_at END, \
              boundary=json_set(boundary,'$.chatExecution',json(?4),'$.sourceTaskId',?5, \
-                 '$.sourceTaskPrompt',?6,'$.sourceSessionId',session_id) WHERE id=?7",
-            params![chat_id, wakeup_id.is_some(), updated_at, execution.to_string(), run.task_id, brief, run.id],
+                 '$.sourceTaskPrompt',?6,'$.sourceSessionId',session_id,'$.sourceTaskInitialTurn',json(?8))
+             WHERE id=?7",
+            params![chat_id, wakeup_id.is_some(), updated_at, execution.to_string(), run.task_id, brief, run.id, initial_antigravity_turn.to_string()],
         )?;
             if launched {
                 tx.execute(

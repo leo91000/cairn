@@ -570,6 +570,7 @@ pub(super) fn continue_run(
         recovery_pending: Some(checkpoint.held_environment.is_none()),
         boundary: Some(json!({
             "chatExecution": serde_json::to_value(execution)?,
+            "sourceTaskInitialTurn": null,
             "chatMessageDigest": null,
             "chatMessageChanged": null,
             "environmentState": if expired { json!("expired") } else { run["environmentState"].clone() },

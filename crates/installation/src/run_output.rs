@@ -596,6 +596,28 @@ pub fn chat_plan(
     if let Some(session) = session {
         plan["sessionId"] = session.into();
     }
+    let retry = &run["retry"];
+    if provider == crate::provider::Provider::Antigravity
+        && let Some(startup) = retry["cause"]["startup"].as_bool()
+    {
+        let attempt = retry["attempt"].as_u64();
+        let authorized = attempt.is_some()
+            && retry["nextAttemptAt"]
+                .as_i64()
+                .is_some_and(|at| at <= crate::config::now());
+        if !startup {
+            plan["antigravityRetryAttempt"] = attempt.into();
+            plan["antigravityRetryAuthorized"] = authorized.into();
+        }
+        // The legacy initial refusal may have created a session without
+        // recording the brief. A receipt recovered later can authorize
+        // another submission of that initial turn.
+        if authorized && (!startup || session.is_none()) && run["sourceTaskInitialTurn"] == true {
+            plan["execution"]["text"] =
+                format!("Task brief:\n{}", text(run, "sourceTaskPrompt")).into();
+            plan["execution"]["recovery"] = false.into();
+        }
+    }
     Ok(plan)
 }
 

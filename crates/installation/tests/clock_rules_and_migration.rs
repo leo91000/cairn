@@ -1154,7 +1154,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         ],
     ).unwrap();
     let mut antigravity_retries = Vec::new();
-    for startup in [false, true] {
+    for (startup, stored_retry) in [(false, true), (true, true), (false, false), (true, false)] {
         let retry_run = id();
         let mut profile = agent.clone();
         profile["provider"] = "antigravity".into();
@@ -1163,7 +1163,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,snapshot,boundary,
               recovery_pending,resume_available,resume_count,session_id,retry_attempt,retry_limit,
               retry_next_at,retry_cause)
-             VALUES(?1,?2,'queued','schedule',?3,?3,?4,'{}',1,1,0,?5,1,5,?6,?7)",
+             VALUES(?1,?2,?8,'schedule',?3,?3,?4,'{}',1,1,0,?5,?9,?10,?6,?7)",
             params![
                 retry_run,
                 id(),
@@ -1172,9 +1172,11 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
                     "prompt": "Prepare the original report." } })
                 .to_string(),
                 session,
-                t0 + 60_000,
-                json!({ "kind": "rate-limit", "message": "Provider capacity", "startup": startup })
-                    .to_string(),
+                stored_retry.then_some(t0 + 60_000),
+                stored_retry.then(|| json!({ "kind": "rate-limit", "message": "Provider capacity", "startup": startup }).to_string()),
+                if stored_retry { "queued" } else { "running" },
+                stored_retry.then_some(1),
+                stored_retry.then_some(5),
             ],
         )
         .unwrap();
@@ -1191,7 +1193,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             ],
         )
         .unwrap();
-        antigravity_retries.push(retry_run);
+        antigravity_retries.push((retry_run, startup, stored_retry));
     }
 
     let converted_run = id();
@@ -1676,11 +1678,21 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         )
         .unwrap();
     assert!(continuation.contains("Wait for the CI") && continuation.contains("succeeded"));
-    for retry_run in &antigravity_retries {
-        let run = cairn_installation::store::Db(&migrated)
+    for (retry_run, startup, stored_retry) in &antigravity_retries {
+        let mut run = cairn_installation::store::Db(&migrated)
             .run(retry_run)
             .unwrap()
             .unwrap();
+        assert_eq!(run["sourceTaskInitialTurn"], true);
+        assert!(text(&run["chatExecution"], "text").contains("Continue the same task"));
+        if !stored_retry {
+            assert!(run["retry"].is_null());
+            // Model the retry the worker schedules after recovering the refusal.
+            run["retry"] = json!({
+                "attempt": 1, "limit": 5, "nextAttemptAt": t0 + 60_000,
+                "cause": { "kind": "rate-limit", "message": "Provider capacity", "startup": startup },
+            });
+        }
         let plan = cairn_installation::run_output::chat_plan(
             &run,
             &json!({ "cwd": "/fixture/workspace", "output": "/fixture/output/events.json" }),
@@ -1696,6 +1708,9 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         );
         assert_eq!(plan["execution"]["recovery"], false);
         assert_eq!(run["retry"]["nextAttemptAt"], t0 + 60_000);
+        if !startup {
+            assert_eq!(plan["antigravityRetryAuthorized"], true);
+        }
     }
     let interrupted: (bool, String, String) = migrated
         .query_row(

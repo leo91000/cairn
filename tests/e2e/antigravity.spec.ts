@@ -148,7 +148,10 @@ test('Antigravity connects a Gemini API key, selects a model and runs a conversa
 
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('fixture:agy-slow=4000 fixture:agy-429 fixture:agy-quota-inline')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run.status).toBe('running')
+  await expect.poll(async () => {
+    const { run } = await workspace.api(`/api/chats/${slug}`)
+    return { status: run?.status, reason: run?.accountWaitReason }
+  }, { timeout: 30000 }).toMatchObject({ status: 'running' })
   await workspace.api(`/api/chats/${previous.id}/messages`, 'POST', {
     id: randomUUID(),
     text: 'Add a brief follow-up.',

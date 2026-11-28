@@ -189,28 +189,19 @@ impl Execution<'_> {
         )?;
         chat["runId"] = self.id.clone().into();
         chat["attemptId"] = self.attempt_id.clone().into();
-        if self.provider == Provider::Antigravity && self.run["retry"]["cause"]["startup"] == false
+        if chat["antigravityRetryAuthorized"] == false
+            && chat["antigravityRetryAttempt"].is_number()
         {
-            let retry = &self.run["retry"];
-            let attempt = retry["attempt"].as_u64();
-            let authorized = attempt.is_some()
-                && retry["nextAttemptAt"]
-                    .as_i64()
-                    .is_some_and(|at| at <= now());
-            chat["antigravityRetryAttempt"] = attempt.into();
-            chat["antigravityRetryAuthorized"] = authorized.into();
-            if !authorized && attempt.is_some() {
-                chat["antigravityPreviousAttempt"] = self
-                    .checkpoint
-                    .read(|saved| {
-                        saved
-                            .progress
-                            .as_ref()
-                            .map(|progress| progress.execution_id.clone())
-                    })
-                    .await
-                    .into();
-            }
+            chat["antigravityPreviousAttempt"] = self
+                .checkpoint
+                .read(|saved| {
+                    saved
+                        .progress
+                        .as_ref()
+                        .map(|progress| progress.execution_id.clone())
+                })
+                .await
+                .into();
         }
         adapter
             .configure_plan(s, &mut chat, self.account.as_ref())
