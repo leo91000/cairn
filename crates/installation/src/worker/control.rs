@@ -296,13 +296,18 @@ pub(crate) fn stop_chat_in(
 }
 
 fn can_cancel(db: &Db<'_>, run: &cairn_contracts::RunState, executing: bool) -> Result<bool> {
-    if run.status.is_active() || run.status == RunStatus::Succeeded && run.recovery_pending {
+    if run.status.is_active() {
         return Ok(true);
     }
-    if !executing {
+    let completing_chat =
+        run.trigger == "chat" && run.status == RunStatus::Succeeded && run.recovery_pending;
+    if !executing && !completing_chat {
         return Ok(false);
     }
-    Ok(RunCheckpoint::load_in(db, &run.id)?.is_some_and(|saved| saved.held_environment.is_some()))
+    Ok(RunCheckpoint::load_in(db, &run.id)?.is_some_and(|saved| {
+        executing && saved.held_environment.is_some()
+            || completing_chat && saved.finishing_native_turn()
+    }))
 }
 
 /// Cancelling a conversation's run or its wakeup pauses it as Stop does, in the same

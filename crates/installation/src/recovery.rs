@@ -383,6 +383,14 @@ async fn fence_attempt_authorized(
                                             && state.recovery_pending
                                     }));
                             if eligible {
+                                if observed_pending.is_none() {
+                                    // A prepared follow-up must re-read the environment
+                                    // even if status returns to Succeeded after cleanup.
+                                    let boundary = serde_json::json!({
+                                        "environmentAdmissionRevision": crate::config::id(),
+                                    });
+                                    db.update_run_boundary(&id, &boundary)?;
+                                }
                                 saved.pending_native_cleanup = Some(pending);
                                 saved.process = None;
                                 saved.store_in(db, &id)?;

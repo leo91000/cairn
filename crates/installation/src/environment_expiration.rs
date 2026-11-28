@@ -340,9 +340,13 @@ pub(crate) fn request_in(
         detach_in(db, run_id, &expiration, expired_at)?;
         return Ok(false);
     }
-    let fenced = RunCheckpoint::load_in(db, run_id)?
-        .is_some_and(|saved| saved.pending_native_cleanup().is_some());
-    if !stopped && !fenced {
+    let completing_chat = run["trigger"] == "chat"
+        && RunStatus::of(&run) == Some(RunStatus::Succeeded)
+        && run["recoveryPending"] == true;
+    let finishing_native = RunCheckpoint::load_in(db, run_id)?.is_some_and(|saved| {
+        saved.pending_native_cleanup().is_some() || completing_chat && saved.finishing_native_turn()
+    });
+    if !stopped && !finishing_native {
         db.change_run(
             run_id,
             crate::runs::RunChanges {
@@ -389,7 +393,7 @@ pub(crate) fn request_in(
         },
     )?;
     db.put(PENDING, &serde_json::to_value(pending)?)?;
-    Ok(!fenced)
+    Ok(!finishing_native)
 }
 
 /// Applies an expiration recorded while its execution was still live.

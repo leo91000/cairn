@@ -85,7 +85,12 @@ val Run.active
     get() = status in listOf("running", "queued", "waiting")
 
 val Run.stoppable
-    get() = active || (status == "succeeded" && recoveryPending)
+    get() =
+        active ||
+            (status == "succeeded" &&
+                trigger == "chat" &&
+                executionBackend == "native" &&
+                recoveryPending)
 
 val Run.title
     get() = taskName.ifBlank { snapshot?.task?.name.orEmpty() }.ifBlank { "Exécution" }

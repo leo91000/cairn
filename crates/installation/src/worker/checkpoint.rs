@@ -501,6 +501,18 @@ impl RunCheckpoint {
         (self.runner_id() == Some(pending.attempt.as_str())).then_some(pending)
     }
 
+    /// A settled native turn can be closing before its fence receipt is recorded.
+    pub(crate) fn finishing_native_turn(&self) -> bool {
+        self.pending_native_cleanup().is_some()
+            || self.held_environment.is_none()
+                && self
+                    .prepared()
+                    .is_some_and(|plan| plan["backend"] == "native")
+                && self
+                    .settled()
+                    .is_some_and(|turn| turn.status == RunStatus::Succeeded)
+    }
+
     pub fn finalization_error(&self) -> Option<&str> {
         if self.runner_id().is_some()
             && self.runner_id() == self.finalization_failure_attempt.as_deref()

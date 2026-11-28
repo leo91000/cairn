@@ -245,6 +245,12 @@ async fn main() -> Result<()> {
                         id,
                         cairn_installation::runs::RunChanges {
                             recovery_pending: Some(true),
+                            placement: Some(Box::new(
+                                cairn_installation::nodes::run_placement::PlacementChanges {
+                                    execution_backend: Some(Some("native".to_owned())),
+                                    ..Default::default()
+                                },
+                            )),
                             ..Default::default()
                         },
                     )?;

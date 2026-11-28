@@ -121,7 +121,14 @@ async fn delete_cleanup_evidence_survives_live_checkpoint_persistence() {
 }
 
 #[tokio::test]
-async fn stop_while_native_delete_is_in_flight_keeps_the_workspace_fence() {
+async fn stop_and_expiration_during_native_delete_preserve_the_fence() {
+    for stop in [true, false] {
+        request_during_native_delete(stop).await;
+    }
+}
+
+async fn request_during_native_delete(stop: bool) {
+    use crate::environment_expiration::Expiration;
     use axum::{Json, Router, routing::delete};
     use tokio::sync::Notify;
 
@@ -174,23 +181,58 @@ async fn stop_while_native_delete_is_in_flight_keeps_the_workspace_fence() {
         .unwrap();
     let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
     let run = service.store.run(&id).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let (fence, ()) = tokio::join!(checkpoint.fence(&service, &run), async {
+    service
+        .worker
+        .active
+        .lock()
+        .await
+        .insert(id.clone(), CancellationToken::new());
+    let revision_before_fence = tokio::time::timeout(Duration::from_secs(5), async {
+        let (fence, revision) = tokio::join!(checkpoint.fence(&service, &run), async {
             arrived.notified().await;
-            service.worker.cancel(&service, &id).await.unwrap();
+            if stop {
+                service.worker.cancel(&service, &id).await.unwrap();
+            } else {
+                service
+                    .expire_environment(
+                        &id,
+                        Expiration::new(cairn_contracts::EnvironmentExpirationCause::NodeChange),
+                        |_| Ok(()),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let current = service.store.run(&id).await.unwrap();
+            assert_eq!(current["cancelRequestedAt"].is_number(), stop);
             reply.notify_one();
+            current["environmentAdmissionRevision"].clone()
         });
         fence.unwrap();
+        revision
     })
     .await
     .unwrap();
+    let fenced = service.store.run(&id).await.unwrap();
+    assert!(fenced["environmentAdmissionRevision"].is_string());
+    assert_ne!(
+        fenced["environmentAdmissionRevision"],
+        revision_before_fence
+    );
     release(&service, &checkpoint, None, true).await.unwrap();
 
     super::super::schedule::observe_native_cleanup(&service)
         .await
         .unwrap();
     let stopped = service.store.run_state(&id).await.unwrap();
-    assert_eq!(stopped.status, RunStatus::Cancelled);
+    if stop {
+        assert_eq!(stopped.status, RunStatus::Cancelled);
+    } else {
+        assert_eq!(stopped.status, RunStatus::Failed);
+        assert_eq!(
+            stopped.error.as_deref(),
+            Some("Native disk cleanup is still in progress.")
+        );
+    }
     assert_eq!(stopped.finished_at, Some(42));
     assert!(!stopped.recovery_pending);
     let retained = RunCheckpoint::load(&service.store, &id)
