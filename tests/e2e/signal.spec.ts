@@ -455,3 +455,21 @@ test('snoozing a blocked conversation clears attention until it is restored', as
   await page.getByRole('menuitem', { name: 'Mark as read' }).click()
   await expect(row).not.toHaveAttribute('data-fil-kind', 'snoozed')
 })
+
+test('opening a returned reminder acknowledges an idle conversation', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const item = async () => (await workspace.api('/api/chats')).find((entry: any) => entry.id === chat.id)
+  const observed = await item()
+  await workspace.api('/api/snoozes', 'POST', {
+    chatId: chat.id,
+    action: { kind: 'snooze', finishedAt: observed.updatedAt, until: Date.now() + 60000 },
+  })
+  await workspace.api('/api/snoozes', 'POST', { chatId: chat.id, action: { kind: 'restore' } })
+  await expect.poll(async () => (await item()).unread).toBe(true)
+  await signIn(page)
+  const row = page.locator(`[data-fil-key="chat:${chat.id}"]`)
+  await expect(row).toHaveAttribute('data-unread', '')
+  await row.getByRole('button', { name: /^Open “/ }).click()
+  await expect(page).toHaveURL(workspacePath(`/chats/${chat.slug}`))
+  await expect.poll(async () => (await item()).unread, { timeout: 20000 }).toBe(false)
+})

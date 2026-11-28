@@ -29,6 +29,7 @@ import build.cairn.contracts.RuleNode
 import build.cairn.contracts.createHookRule
 import build.cairn.contracts.replaceHookRule
 import java.time.Instant
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.util.UUID
@@ -37,12 +38,17 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
 @Composable
-private fun DateAndTime(value: LocalDateTime, changed: (LocalDateTime) -> Unit) {
+private fun DateAndTime(
+    value: LocalDateTime,
+    maximumDate: LocalDate? = null,
+    changed: (LocalDateTime) -> Unit,
+) {
     val context = LocalContext.current
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         TextButton(
             onClick = {
-                DatePickerDialog(
+                val picker =
+                    DatePickerDialog(
                         context,
                         { _, year, month, day ->
                             changed(
@@ -53,7 +59,15 @@ private fun DateAndTime(value: LocalDateTime, changed: (LocalDateTime) -> Unit) 
                         value.monthValue - 1,
                         value.dayOfMonth,
                     )
-                    .show()
+                if (maximumDate != null) {
+                    picker.datePicker.maxDate =
+                        maxOf(maximumDate, value.toLocalDate())
+                            .atStartOfDay(ZoneId.systemDefault())
+                            .toInstant()
+                            .toEpochMilli()
+                    picker.updateDate(value.year, value.monthValue - 1, value.dayOfMonth)
+                }
+                picker.show()
             }
         ) {
             Text(value.toLocalDate().toString())
@@ -95,13 +109,16 @@ internal fun ClockScheduleFields(
         val zone = runCatching { ZoneId.of(timezone.trim()) }.getOrNull()
         val selected = LocalDateTime.parse(date).withSecond(0).withNano(0)
         val offset = zone?.rules?.getValidOffsets(selected)?.firstOrNull()
-        changed(
+        val instant = if (recurring) null else offset?.let { selected.toInstant(it).toEpochMilli() }
+        val draft = runCatching {
             HookRuleTrigger.C(
-                at = if (recurring) null else offset?.let { selected.toInstant(it).toEpochMilli() },
+                at = instant,
                 cron = cron.trim().takeIf { recurring },
                 timezone = timezone.trim(),
             )
-        )
+        }
+            .getOrElse { HookRuleTrigger.C(timezone = timezone.trim()) }
+        changed(draft)
     }
     Choice(
         "Fréquence",
@@ -123,7 +140,7 @@ internal fun ClockScheduleFields(
             singleLine = true,
         )
     else
-        DateAndTime(local) {
+        DateAndTime(local, maximumDate = LocalDate.of(9999, 12, 31)) {
             date = it.toString()
             update()
         }

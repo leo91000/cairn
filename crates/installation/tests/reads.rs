@@ -196,21 +196,39 @@ async fn work_finished_before_an_account_first_reads_is_not_unread() {
 }
 
 #[tokio::test]
-async fn plugin_conversations_answer_in_their_channel_and_are_never_unread() {
+async fn plugin_conversations_answer_in_their_channel_and_only_remind_when_requested() {
     let app = App::new().await;
     app.get(&app.owner, "/api/chats").await;
     let chat = app.finished_chat().await;
+    let chat_id = text(&chat, "id");
     app.service
         .store
         .set(
-            &format!("plugin-conversation:{}", text(&chat, "id")),
+            &format!("plugin-conversation:{chat_id}"),
             json!({ "connectionId": "discord", "thread": "support" }),
             None,
         )
         .await
         .unwrap();
     let listed = app.get(&app.owner, "/api/chats").await;
-    assert_eq!(find(&listed, "id", text(&chat, "id"))["unread"], false);
+    let quiet = find(&listed, "id", chat_id);
+    assert_eq!(quiet["unread"], false);
+    let until = now() + 60_000;
+    let (status, snoozed) = app
+        .snooze(
+            &app.owner,
+            chat_id,
+            json!({ "kind": "snooze", "finishedAt": quiet["readAt"], "until": until }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{snoozed}");
+    assert_eq!(snoozed["snoozedUntil"], until);
+    let (status, result) = app
+        .snooze(&app.owner, chat_id, json!({ "kind": "restore" }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let listed = app.get(&app.owner, "/api/chats").await;
+    assert_eq!(find(&listed, "id", chat_id)["unread"], true);
 }
 
 #[tokio::test]
@@ -530,8 +548,25 @@ async fn restoring_and_expiring_a_snooze_both_remind_the_account_of_an_idle_conv
         assert_eq!(reminder["status"], "idle");
         assert_eq!(reminder["unread"], true, "{reminder}");
         assert_eq!(reminder["readAt"], reminder["snoozedUntil"]);
+
+        let observed_at = &reminder["readAt"];
+        let until = now() + 60_000;
+        let (status, snoozed) = app
+            .snooze(
+                &app.owner,
+                chat_id,
+                json!({ "kind": "snooze", "finishedAt": observed_at, "until": until }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{snoozed}");
+        let listed = app.get(&app.owner, "/api/chats").await;
+        let snoozed = find(&listed, "id", chat_id);
+        assert_eq!(snoozed["readAt"], *observed_at);
+        assert_eq!(snoozed["snoozedUntil"], until);
+        assert_eq!(snoozed["unread"], false);
+
         assert_eq!(
-            app.read(&app.owner, &[chat_read(chat_id, &reminder["readAt"])])
+            app.read(&app.owner, &[chat_read(chat_id, &snoozed["readAt"])])
                 .await
                 .0,
             StatusCode::OK,

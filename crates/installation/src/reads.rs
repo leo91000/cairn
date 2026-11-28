@@ -58,6 +58,26 @@ pub(crate) async fn begin(s: &Service, account: &str) -> Result<()> {
         .await
 }
 
+fn activity_at(chat: &Value) -> Option<i64> {
+    chat["readAt"]
+        .as_i64()
+        .or_else(|| chat["finishedAt"].as_i64())
+        .or_else(|| chat["updatedAt"].as_i64())
+}
+
+/// Opening a synchronized conversation acknowledges a due reminder, including
+/// one for an idle conversation that has never run.
+pub(crate) fn detail_reminder(db: &Db<'_>, account: &str, chat: &mut Value) -> Result<()> {
+    if chat["lifecycle"] == "active"
+        && let Some(activity_at) = activity_at(chat)
+        && let Some(until) = db.snoozed_until(account, text(chat, "id"), activity_at)?
+        && until <= now()
+    {
+        chat["readAt"] = until.into();
+    }
+    Ok(())
+}
+
 /// One account's read marks and snoozed conversations. Without an account,
 /// nothing is unread and nothing is snoozed: personal state is never shared.
 pub(crate) struct Reads {
@@ -124,10 +144,7 @@ impl Reads {
                 && chat["paused"] != true;
             let wants_attention = question || failed || blocked || (finished && !quiet_rule);
 
-            let activity_at = chat["readAt"]
-                .as_i64()
-                .or_else(|| chat["finishedAt"].as_i64())
-                .or_else(|| chat["updatedAt"].as_i64());
+            let activity_at = activity_at(chat);
             let matching_snooze = self.snoozes.get(&id).copied().filter(|snooze| {
                 activity_at.is_some_and(|observed| observed <= snooze.finished_at)
             });
@@ -137,6 +154,9 @@ impl Reads {
             if let Some(snooze) = matching_snooze
                 && snooze.until > at
             {
+                // The row must acknowledge the exact observation that was snoozed,
+                // including a reminder that was snoozed again.
+                chat["readAt"] = snooze.finished_at.into();
                 chat["unread"] = false.into();
                 continue;
             }
@@ -146,24 +166,21 @@ impl Reads {
             let expired_snooze_at = matching_snooze
                 .filter(|snooze| snooze.until <= at)
                 .map(|snooze| snooze.until);
-            let effective_at = match (activity_at, expired_snooze_at) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
+            let effective_at = activity_at.max(expired_snooze_at);
             if let Some(snoozed_at) = expired_snooze_at
                 && chat["readAt"].as_i64().is_none_or(|r| snoozed_at > r)
             {
                 chat["readAt"] = snoozed_at.into();
             }
 
-            let unread = (wants_attention || expired_snooze_at.is_some())
-                && db.kv(&format!("plugin-conversation:{id}"))?.is_none()
+            let reminder_due = expired_snooze_at.is_some();
+            let ordinary_attention =
+                wants_attention && db.kv(&format!("plugin-conversation:{id}"))?.is_none();
+            let unread = (reminder_due || ordinary_attention)
                 && self.unread(
                     &id,
                     effective_at,
-                    blocked || preparation_failed || expired_snooze_at.is_some(),
+                    blocked || preparation_failed || reminder_due,
                 );
             chat["unread"] = unread.into();
             if unread {

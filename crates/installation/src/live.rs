@@ -458,7 +458,9 @@ fn read_page(
     // this conversation must not hold up another tab's durable event delivery.
     drop(list_permit);
     let chat = if scope.single_chat() {
-        crate::chats::public_stream_detail(db, &scope.id, window)?
+        let mut chat = crate::chats::public_stream_detail(db, &scope.id, window)?;
+        crate::reads::detail_reminder(db, &scope.account, &mut chat)?;
+        chat
     } else {
         Value::Null
     };

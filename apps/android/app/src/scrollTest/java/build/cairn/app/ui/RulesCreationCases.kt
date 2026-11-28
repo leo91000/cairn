@@ -14,6 +14,7 @@ import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import build.cairn.contracts.HookRuleCatalog
 import build.cairn.contracts.HookRuleLimits
+import build.cairn.contracts.HookRuleTrigger
 import build.cairn.contracts.RuleCatalogAgent
 import build.cairn.contracts.RuleCatalogLimits
 import build.cairn.contracts.RuleCatalogTool
@@ -92,15 +93,31 @@ abstract class RulesCreationCases {
         val instant = java.time.Instant.parse("2028-10-29T01:30:25Z").toEpochMilli()
         compose.setContent {
             CairnTheme {
-                ClockScheduleFields(
-                    build.cairn.contracts.HookRuleTrigger.C(at = instant, timezone = "Europe/Paris")
-                ) {
+                ClockScheduleFields(HookRuleTrigger.C(at = instant, timezone = "Europe/Paris")) {
                     changes.set(true)
                 }
             }
         }
         compose.onNodeWithText("Date unique").assertIsDisplayed()
         compose.runOnIdle { assertFalse(changes.get()) }
+    }
+
+    @Test
+    fun oneShotTimezoneEditAllowsAnInvalidDraftWithoutThrowing() {
+        val edited = AtomicReference<HookRuleTrigger.C>()
+        compose.setContent {
+            CairnTheme {
+                ClockScheduleFields(
+                    HookRuleTrigger.C(at = 60_000, timezone = "UTC"),
+                    changed = edited::set,
+                )
+            }
+        }
+        compose.onNodeWithText("Fuseau horaire (IANA)").performTextReplacement("Europe/Paris")
+        compose.runOnIdle {
+            assertEquals("Europe/Paris", edited.get().timezone)
+            assertEquals(null, edited.get().at)
+        }
     }
 
     @Test

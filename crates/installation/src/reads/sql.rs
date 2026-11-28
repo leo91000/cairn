@@ -69,7 +69,7 @@ impl Db<'_> {
         self.0
             .prepare_cached(
                 "UPDATE account_snoozes SET snoozed_until=max(finished_at+1,?3)
-                 WHERE account_id=? AND chat_id=? AND snoozed_until>?3",
+                 WHERE account_id=?1 AND chat_id=?2 AND snoozed_until>?3",
             )?
             .execute(params![account, chat_id, at])?;
         Ok(())
