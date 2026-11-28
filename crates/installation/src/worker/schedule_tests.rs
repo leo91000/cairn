@@ -2424,6 +2424,7 @@ async fn conversation_wait_releases_attempt_on_restart_even_when_cancelled() {
                     } else {
                         RunStatus::Succeeded
                     }),
+                    finished_at: Some((!queued).then(now)),
                     recovery_pending: Some(queued),
                     trigger: Some("chat".to_owned()),
                     session_id: Some(Some("saved".into())),
@@ -2433,7 +2434,12 @@ async fn conversation_wait_releases_attempt_on_restart_even_when_cancelled() {
             )
             .await
             .unwrap();
-        let mut chat = service.store.conversation_boundary(&chat_id).await.unwrap();
+        let mut chat = service
+            .store
+            .conversation_boundary(&chat_id)
+            .await
+            .unwrap()
+            .unwrap();
         chat["wakeup"] = wakeup.clone();
         service
             .store
@@ -2441,9 +2447,17 @@ async fn conversation_wait_releases_attempt_on_restart_even_when_cancelled() {
             .await
             .unwrap();
         let checkpoint = RunCheckpoint::from_value(json!({
-            "completed": true, "terminalCode": 0, "launched": true, "runnerId": "old-attempt",
+            "completed": true,
+            "terminalCode": 0,
+            "launched": true,
+            "runnerId": "old-attempt",
             "nodeId": node,
             "prepared": { "isolated": true, "backend": "native" },
+            "heldEnvironment": {
+                "attempt": "old-attempt",
+                "generation": "retained-generation",
+                "expiresAt": now() + 60_000,
+            },
         }))
         .unwrap();
         checkpoint.store(&service.store, &run_id).await.unwrap();
@@ -2481,6 +2495,7 @@ async fn conversation_wait_releases_attempt_on_restart_even_when_cancelled() {
             service.worker.cancel(&service, &run_id).await.unwrap();
         }
         service.worker.tick(&service).await.unwrap();
+        recover_completed_environments(&service).await.unwrap();
 
         assert_eq!(requests.load(Ordering::Relaxed), 1);
         let attempt = service

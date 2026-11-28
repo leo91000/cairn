@@ -320,6 +320,27 @@ fn refuse(problems: &[HookRuleProblem]) -> Error {
     Error::bad(format!("{}{more} [{}]", first.message, first.path))
 }
 
+fn new_clock_date_problem(
+    trigger: &HookRuleTrigger,
+    previous: Option<&HookRuleTrigger>,
+    at: i64,
+) -> Option<HookRuleProblem> {
+    if previous != Some(trigger)
+        && let HookRuleTrigger::Clock {
+            cron: None,
+            at: Some(target),
+            ..
+        } = trigger
+        && *target <= at
+    {
+        return Some(HookRuleProblem {
+            path: "/trigger/at".to_owned(),
+            message: "Choose a future date and time.".to_owned(),
+        });
+    }
+    None
+}
+
 /// Validates and stores a new version, returning the rule row it belongs to.
 fn save_version(
     db: &Db<'_>,
@@ -348,6 +369,12 @@ fn save_version(
         .map(|version| version.definition.trigger);
     let trigger_changed = previous_trigger.as_ref() != Some(&definition.trigger);
     let at = now();
+    if row.disabled_at.is_none()
+        && let Some(problem) =
+            new_clock_date_problem(&definition.trigger, previous_trigger.as_ref(), at)
+    {
+        return Err(refuse(&[problem]));
+    }
     row.version += 1;
     row.revision = id();
     row.updated_at = at;
@@ -669,11 +696,16 @@ fn creation_id(requested: Option<HookRuleId>) -> Result<String> {
     }
 }
 
-/// The same identity must not already name another kind of record.
+/// A new rule's identity must be available across resources and retained origins.
 fn fresh_identity(db: &Db<'_>, id: &str) -> Result<()> {
     if db.agent(id)?.is_some() || db.project(id)?.is_some() {
         return Err(Error::conflict(
             "This creation identity belongs to a different resource.",
+        ));
+    }
+    if db.hook_rule_identity_claimed(id)? {
+        return Err(Error::conflict(
+            "This creation identity belongs to another rule or its conversation history.",
         ));
     }
     Ok(())
@@ -1191,10 +1223,14 @@ pub(crate) async fn validate(
     s.store
         .read(move |db| {
             actor.authorize(db)?;
-            let creator = match (&input.rule_id, &viewer.account) {
-                (Some(rule), _) if db.hook_rule(&rule.to_string())?.is_some() => creator(
-                    &required(db.hook_rule(&rule.to_string())?, "Rule not found")?,
-                ),
+            let stored = input
+                .rule_id
+                .as_ref()
+                .map(|rule| db.hook_rule(&rule.to_string()))
+                .transpose()?
+                .flatten();
+            let creator = match (&stored, &viewer.account) {
+                (Some(rule), _) => creator(rule),
                 (_, Some(account)) => Creator {
                     account: account.clone(),
                     owner: viewer.owner,
@@ -1209,7 +1245,7 @@ pub(crate) async fn validate(
                 .account
                 .clone()
                 .map_or(Origin::Unknown, Origin::Human);
-            let checked = validation::check(
+            let mut checked = validation::check(
                 db,
                 &validation::Request {
                     definition: &input.definition,
@@ -1218,6 +1254,22 @@ pub(crate) async fn validate(
                     origin: &origin,
                 },
             )?;
+            if stored
+                .as_ref()
+                .is_none_or(|rule| rule.disabled_at.is_none())
+            {
+                let previous = stored
+                    .as_ref()
+                    .map(|rule| db.hook_rule_version(&rule.id, rule.version))
+                    .transpose()?
+                    .flatten()
+                    .map(|version| version.definition.trigger);
+                if let Some(problem) =
+                    new_clock_date_problem(&input.definition.trigger, previous.as_ref(), now())
+                {
+                    checked.problems.push(problem);
+                }
+            }
             Ok(ValidateHookRuleOutput {
                 problems: checked.problems,
                 warnings: checked.warnings,

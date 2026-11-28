@@ -76,7 +76,7 @@ pub(crate) fn next_for_clock(
             ..
         } => {
             if trigger_changed {
-                return Ok(Some(*target));
+                return Ok((*target > at).then_some(*target));
             }
             if existing.is_some_and(|row| row.fired_at.is_some()) {
                 return Ok(None);
@@ -130,8 +130,12 @@ pub(crate) fn sync_schedule(
         return Ok(None);
     }
 
-    schedule.next_run =
-        next_for_clock(&definition.trigger, now(), Some(&schedule), trigger_changed)?;
+    schedule.next_run = next_for_clock(
+        &definition.trigger,
+        row.updated_at,
+        Some(&schedule),
+        trigger_changed,
+    )?;
     db.save_hook_rule_schedule(&schedule)?;
     Ok(schedule.next_run)
 }

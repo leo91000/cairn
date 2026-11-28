@@ -165,6 +165,18 @@ fn version(row: &rusqlite::Row<'_>) -> rusqlite::Result<VersionRow> {
 }
 
 impl Db<'_> {
+    pub(crate) fn hook_rule_identity_claimed(&self, id: &str) -> Result<bool> {
+        Ok(self.0.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM hook_rules WHERE id=?1
+               UNION ALL
+               SELECT 1 FROM hook_rule_conversations WHERE rule_id=?1
+             )",
+            [id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub(crate) fn hook_rule(&self, id: &str) -> Result<Option<RuleRow>> {
         Ok(self
             .0

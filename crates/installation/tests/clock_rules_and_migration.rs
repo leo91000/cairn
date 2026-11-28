@@ -154,6 +154,119 @@ async fn clock_rules_cannot_bind_or_steer_a_conversation_for_reuse() {
 }
 
 #[tokio::test]
+async fn a_past_one_shot_cannot_create_an_automatic_run() {
+    let app = App::new().await;
+    let definition = schedule_rule_definition(
+        "Past schedule",
+        &json!({ "type": "clock", "at": now() - 60_000, "timezone": "UTC" }),
+    );
+    let (status, validation) = app
+        .request(
+            &app.owner,
+            "POST",
+            "/api/hook-rules/validate",
+            json!({ "definition": definition }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{validation}");
+    assert!(
+        validation["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|problem| problem["path"] == "/trigger/at")
+    );
+    let (status, result) = app
+        .request(
+            &app.owner,
+            "POST",
+            "/api/hook-rules",
+            json!({ "definition": definition }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+
+    let (status, saved) = app
+        .request(
+            &app.owner,
+            "POST",
+            "/api/hook-rules",
+            json!({ "definition": definition, "enabled": false }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let rule_id = text(&saved, "id");
+    let (status, enabled) = app
+        .request(
+            &app.owner,
+            "POST",
+            &format!("/api/hook-rules/{rule_id}/enabled"),
+            json!({ "ruleId": rule_id, "enabled": true }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{enabled}");
+    assert!(enabled["nextRun"].is_null());
+    assert_eq!(
+        cairn_installation::rules::engine::tick(&app.service)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_clock_rule_keeps_its_conversation_origin_identity() {
+    let app = App::new().await;
+    let creation = id();
+    let trigger = json!({ "type": "clock", "cron": "0 9 * * *", "timezone": "UTC" });
+    let definition = schedule_rule_definition("Original schedule", &trigger);
+    let (status, created) = app
+        .request(
+            &app.owner,
+            "POST",
+            "/api/hook-rules",
+            json!({ "creationId": creation, "definition": definition }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["id"], creation);
+    let path = format!("/api/hook-rules/{creation}");
+    let (status, started) = app
+        .request(&app.owner, "POST", &format!("{path}/run"), Value::Null)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    cairn_installation::rules::engine::tick(&app.service)
+        .await
+        .unwrap();
+    let (status, chats) = app
+        .request(&app.owner, "GET", "/api/chats", Value::Null)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{chats}");
+    assert!(
+        chats
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|chat| chat["originRule"]["ruleId"] == creation)
+    );
+    let (status, deleted) = app
+        .request(&app.owner, "DELETE", &path, json!({ "ruleId": creation }))
+        .await;
+    assert!(status.is_success(), "{deleted}");
+
+    let replacement = schedule_rule_definition("Different schedule", &trigger);
+    let (status, reused) = app
+        .request(
+            &app.owner,
+            "POST",
+            "/api/hook-rules",
+            json!({ "creationId": creation, "definition": replacement }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{reused}");
+}
+
+#[tokio::test]
 async fn run_now_records_a_capacity_refusal() {
     let app = App::new().await;
     let definition = schedule_rule_definition(

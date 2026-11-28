@@ -1290,6 +1290,7 @@ async fn question_tools_only_withdraw_the_authorized_conversations_pending_quest
     let (chat, run) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     let bearer = running_run_token(&s, &run).await;
     let chat_id = text(&chat, "id").to_owned();
+    let messages = s.chat_detail(&chat_id).await.unwrap()["messages"].clone();
     let question = "a".repeat(64);
     s.question_receive(text(&run, "id"), json!({
         "id": question, "blocking": true, "fields": [{ "id": "scope", "title": "Still needed?" }],
@@ -1319,10 +1320,7 @@ async fn question_tools_only_withdraw_the_authorized_conversations_pending_quest
     // Retrying a withdrawal must not reopen it or send a user message.
     let retried = s.question_cancel(&chat_id, &question).await.unwrap();
     assert_eq!(retried["status"], "cancelled");
-    assert_eq!(
-        s.chat_detail(&chat_id).await.unwrap()["messages"],
-        json!([])
-    );
+    assert_eq!(s.chat_detail(&chat_id).await.unwrap()["messages"], messages);
 
     let (_, other_run) = crate::run(&s, Value::Null, MAIN_AGENT_ID).await;
     let other_token = running_run_token(&s, &other_run).await;

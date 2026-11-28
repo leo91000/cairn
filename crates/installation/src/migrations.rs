@@ -112,15 +112,7 @@ fn table_exists(tx: &Connection, name: &str) -> rusqlite::Result<bool> {
 }
 
 fn available_rule_id(tx: &Connection, mission_id: &str) -> Result<String> {
-    let claimed: bool = tx.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM hook_rules WHERE id=?1
-           UNION ALL
-           SELECT 1 FROM hook_rule_conversations WHERE rule_id=?1
-         )",
-        [mission_id],
-        |row| row.get(0),
-    )?;
+    let claimed = Db(tx).hook_rule_identity_claimed(mission_id)?;
     Ok(if claimed { id() } else { mission_id.to_owned() })
 }
 

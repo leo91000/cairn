@@ -196,11 +196,23 @@ the limit. Only Cairn records the depth, beside the event and outside its payloa
 a plugin's payload cannot supply or lower it. A tool call that makes the service emit
 a plugin event again is not a chain Cairn can follow: the hourly caps bound it.
 
-The depth also follows mission runs started through `cairn_installation` and
-scheduled work created or edited by an agent. It is saved with that work and its
-run, independently of later input in the conversation that caused it. Manual
-context compaction is maintenance: it emits neither a new reply nor an end-of-turn
-hook, including when its events are observed after the next real turn starts.
+An agent's **Run now** carries the depth of its current turn into the Clock
+triggering. Automatic turns of migrated missions preserve the saved chain depth.
+A person who saves the migrated rule establishes a new origin for future turns.
+Manual context compaction leaves the chain and the turn's reported outcome intact.
+
+### Clock
+
+A Clock rule accepts a five-field cron or a single date in an IANA time zone.
+After an outage, it emits one triggering for missed slots and calculates its
+next slot from the time it runs. The event carries the scheduled time and the
+actual emission time. **Run now** triggers the same version immediately.
+
+**Schedule an agent** creates a Clock rule with the project, agent and brief.
+New turns start in fresh conversations. The overlap condition can skip the
+triggering while a conversation from the same rule is queued, working or waiting
+for a wakeup. A pending question leaves the next slot available. The complete
+editor can change that condition.
 
 ### History
 
@@ -407,8 +419,7 @@ for one person who remains, when it writes, the owner or a member with access to
 conversation's agent, in a conversation that meets every provenance condition of
 ADR-0075:
 
-- the run belongs to a conversation, never to a task (scheduled, manual or delegated)
-  or a mission;
+- the run belongs to an active conversation a person started;
 - this person created the conversation from the web, Android or the public MCP, and
   wrote every entry since: messages, steers, answers to questions and edits of a
   queued message, which count as entries of whoever edits. An entry by a rule, an

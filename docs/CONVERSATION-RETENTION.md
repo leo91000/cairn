@@ -17,8 +17,8 @@ Explicit conversation deletion still removes all of them and revokes shared link
 Previously deleted conversations cannot be recovered by this policy change.
 
 Inactivity starts at `lastActivityAt` or the last run's `finishedAt`, whichever is
-later. Reading does not extend the delay. New empty chats and converted missions
-initialize their activity at creation. Queued/running agents, pending input,
+later. Reading does not extend the delay. New conversations initialize their
+activity at creation. Queued/running agents, pending input,
 open questions (including nonblocking questions), scheduled wakeups, recovery,
 node movement, backend migration, coding-agent switches, run preparation and
 worker finalization protect the environment. Pausing alone does not protect it.
@@ -82,9 +82,9 @@ first destination. The checkpoint publication that transfers durable execution
 ownership consumes them, under revision and attempt checks. A failed preparation
 releases its capacity without requiring another discard confirmation. A new
 explicit choice replaces the destination while the environment is expired. Queued messages and scheduled or
-conditional waits retain their continuations. Active missions without a wait
-resume automatically; a chat otherwise waits for its next message. An agent moving
-its own conversation automatically continues there with the expiration warning.
+conditional waits retain their continuations. An agent moving its own
+conversation automatically continues there with the expiration warning.
+Other conversations wait for their next message.
 
 For an already expired environment, placement or `migrate_chat_backend` selects the
 next node/backend without a loss warning or `discardWorkingFiles`. The migration
