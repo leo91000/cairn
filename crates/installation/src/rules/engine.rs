@@ -152,6 +152,7 @@ pub struct Engine {
     pub(crate) wake: tokio::sync::Notify,
     delivery_retries: Mutex<HashMap<(String, String), (Instant, u32)>>,
     maintenance: Mutex<Option<Instant>>,
+    clock_memberships: Mutex<clock::MembershipCheck>,
     last_resolution: Mutex<HashMap<String, Instant>>,
     last_execution: Mutex<HashMap<String, Instant>>,
 }

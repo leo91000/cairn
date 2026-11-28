@@ -365,7 +365,13 @@ fn save_version(
         },
         &checked.uses,
     )?;
-    engine::clock::sync_schedule(db, row, definition, trigger_changed)?;
+    engine::clock::sync_schedule(
+        db,
+        row,
+        definition,
+        trigger_changed,
+        writer.source != HookRuleSource::InstallationAgent,
+    )?;
     Ok(())
 }
 
@@ -831,7 +837,7 @@ where
             row.updated_at = now();
             db.save_hook_rule(&row)?;
             if let Some(version) = db.hook_rule_version(&row.id, row.version)? {
-                engine::clock::sync_schedule(db, &row, &version.definition, false)?;
+                engine::clock::sync_schedule(db, &row, &version.definition, false, false)?;
             }
             db.audit(action, &json!({ "ruleId": row.id }))?;
             view(db, &rule, &viewer)

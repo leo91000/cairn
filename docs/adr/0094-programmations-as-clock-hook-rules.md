@@ -113,6 +113,9 @@ Tout est migré ; il ne reste qu’un lecteur de conversations.
 - L’autorité native enregistrée sur la mission devient celle de la version migrée.
   Une mission sans autorité native enregistrée n’atteint pas d’agent natif tant que
   son créateur ne réenregistre pas la règle.
+- Les lancements automatiques conservent la profondeur de chaîne des missions
+  écrites par un agent. Un enregistrement direct par le créateur établit un
+  nouveau départ pour la programmation.
 - Chaque run devient une conversation dont l’origine est cette règle, avec sa
   timeline, ses livrables et son résultat. Les missions qui utilisaient
   `worktree=false` ou une liste de skills explicite les perdent.

@@ -6,6 +6,8 @@ use crate::{
 use cairn_contracts::{MergeAgentsInput, MergeAgentsOutput};
 use cairn_protocol::TaskAuthorPolicy;
 
+pub(crate) const CLOCK_MEMBERSHIP_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Default)]
 pub struct Memberships {
     pub(crate) authors: tokio::sync::Mutex<()>,
@@ -44,14 +46,12 @@ impl Memberships {
 
     /// A migrated schedule needs a real installation membership observation
     /// before an unverified creator is treated as a member.
-    pub(crate) async fn confirm_installation_memberships(&self, s: &Service) -> Result<bool> {
-        self.verify_membership(s, std::time::Duration::from_secs(60))
-            .await?;
-        Ok(self
-            .verified
+    pub(crate) fn clock_membership_confirmation(&self) -> Option<bool> {
+        self.verified
             .lock()
             .unwrap()
-            .is_some_and(|(_, claimed)| claimed))
+            .filter(|(checked, _)| checked.elapsed() < CLOCK_MEMBERSHIP_TTL)
+            .map(|(_, claimed)| claimed)
     }
 
     /// Read-only lists may reuse a recent membership check.

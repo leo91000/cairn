@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS hook_rule_schedules(
  rule_id TEXT PRIMARY KEY NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
  next_run INTEGER CHECK(next_run BETWEEN 0 AND 9007199254740991),
  last_scheduled_for INTEGER CHECK(last_scheduled_for BETWEEN 0 AND 9007199254740991),
- fired_at INTEGER CHECK(fired_at BETWEEN 0 AND 9007199254740991)
+ fired_at INTEGER CHECK(fired_at BETWEEN 0 AND 9007199254740991),
+ legacy_chain_depth INTEGER NOT NULL DEFAULT 0 CHECK(legacy_chain_depth BETWEEN 0 AND 8)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS hook_rule_schedules_due ON hook_rule_schedules(next_run) WHERE next_run IS NOT NULL;
 ";
@@ -57,6 +58,7 @@ pub(crate) struct ScheduleRow {
     pub next_run: Option<i64>,
     pub last_scheduled_for: Option<i64>,
     pub fired_at: Option<i64>,
+    pub legacy_chain_depth: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -297,7 +299,7 @@ impl Db<'_> {
         Ok(self
             .0
             .prepare_cached(
-                "SELECT rule_id,next_run,last_scheduled_for,fired_at FROM hook_rule_schedules WHERE rule_id=?",
+                "SELECT rule_id,next_run,last_scheduled_for,fired_at,legacy_chain_depth FROM hook_rule_schedules WHERE rule_id=?",
             )?
             .query_row([rule_id], |row| {
                 Ok(ScheduleRow {
@@ -305,6 +307,7 @@ impl Db<'_> {
                     next_run: row.get(1)?,
                     last_scheduled_for: row.get(2)?,
                     fired_at: row.get(3)?,
+                    legacy_chain_depth: row.get(4)?,
                 })
             })
             .optional()?)
@@ -313,14 +316,15 @@ impl Db<'_> {
     pub(crate) fn save_hook_rule_schedule(&self, row: &ScheduleRow) -> Result<()> {
         self.0
             .prepare_cached(
-                "INSERT INTO hook_rule_schedules(rule_id,next_run,last_scheduled_for,fired_at) VALUES(?1,?2,?3,?4)
-                 ON CONFLICT(rule_id) DO UPDATE SET next_run=excluded.next_run,last_scheduled_for=excluded.last_scheduled_for,fired_at=excluded.fired_at",
+                "INSERT INTO hook_rule_schedules(rule_id,next_run,last_scheduled_for,fired_at,legacy_chain_depth) VALUES(?1,?2,?3,?4,?5)
+                 ON CONFLICT(rule_id) DO UPDATE SET next_run=excluded.next_run,last_scheduled_for=excluded.last_scheduled_for,fired_at=excluded.fired_at,legacy_chain_depth=excluded.legacy_chain_depth",
             )?
             .execute(params![
                 row.rule_id,
                 row.next_run,
                 row.last_scheduled_for,
                 row.fired_at,
+                row.legacy_chain_depth,
             ])?;
         Ok(())
     }

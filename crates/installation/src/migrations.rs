@@ -117,7 +117,8 @@ fn rebuild_rule_tables(tx: &Connection) -> Result<()> {
           rule_id TEXT PRIMARY KEY NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
           next_run INTEGER CHECK(next_run BETWEEN 0 AND 9007199254740991),
           last_scheduled_for INTEGER CHECK(last_scheduled_for BETWEEN 0 AND 9007199254740991),
-          fired_at INTEGER CHECK(fired_at BETWEEN 0 AND 9007199254740991)
+          fired_at INTEGER CHECK(fired_at BETWEEN 0 AND 9007199254740991),
+          legacy_chain_depth INTEGER NOT NULL DEFAULT 0 CHECK(legacy_chain_depth BETWEEN 0 AND 8)
          ) WITHOUT ROWID;
          CREATE INDEX IF NOT EXISTS hook_rule_schedules_due ON hook_rule_schedules(next_run) WHERE next_run IS NOT NULL;
          CREATE INDEX IF NOT EXISTS hook_rule_conversations_rule ON hook_rule_conversations(rule_id);",
@@ -212,6 +213,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         };
 
         let db = Db(&tx);
+        let has_legacy_depths = table_exists(&tx, "hook_rule_task_depths")?;
         for mission in missions {
             let creator_account_id = mission
                 .author_id
@@ -381,34 +383,32 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 },
                 &uses,
             )?;
-            let schedule = match &cron {
-                Some(pattern) if !disabled && !membership_ended => {
-                    let next = mission.next_run.or_else(|| {
-                        crate::service::next_occurrences(pattern, &timezone, at, 1)
-                            .ok()
-                            .and_then(|v| v.into_iter().next())
-                    });
-                    ScheduleRow {
-                        rule_id: row.id.clone(),
-                        next_run: next,
-                        last_scheduled_for: None,
-                        fired_at: None,
-                    }
-                }
-                None => ScheduleRow {
-                    rule_id: row.id.clone(),
-                    next_run: None,
-                    last_scheduled_for: None,
-                    fired_at: Some(mission.created_at.max(1)),
-                },
-                _ => ScheduleRow {
-                    rule_id: row.id.clone(),
-                    next_run: None,
-                    last_scheduled_for: None,
-                    fired_at: None,
-                },
+            let legacy_chain_depth = if has_legacy_depths {
+                tx.query_row(
+                    "SELECT depth FROM hook_rule_task_depths WHERE task_id=?",
+                    [&mission.id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0)
+            } else {
+                0
             };
-            db.save_hook_rule_schedule(&schedule)?;
+            let next_run = match &cron {
+                Some(pattern) if !disabled && !membership_ended => mission.next_run.or_else(|| {
+                    crate::service::next_occurrences(pattern, &timezone, at, 1)
+                        .ok()
+                        .and_then(|v| v.into_iter().next())
+                }),
+                _ => None,
+            };
+            db.save_hook_rule_schedule(&ScheduleRow {
+                rule_id: row.id.clone(),
+                next_run,
+                last_scheduled_for: None,
+                fired_at: cron.is_none().then(|| mission.created_at.max(1)),
+                legacy_chain_depth,
+            })?;
         }
     }
 

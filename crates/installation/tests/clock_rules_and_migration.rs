@@ -341,6 +341,16 @@ async fn a_clock_brief_at_the_legacy_limit_can_be_edited_and_duplicated() {
     );
     let rule = text(&created, "id");
     definition["description"] = "Edited description".into();
+    let (status, validation) = app
+        .request(
+            &app.owner,
+            "POST",
+            "/api/hook-rules/validate",
+            json!({ "ruleId": rule, "definition": definition }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{validation}");
+    assert_eq!(validation["problems"], json!([]), "{validation}");
     let (status, edited) = app
         .request(
             &app.owner,
@@ -668,6 +678,11 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     )
     .unwrap();
     conn.execute(
+        "INSERT INTO hook_rule_task_depths(task_id,depth) VALUES(?1,8)",
+        [&active_mission_id],
+    )
+    .unwrap();
+    conn.execute(
         "INSERT INTO missions(id,agent_id,name,prompt,cron,timezone,enabled,archived,author_id,author_access_id,author_removed,revision,created_at,updated_at) \
          VALUES(?1,?2,'Paused mission','Do work','0 10 * * *','UTC',0,1,'owner-acct','acc-1',0,'r1',?3,?3)",
         params![disabled_mission_id, MAIN_AGENT_ID, t0],
@@ -958,14 +973,15 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         !owner,
         "only a verified Beacon observation can confer owner authority"
     );
-    let next_run: Option<i64> = migrated
+    let (next_run, legacy_depth): (Option<i64>, u32) = migrated
         .query_row(
-            "SELECT next_run FROM hook_rule_schedules WHERE rule_id=?1",
+            "SELECT next_run,legacy_chain_depth FROM hook_rule_schedules WHERE rule_id=?1",
             [&active_mission_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
     assert_eq!(next_run, Some(t0 + 60_000));
+    assert_eq!(legacy_depth, 8);
 
     // Disabled/archived -> disabled_at set; removed author -> membership_ended_at set;
     // a suspended author still needs current agent access; one-shot -> disabled_at set (no cron).
@@ -1177,22 +1193,84 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let service = cairn_installation::service::Service::new(config)
         .await
         .unwrap();
-    // Before Beacon confirms migrated membership, a due owner slot stays available.
-    cairn_installation::rules::engine::tick(&service)
+    // An overdue migrated schedule must neither act without Beacon's
+    // membership confirmation nor keep the engine waiting on an unavailable Beacon.
+    let contacted = Arc::new(tokio::sync::Notify::new());
+    let policy_route = axum::routing::get({
+        let contacted = contacted.clone();
+        move || async move {
+            contacted.notify_one();
+            std::future::pending::<StatusCode>().await
+        }
+    });
+    let (origin, stalled_beacon) = common::serve_locally(
+        Router::new().route("/api/relay/{installation}/task-authors", policy_route),
+    )
+    .await;
+    let relay = service.config.data_dir.join("installation-relay");
+    std::fs::create_dir_all(&relay).unwrap();
+    let identity = relay.join("identity.json");
+    std::fs::write(
+        &identity,
+        json!({ "origin": origin, "installationId": id(), "token": "fixture-only" }).to_string(),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&identity, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let admission_bound = std::time::Duration::from_secs(3);
+    tokio::time::timeout(
+        admission_bound,
+        cairn_installation::rules::engine::tick(&service),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::timeout(admission_bound, contacted.notified())
         .await
         .unwrap();
+    let schedule_rule_id = active_mission_id.clone();
     let schedule: i64 = service
         .store
         .read(move |db| {
             Ok(db.0.query_row(
                 "SELECT next_run FROM hook_rule_schedules WHERE rule_id=?",
-                [&active_mission_id],
+                [&schedule_rule_id],
                 |row| row.get(0),
             )?)
         })
         .await
         .unwrap();
     assert_eq!(schedule, next_run.unwrap());
+    // Model the owner membership after Beacon verification. The scheduled
+    // event consumes one step when it starts a chat, preserving depth eight.
+    let schedule_rule_id = active_mission_id.clone();
+    service
+        .store
+        .transaction(move |db| {
+            db.0.execute(
+                "UPDATE hook_rules SET creator_owner=1 WHERE id=?",
+                [&schedule_rule_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    cairn_installation::rules::engine::tick(&service)
+        .await
+        .unwrap();
+    let event_depth: u32 = service
+        .store
+        .read(move |db| {
+            Ok(db.0.query_row(
+            "SELECT json_extract(event,'$.cairn.depth') FROM hook_rule_triggerings WHERE rule_id=?",
+            [&active_mission_id],
+            |row| row.get(0),
+        )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(event_depth, legacy_depth - 1);
+    stalled_beacon.abort();
     let detail = service.chat_detail(&waiting_chat_id).await.unwrap();
     assert_eq!(detail["run"]["chatExecution"]["messageId"], "legacy-turn");
     assert_eq!(detail["wakeup"]["messageId"], "legacy-turn");

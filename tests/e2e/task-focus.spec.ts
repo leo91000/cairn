@@ -76,7 +76,7 @@ test('accepting a concurrent version updates the editable schedule fields', asyn
 
   const path = `/api/hook-rules/${rule.id}`
   const changed = { ...definition, trigger: { ...definition.trigger, cron: '30 13 * * MON' } }
-  await workspace.api(path, 'PUT', { revision: rule.revision, definition: changed })
+  await workspace.api(path, 'PUT', { ruleId: rule.id, revision: rule.revision, definition: changed })
   await page.getByLabel('Rule name').fill('My unsaved title')
   await page.getByRole('button', { name: 'Save version' }).click()
   await page.getByRole('button', { name: 'Use the saved version' }).click()

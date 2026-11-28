@@ -8,6 +8,43 @@ use crate::rules::{
 };
 use cairn_contracts::{HookRuleDefinition, HookRuleInput, HookRuleTrigger, HookRuleTriggering};
 
+#[derive(Default)]
+pub(super) struct MembershipCheck {
+    in_flight: bool,
+    retry_at: Option<Instant>,
+}
+
+fn refresh_memberships(service: &Arc<Service>) {
+    {
+        let mut check = service.rules.clock_memberships.lock().unwrap();
+        if check.in_flight || check.retry_at.is_some_and(|at| at > Instant::now()) {
+            return;
+        }
+        check.in_flight = true;
+    }
+
+    let service = service.clone();
+    tokio::spawn(async move {
+        let result = tokio::select! {
+            () = service.shutdown.cancelled() => Ok(()),
+            result = service.memberships.verify_membership(
+                &service,
+                crate::memberships::CLOCK_MEMBERSHIP_TTL,
+            ) => result,
+        };
+        if let Err(error) = result {
+            tracing::warn!(
+                status = error.status,
+                "Clock rules await confirmation of migrated memberships"
+            );
+        }
+        let mut check = service.rules.clock_memberships.lock().unwrap();
+        check.in_flight = false;
+        check.retry_at = Some(Instant::now() + std::time::Duration::from_secs(15));
+        service.rules.wake.notify_one();
+    });
+}
+
 fn rfc3339(ms: i64) -> Result<String> {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|date| date.to_rfc3339())
@@ -59,51 +96,44 @@ pub(crate) fn sync_schedule(
     row: &RuleRow,
     definition: &HookRuleDefinition,
     trigger_changed: bool,
+    reset_legacy_depth: bool,
 ) -> Result<Option<i64>> {
-    if !matches!(definition.trigger, HookRuleTrigger::Clock { .. }) {
+    let existing = db.hook_rule_schedule(&row.id)?;
+    let mut schedule = existing.unwrap_or_else(|| ScheduleRow {
+        rule_id: row.id.clone(),
+        next_run: None,
+        last_scheduled_for: None,
+        fired_at: None,
+        legacy_chain_depth: 0,
+    });
+    if trigger_changed {
+        schedule.last_scheduled_for = None;
+        schedule.fired_at = None;
+    }
+    if reset_legacy_depth {
+        schedule.legacy_chain_depth = 0;
+    }
+
+    let clock = matches!(definition.trigger, HookRuleTrigger::Clock { .. });
+    if !clock && schedule.legacy_chain_depth == 0 {
         db.delete_hook_rule_schedule(&row.id)?;
         return Ok(None);
     }
-
-    let existing = db.hook_rule_schedule(&row.id)?;
-    let last_scheduled_for = if trigger_changed {
-        None
-    } else {
-        existing.as_ref().and_then(|s| s.last_scheduled_for)
-    };
-    let fired_at = if trigger_changed {
-        None
-    } else {
-        existing.as_ref().and_then(|s| s.fired_at)
-    };
-
-    if row.disabled_at.is_some()
+    if !clock
+        || row.disabled_at.is_some()
         || row.emergency_paused_at.is_some()
         || row.membership_ended_at.is_some()
         || row.budget_exhausted_at.is_some()
     {
-        db.save_hook_rule_schedule(&ScheduleRow {
-            rule_id: row.id.clone(),
-            next_run: None,
-            last_scheduled_for,
-            fired_at,
-        })?;
+        schedule.next_run = None;
+        db.save_hook_rule_schedule(&schedule)?;
         return Ok(None);
     }
 
-    let next_run = next_for_clock(
-        &definition.trigger,
-        now(),
-        existing.as_ref(),
-        trigger_changed,
-    )?;
-    db.save_hook_rule_schedule(&ScheduleRow {
-        rule_id: row.id.clone(),
-        next_run,
-        last_scheduled_for,
-        fired_at,
-    })?;
-    Ok(next_run)
+    schedule.next_run =
+        next_for_clock(&definition.trigger, now(), Some(&schedule), trigger_changed)?;
+    db.save_hook_rule_schedule(&schedule)?;
+    Ok(schedule.next_run)
 }
 
 /// Clears `next_run` when a rule stops being eligible (membership ended or budget exhausted).
@@ -186,12 +216,12 @@ fn insert_triggering(
 
 fn advance_schedule(
     db: &Db<'_>,
-    rule_id: &str,
+    mut schedule: ScheduleRow,
     trigger: &HookRuleTrigger,
     scheduled_for: i64,
     emitted_at: i64,
 ) -> Result<()> {
-    let next_run = match trigger {
+    schedule.next_run = match trigger {
         HookRuleTrigger::Clock {
             cron: Some(pattern),
             at: None,
@@ -201,18 +231,15 @@ fn advance_schedule(
             .next(),
         _ => None,
     };
-    db.save_hook_rule_schedule(&ScheduleRow {
-        rule_id: rule_id.to_owned(),
-        next_run,
-        last_scheduled_for: Some(scheduled_for),
-        fired_at: Some(emitted_at),
-    })
+    schedule.last_scheduled_for = Some(scheduled_for);
+    schedule.fired_at = Some(emitted_at);
+    db.save_hook_rule_schedule(&schedule)
 }
 
 /// Emits one triggering for each due clock rule. After an interruption, missed slots
 /// produce a single triggering carrying the missed scheduled time, and the next slot
 /// is computed from now (ADR-0094).
-pub(super) async fn observe(s: &Service) -> Result<bool> {
+pub(super) async fn observe(s: &Arc<Service>) -> Result<bool> {
     let due = s.store.read(|db| db.due_clock_rules(now())).await?;
     if due.is_empty() {
         return Ok(false);
@@ -221,13 +248,10 @@ pub(super) async fn observe(s: &Service) -> Result<bool> {
         .iter()
         .any(|(_, _, needs_memberships)| *needs_memberships)
     {
-        match s.memberships.confirm_installation_memberships(s).await {
-            Ok(confirmed) => confirmed,
-            Err(error) => {
-                tracing::warn!(
-                    status = error.status,
-                    "Clock rules await confirmation of migrated memberships"
-                );
+        match s.memberships.clock_membership_confirmation() {
+            Some(confirmed) => confirmed,
+            None => {
+                refresh_memberships(s);
                 false
             }
         }
@@ -276,7 +300,7 @@ pub(super) async fn observe(s: &Service) -> Result<bool> {
                         // rule does not spin on every tick until its rights return.
                         advance_schedule(
                             db,
-                            &rule_id,
+                            schedule,
                             &version.definition.trigger,
                             scheduled,
                             emitted_at,
@@ -284,8 +308,17 @@ pub(super) async fn observe(s: &Service) -> Result<bool> {
                         return Ok(false);
                     }
                     let event_id = format!("clock:{rule_id}:{scheduled}");
-                    let record =
-                        clock_event(&event_id, Some(scheduled), emitted_at, timezone, false, 0)?;
+                    // Starting the migrated conversation adds one step. Preserve the
+                    // original mission run's depth, including runs already at the limit.
+                    let depth = schedule.legacy_chain_depth.saturating_sub(1);
+                    let record = clock_event(
+                        &event_id,
+                        Some(scheduled),
+                        emitted_at,
+                        timezone,
+                        false,
+                        depth,
+                    )?;
                     let inserted = insert_triggering(
                         db,
                         &rule_id,
@@ -297,7 +330,7 @@ pub(super) async fn observe(s: &Service) -> Result<bool> {
                     .is_some();
                     advance_schedule(
                         db,
-                        &rule_id,
+                        schedule,
                         &version.definition.trigger,
                         scheduled,
                         emitted_at,
@@ -387,6 +420,13 @@ pub(crate) async fn run_now(
             if let Some(reason) = blocked(db, &row, &version)? {
                 return Err(Error::conflict(reason));
             }
+            let depth = if agent_author.is_some() {
+                let legacy_depth = db.hook_rule_schedule(&rule_id)?
+                    .map_or(0, |schedule| schedule.legacy_chain_depth.saturating_sub(1));
+                depth.max(legacy_depth)
+            } else {
+                depth
+            };
             let at = now();
             let event_id = format!("clock-manual:{}", id());
             let record = clock_event(&event_id, None, at, timezone, true, depth)?;
