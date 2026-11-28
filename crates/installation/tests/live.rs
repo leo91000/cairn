@@ -1,6 +1,6 @@
 use crate::common::run_fixture::DbRunFixture;
 use cairn_contracts::EventKind;
-use common::MissionFixture;
+use common::ChatRunFixture;
 
 mod common;
 
@@ -41,15 +41,8 @@ impl Fixture {
         };
         let service = Service::new(config).await.unwrap();
         let token = text(&common::relay_fixture::context(&service).await, "value").to_owned();
-        let task = service
-            .task_fixture(
-                json!({ "name": "Live test", "prompt": "Test", "agentId": MAIN_AGENT_ID }),
-                None,
-            )
-            .await
-            .unwrap();
-        let run = service
-            .enqueue(text(&task, "id"), "manual", None)
+        let (_chat, run) = service
+            .chat_run_fixture(MAIN_AGENT_ID, None, "Test")
             .await
             .unwrap();
         let (url, server) = serve(service.clone()).await;

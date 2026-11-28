@@ -65,14 +65,14 @@ impl Actor {
         Ok(())
     }
 
-    async fn recheck(&self) -> Result<()> {
+    pub(crate) async fn recheck(&self) -> Result<()> {
         if let Self::Installation(_, authorize) = self {
             authorize.recheck().await?;
         }
         Ok(())
     }
 
-    fn authorize(&self, db: &Db<'_>) -> Result<()> {
+    pub(crate) fn authorize(&self, db: &Db<'_>) -> Result<()> {
         if let Self::Installation(bearer, authorize) = self {
             authorize.authorize(db)?;
             crate::installation_mcp::authorize_in(db, bearer)?;
@@ -82,7 +82,7 @@ impl Actor {
 
     /// The person reading: an agent with installation access reads with the owner's
     /// management authority but never acts as a person.
-    fn viewer(&self) -> Viewer {
+    pub(crate) fn viewer(&self) -> Viewer {
         match self {
             Self::Person(identity) => Viewer {
                 account: Some(identity.account_id.clone()),
@@ -109,8 +109,8 @@ pub(crate) struct Viewer {
 
 /// The account a write acts for, with its membership and native provenance.
 #[derive(Clone)]
-struct Writer {
-    creator: Creator,
+pub(crate) struct Writer {
+    pub(crate) creator: Creator,
     access_id: Option<String>,
     source: HookRuleSource,
     conversation: Option<String>,
@@ -148,7 +148,7 @@ fn installation_writer(db: &Db<'_>, bearer: &str, eligibility: &Eligibility) -> 
 
 /// Who a write acts for: resolved before the transaction for people, and inside it for
 /// an agent, whose conversation must still meet every provenance condition of ADR-0075.
-enum Author {
+pub(crate) enum Author {
     Ready(Writer),
     Agent(String, Eligibility),
 }
@@ -167,7 +167,7 @@ impl Author {
         matches!(self, Self::Agent(..))
     }
 
-    fn writer(&self, db: &Db<'_>) -> Result<Writer> {
+    pub(crate) fn writer(&self, db: &Db<'_>) -> Result<Writer> {
         match self {
             Self::Ready(writer) => Ok(writer.clone()),
             Self::Agent(bearer, eligibility) => installation_writer(db, bearer, eligibility),
@@ -176,7 +176,7 @@ impl Author {
 
     /// While a rule of the person is paused in an emergency or out of budget, an agent
     /// only disables that person's rules.
-    fn unblocked(&self, db: &Db<'_>, writer: &Writer) -> Result<()> {
+    pub(crate) fn unblocked(&self, db: &Db<'_>, writer: &Writer) -> Result<()> {
         if self.agent() && blocked(db, &writer.creator.account)? {
             return Err(Error::forbidden(
                 "A rule of this person is paused in an emergency or out of budget: an agent may only disable their rules.",
@@ -225,7 +225,7 @@ fn warn_open(
 
 /// Confirms memberships, then resolves who a write acts for. Callers hold `authors`.
 async fn writer(s: &Service, actor: &Actor) -> Result<(Writer, Option<TaskAuthorPolicy>)> {
-    let policy = s.missions.observe(s).await?;
+    let policy = s.memberships.observe(s).await?;
     let (account, owner, source, origin) = match actor {
         Actor::Person(identity) => (
             identity.account_id.clone(),
@@ -341,6 +341,12 @@ fn save_version(
     if !checked.problems.is_empty() {
         return Err(refuse(&checked.problems));
     }
+    let previous_trigger = (row.version > 0)
+        .then(|| db.hook_rule_version(&row.id, row.version))
+        .transpose()?
+        .flatten()
+        .map(|version| version.definition.trigger);
+    let trigger_changed = previous_trigger.as_ref() != Some(&definition.trigger);
     let at = now();
     row.version += 1;
     row.revision = id();
@@ -350,7 +356,7 @@ fn save_version(
         &VersionRow {
             rule_id: row.id.clone(),
             version: row.version,
-            definition,
+            definition: definition.clone(),
             saved_by: writer.creator.account.clone(),
             source: writer.source,
             conversation_id: writer.conversation.clone(),
@@ -359,6 +365,7 @@ fn save_version(
         },
         &checked.uses,
     )?;
+    engine::clock::sync_schedule(db, row, &definition, trigger_changed)?;
     Ok(())
 }
 
@@ -514,6 +521,7 @@ fn allowed(
     db: &Db<'_>,
     row: &RuleRow,
     definition: &HookRuleDefinition,
+    blocks: &[HookRuleBlock],
     viewer: &Viewer,
 ) -> Result<HookRuleAllowed> {
     let Some(account) = &viewer.account else {
@@ -534,6 +542,7 @@ fn allowed(
         duplicate &= person.uses_agent(db, &agent)?;
     }
     let execution = definition.execution_agent_id.to_string();
+    let clock = matches!(definition.trigger, HookRuleTrigger::Clock { .. });
     Ok(HookRuleAllowed {
         edit: mine && !ended,
         enable: mine && !ended && row.disabled_at.is_some(),
@@ -542,6 +551,7 @@ fn allowed(
         delete: mine || viewer.owner,
         emergency_pause: viewer.owner,
         lift_budget: (mine || viewer.owner) && row.budget_exhausted_at.is_some(),
+        run_now: clock && mine && blocks.is_empty(),
         view_details: mine || viewer.owner || person.uses_agent(db, &execution)?,
     })
 }
@@ -550,16 +560,28 @@ fn uuid(value: &str) -> Result<uuid::Uuid> {
     uuid::Uuid::parse_str(value).map_err(|_| Error::bad("Invalid saved rule identifier."))
 }
 
+fn next_run(db: &Db<'_>, row: &RuleRow, blocks: &[HookRuleBlock]) -> Result<Option<i64>> {
+    if !blocks.is_empty() {
+        return Ok(None);
+    }
+    Ok(db
+        .hook_rule_schedule(&row.id)?
+        .and_then(|schedule| schedule.next_run))
+}
+
 pub(crate) fn view(db: &Db<'_>, id: &str, viewer: &Viewer) -> Result<HookRule> {
     let (row, version) = current(db, id)?;
     let definition = version.definition.clone();
+    let blocks = blocks(db, &row, &definition)?;
+    let allowed = allowed(db, &row, &definition, &blocks, viewer)?;
+    let next_run = next_run(db, &row, &blocks)?;
     Ok(HookRule {
         id: HookRuleId(uuid(&row.id)?),
         creator_account_id: row.creator_account_id.clone(),
         revision: row.revision.clone(),
         version: row.version,
-        blocks: blocks(db, &row, &definition)?,
-        allowed: allowed(db, &row, &definition, viewer)?,
+        blocks,
+        allowed,
         warnings: validation::warnings(db, &definition, &row.creator_account_id)?,
         native_authority: version.native_authority(),
         source: version.source,
@@ -567,6 +589,7 @@ pub(crate) fn view(db: &Db<'_>, id: &str, viewer: &Viewer) -> Result<HookRule> {
             .conversation_id
             .as_deref()
             .and_then(|id| uuid::Uuid::parse_str(id).ok()),
+        next_run,
         created_at: row.created_at,
         updated_at: row.updated_at,
         definition,
@@ -590,6 +613,9 @@ fn summary(db: &Db<'_>, row: &RuleRow, viewer: &Viewer) -> Result<HookRuleSummar
         }
         _ => {}
     });
+    let blocks = blocks(db, row, definition)?;
+    let allowed = allowed(db, row, definition, &blocks, viewer)?;
+    let next_run = next_run(db, row, &blocks)?;
     Ok(HookRuleSummary {
         id: HookRuleId(uuid(&row.id)?),
         name: definition.name.clone(),
@@ -601,8 +627,9 @@ fn summary(db: &Db<'_>, row: &RuleRow, viewer: &Viewer) -> Result<HookRuleSummar
         execution_agent_id: definition.execution_agent_id,
         started_agent_ids,
         tool_instance_ids,
-        blocks: blocks(db, row, definition)?,
-        allowed: allowed(db, row, definition, viewer)?,
+        blocks,
+        allowed,
+        next_run,
         updated_at: row.updated_at,
     })
 }
@@ -638,7 +665,7 @@ fn creation_id(requested: Option<HookRuleId>) -> Result<String> {
 
 /// The same identity must not already name another kind of record.
 fn fresh_identity(db: &Db<'_>, id: &str) -> Result<()> {
-    if db.agent(id)?.is_some() || db.project(id)?.is_some() || db.mission(id)?.is_some() {
+    if db.agent(id)?.is_some() || db.project(id)?.is_some() {
         return Err(Error::conflict(
             "This creation identity belongs to a different resource.",
         ));
@@ -656,7 +683,7 @@ pub(crate) async fn create(
     let rule = creation_id(input.creation_id)?;
     let instances = instances(s, &input.definition).await?;
     refresh_native(s, &input.definition).await?;
-    let _authors = s.missions.authors.lock().await;
+    let _authors = s.memberships.authors.lock().await;
     actor.recheck().await?;
     let author = Author::resolve(s, &actor).await?;
     s.store
@@ -695,7 +722,7 @@ pub(crate) async fn replace(
     actor.recheck().await?;
     let instances = instances(s, &input.definition).await?;
     refresh_native(s, &input.definition).await?;
-    let _authors = s.missions.authors.lock().await;
+    let _authors = s.memberships.authors.lock().await;
     actor.recheck().await?;
     let author = Author::resolve(s, &actor).await?;
     let rule = input.rule_id.to_string();
@@ -758,7 +785,7 @@ where
     actor.require_scope("manage")?;
     actor.recheck().await?;
     let _authors = match &actor {
-        Actor::Installation(..) => Some(s.missions.authors.lock().await),
+        Actor::Installation(..) => Some(s.memberships.authors.lock().await),
         _ => None,
     };
     let eligibility = match &actor {
@@ -803,6 +830,9 @@ where
             row.revision = id();
             row.updated_at = now();
             db.save_hook_rule(&row)?;
+            if let Some(version) = db.hook_rule_version(&row.id, row.version)? {
+                engine::clock::sync_schedule(db, &row, &version.definition, false)?;
+            }
             db.audit(action, &json!({ "ruleId": row.id }))?;
             view(db, &rule, &viewer)
         })
@@ -900,6 +930,30 @@ pub(crate) async fn lift_budget(
     .await
 }
 
+pub(crate) async fn run_now(
+    s: &Service,
+    input: HookRuleInput,
+    actor: Actor,
+) -> Result<HookRuleTriggering> {
+    engine::clock::run_now(s, input, actor).await
+}
+
+pub(crate) async fn preview_schedule(
+    s: &Service,
+    input: SchedulePreviewInput,
+    actor: Actor,
+) -> Result<SchedulePreviewOutput> {
+    actor.require_scope("read")?;
+    actor.recheck().await?;
+    s.store.read(move |db| actor.authorize(db)).await?;
+    let count = input.count.clamp(1, 20) as usize;
+    let occurrences = crate::service::next_occurrences(&input.cron, &input.timezone, now(), count)?;
+    Ok(SchedulePreviewOutput {
+        occurrences,
+        timezone: input.timezone,
+    })
+}
+
 pub(crate) async fn duplicate(
     s: &Service,
     input: DuplicateHookRuleInput,
@@ -916,7 +970,7 @@ pub(crate) async fn duplicate(
         .await?;
     let instances = instances(s, &definition).await?;
     refresh_native(s, &definition).await?;
-    let _authors = s.missions.authors.lock().await;
+    let _authors = s.memberships.authors.lock().await;
     actor.recheck().await?;
     let author = Author::resolve(s, &actor).await?;
     s.store
@@ -981,7 +1035,7 @@ pub(crate) async fn delete(s: &Service, input: HookRuleInput, actor: Actor) -> R
     actor.require_scope("manage")?;
     actor.recheck().await?;
     let _authors = match &actor {
-        Actor::Installation(..) => Some(s.missions.authors.lock().await),
+        Actor::Installation(..) => Some(s.memberships.authors.lock().await),
         _ => None,
     };
     let author = match &actor {
@@ -1344,7 +1398,7 @@ pub(crate) async fn install_template(
     // Completed retries do not depend on a template that may since have changed or
     // disappeared. Membership and the rule-write provenance gate still apply.
     if retry_requested {
-        let _authors = s.missions.authors.lock().await;
+        let _authors = s.memberships.authors.lock().await;
         actor.recheck().await?;
         let author = Author::resolve(s, &actor).await?;
         let retry_actor = actor.clone();
@@ -1391,7 +1445,7 @@ pub(crate) async fn install_template(
     }
     let ids = (0..definitions.len()).map(|_| id()).collect::<Vec<_>>();
 
-    let _authors = s.missions.authors.lock().await;
+    let _authors = s.memberships.authors.lock().await;
     actor.recheck().await?;
     let author = Author::resolve(s, &actor).await?;
     s.store
@@ -1450,6 +1504,11 @@ pub(crate) async fn install_template(
 /// Re-inviting their creator never restores them.
 pub(crate) fn reconcile(db: &Db<'_>, policy: &TaskAuthorPolicy) -> Result<()> {
     for mut row in db.hook_rules()? {
+        let should_be_owner = row.creator_account_id == policy.owner.account_id;
+        if row.creator_owner != should_be_owner {
+            row.creator_owner = should_be_owner;
+            db.save_hook_rule(&row)?;
+        }
         if row.membership_ended_at.is_some() {
             continue;
         }
@@ -1463,6 +1522,7 @@ pub(crate) fn reconcile(db: &Db<'_>, policy: &TaskAuthorPolicy) -> Result<()> {
             row.revision = id();
             row.updated_at = now();
             db.save_hook_rule(&row)?;
+            engine::clock::clear_next_run(db, &row.id)?;
             engine::stop_rule(db, &row.id, "The rule's creator left the installation.")?;
             db.audit("hook_rule.membership_ended", &json!({ "ruleId": row.id }))?;
         }

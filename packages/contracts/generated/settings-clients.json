@@ -70,11 +70,11 @@
     "path": "/reads"
   },
   {
-    "input": "SetOutcomeAsideInput",
+    "input": "SetConversationSnoozeInput",
     "method": "POST",
-    "name": "setOutcomeAside",
-    "output": "SetOutcomeAsideOutput",
-    "path": "/dismissals"
+    "name": "snoozeChat",
+    "output": "SetConversationSnoozeOutput",
+    "path": "/snoozes"
   },
   {
     "input": "GetInstallationSettingsInput",

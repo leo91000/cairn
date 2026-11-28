@@ -13,6 +13,7 @@ data class HookRuleAllowed(
     val emergencyPause: Boolean,
     val enable: Boolean,
     val liftBudget: Boolean,
+    val runNow: Boolean = false,
     val viewDetails: Boolean,
 ) {
     init {}

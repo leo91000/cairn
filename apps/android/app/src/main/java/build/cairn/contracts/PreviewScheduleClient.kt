@@ -5,4 +5,4 @@ import build.cairn.app.data.CairnApi
 import kotlinx.serialization.json.encodeToJsonElement
 
 suspend fun CairnApi.previewSchedule(input: SchedulePreviewInput): SchedulePreviewOutput =
-    send("POST", "/schedule/preview", contractJson.encodeToJsonElement(input))
+    send("POST", "/hook-rules/schedule/preview", contractJson.encodeToJsonElement(input))

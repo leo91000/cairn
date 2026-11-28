@@ -113,4 +113,36 @@ class HookRulesTest {
         assertEquals(2, decoded.parameters.size)
         assertEquals(install, json.encodeToJsonElement(decoded))
     }
+
+    @Test
+    fun clockTriggerAndWorkingPredicateRoundTrip() {
+        val wire =
+            json.parseToJsonElement(
+                """
+                {
+                    "definition":{
+                        "name":"Daily review",
+                        "description":"",
+                        "trigger":{"type":"clock","cron":"0 9 * * 1-5","timezone":"Europe/Paris"},
+                        "executionAgentId":"00000000-0000-4000-8000-000000000010",
+                        "steps":[{
+                            "type":"if",
+                            "id":"skip_working",
+                            "condition":{"type":"not","condition":{"type":"ruleConversationWorking"}},
+                            "then":[{
+                                "type":"action","id":"start",
+                                "action":{"type":"startAgent","agentId":"00000000-0000-4000-8000-000000000010","prompt":{"type":"literal","value":"Check status"}}
+                            }],
+                            "otherwise":[]
+                        }],
+                        "limits":{"triggeringsPerHour":60,"conversationsPerHour":10}
+                    },
+                    "enabled":true
+                }
+                """
+                    .trimIndent()
+            )
+        val decoded = json.decodeFromJsonElement<CreateHookRuleInput>(wire)
+        assertEquals(wire, json.encodeToJsonElement(decoded))
+    }
 }

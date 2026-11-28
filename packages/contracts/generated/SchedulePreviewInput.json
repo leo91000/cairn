@@ -2,20 +2,27 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "properties": {
+    "count": {
+      "default": 5,
+      "format": "uint8",
+      "maximum": 20,
+      "minimum": 1,
+      "type": "integer"
+    },
     "cron": {
       "maxLength": 100,
       "minLength": 1,
       "type": "string"
     },
     "timezone": {
+      "default": "Europe/Paris",
       "maxLength": 100,
       "minLength": 1,
       "type": "string"
     }
   },
   "required": [
-    "cron",
-    "timezone"
+    "cron"
   ],
   "title": "SchedulePreviewInput",
   "type": "object"

@@ -3,7 +3,7 @@
     {
       "items": [
         { "target": { "kind": "chat", "chatId": "25d7ac0e-c91e-4a7e-b1e1-ab177dc6e02d" }, "finishedAt": 1761800000000 },
-        { "target": { "kind": "mission", "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 9007199254740991 }
+        { "target": { "kind": "chat", "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 9007199254740991 }
       ]
     }
   ],
@@ -12,26 +12,24 @@
     { "items": ["chat:25d7ac0e-c91e-4a7e-b1e1-ab177dc6e02d"] },
     { "items": [{ "target": { "kind": "agent", "agentId": "25d7ac0e-c91e-4a7e-b1e1-ab177dc6e02d" }, "finishedAt": 1 }] },
     { "items": [{ "target": { "kind": "chat", "chatId": "not-a-uuid" }, "finishedAt": 1 }] },
-    { "items": [{ "target": { "kind": "mission", "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" } }] },
-    { "items": [{ "target": { "kind": "mission", "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 0 }] },
-    { "items": [{ "target": { "kind": "mission", "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 9007199254740992 }] }
+    { "items": [{ "target": { "kind": "chat", "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" } }] },
+    { "items": [{ "target": { "kind": "chat", "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 0 }] },
+    { "items": [{ "target": { "kind": "chat", "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 9007199254740992 }] }
   ],
-  "asides": [
-    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "dismiss", "finishedAt": 1761800000000 } },
-    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "snooze", "finishedAt": 1761800000000, "until": 1761886400000 } },
-    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "restore" } }
+  "snoozes": [
+    { "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "snooze", "finishedAt": 1761800000000, "until": 1761886400000 } },
+    { "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "restore" } }
   ],
-  "invalidAsides": [
-    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "dismiss" } },
-    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "snooze", "finishedAt": 1761800000000 } },
-    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "hide" } },
-    { "taskId": "task:2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "restore" } },
-    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "restore" }, "restore": true }
+  "invalidSnoozes": [
+    { "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "dismiss", "finishedAt": 1761800000000 } },
+    { "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "snooze", "finishedAt": 1761800000000 } },
+    { "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "hide" } },
+    { "chatId": "chat:2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "restore" } },
+    { "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "restore" }, "restore": true }
   ],
-  "asideOutputs": [
-    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "dismissal": { "until": null } },
-    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "dismissal": { "until": 1761886400000 } },
-    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "dismissal": null }
+  "snoozeOutputs": [
+    { "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "snoozedUntil": 1761886400000 },
+    { "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "snoozedUntil": null }
   ],
   "settings": [
     {
@@ -46,8 +44,8 @@
     }
   ],
   "overviews": [
-    { "runsByStatus": { "succeeded": 12, "failed": 1 }, "agents": 3, "projects": 2, "missions": 5, "concurrency": 4 },
-    { "runsByStatus": {}, "agents": 0, "projects": 0, "missions": 0, "concurrency": 1 }
+    { "runsByStatus": { "succeeded": 12, "failed": 1 }, "agents": 3, "projects": 2, "hookRules": 5, "concurrency": 4 },
+    { "runsByStatus": {}, "agents": 0, "projects": 0, "hookRules": 0, "concurrency": 1 }
   ],
   "audits": [
     {

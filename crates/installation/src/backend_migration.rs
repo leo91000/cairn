@@ -49,15 +49,7 @@ fn subject(db: &Db<'_>, key: &str) -> Result<Value> {
     if let Some(chat) = crate::chats::chat_for_run(db, key)? {
         return Ok(chat);
     }
-    let run = required(db.run(key)?, "Conversation not found")?;
-    if run["trigger"] == "chat" {
-        return Err(Error::not_found(
-            "The conversation for this chat run is no longer available.",
-        ));
-    }
-    Ok(
-        json!({ "id": key, "runId": key, "agentId": nodes::run_agent(&run), "mission": true, "paused": false }),
-    )
+    Err(Error::not_found("Conversation not found"))
 }
 
 async fn load_subject(s: &Service, key: &str) -> Result<Value> {
@@ -66,17 +58,13 @@ async fn load_subject(s: &Service, key: &str) -> Result<Value> {
 }
 
 fn save_subject(db: &Db<'_>, chat: &Value) -> Result<()> {
-    if chat["mission"] != true {
-        db.save_conversation_boundary(chat)?;
-    }
+    db.save_conversation_boundary(chat)?;
     Ok(())
 }
 
 fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value, bool)> {
     let chat = subject(db, chat_id)?;
-    if chat["mission"] != true {
-        require_active(&chat)?;
-    }
+    require_active(&chat)?;
     let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
     let mut agent = required(
         db.agent_snapshot(text(&chat, "agentId"))?,

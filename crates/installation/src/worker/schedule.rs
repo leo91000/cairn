@@ -71,7 +71,6 @@ impl Worker {
         }
         crate::waits::tick_groups(s, &provider_active).await?;
         s.chat_tick(&provider_active).await?;
-        crate::waits::tick_missions(s, &provider_active).await?;
         if s.shutdown.is_cancelled() || s.store.kv("deployment-lease").await?.is_some() {
             return Ok(());
         }

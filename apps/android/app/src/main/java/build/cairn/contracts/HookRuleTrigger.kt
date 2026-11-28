@@ -29,4 +29,19 @@ sealed interface HookRuleTrigger {
             require(Regex("^(replyReady|questionAsked|progress|ended)\$").containsMatchIn(hook))
         }
     }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("clock")
+    data class C(
+        @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+        val at: Long? = null,
+        @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+        val cron: String? = null,
+        val timezone: String = "Europe/Paris",
+    ) : HookRuleTrigger {
+        init {
+            at?.let { require(it in 1L..9007199254740991L) }
+        }
+    }
 }

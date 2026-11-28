@@ -1,5 +1,3 @@
-use common::MissionFixture;
-
 mod common;
 
 use common::ProjectFixture;
@@ -555,21 +553,14 @@ async fn skill_bundle_storage_measurements() {
             "cpuMs": cpu / 20.0,
         });
     }
-    let task = api
-        .service
-        .task_fixture(
-            json!({
-                "name": "Storage measurement",
-                "agentId": MAIN_AGENT_ID,
-                "prompt": "Measure skill delivery",
-                "skills": ["global/review"],
-                "worktree": false,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run = api.service.snapshot(task, "manual").await.unwrap();
+    let task = json!({
+        "id": cairn_installation::config::id(),
+        "name": "Storage measurement",
+        "agentId": MAIN_AGENT_ID,
+        "prompt": "Measure skill delivery",
+        "worktree": false,
+    });
+    let run = api.service.snapshot(task, "chat").await.unwrap();
     let (mut wall, mut cpu) = (0.0, 0.0);
     for _ in 0..20 {
         let started_cpu = cpu_ms();
@@ -989,20 +980,14 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
         })),
     )
     .await;
-    let task = s
-        .task_fixture(
-            json!({
-                "name": "Review",
-                "agentId": MAIN_AGENT_ID,
-                "prompt": "Review",
-                "skills": ["global/review"],
-                "worktree": false,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run = s.snapshot(task.clone(), "manual").await.unwrap();
+    let task = json!({
+        "id": cairn_installation::config::id(),
+        "name": "Review",
+        "agentId": MAIN_AGENT_ID,
+        "prompt": "Review",
+        "worktree": false,
+    });
+    let run = s.snapshot(task.clone(), "chat").await.unwrap();
     let selected = &run["snapshot"]["skills"][0];
     assert_eq!(selected["content"], SKILL);
     assert_eq!(selected["description"], "Review the current changes");
@@ -1152,20 +1137,13 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
             })),
         )
         .await;
-    let task = api
-        .service
-        .task_fixture(
-            json!({
-                "name": "Review",
-                "agentId": MAIN_AGENT_ID,
-                "prompt": "Review",
-                "skills": ["global/review"],
-                "worktree": false,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
+    let task = json!({
+        "id": cairn_installation::config::id(),
+        "name": "Review",
+        "agentId": MAIN_AGENT_ID,
+        "prompt": "Review",
+        "worktree": false,
+    });
     let project = api._root.path().join("project");
     let gate = project.join(".agents/skills/listing-gate/SKILL.md");
     std::fs::create_dir_all(gate.parent().unwrap()).unwrap();

@@ -118,7 +118,7 @@ async fn plan_turns_only_read_the_installation() {
         "get_chat",
         "create_chat",
         "send_chat_message",
-        "create_task",
+        "create_hook_rule",
         "update_agent",
         // These operations are read-only in effect, but require the `manage`
         // scope and must not enter the installation surface during Plan.
@@ -134,7 +134,7 @@ async fn plan_turns_only_read_the_installation() {
     for changing in [
         "create_chat",
         "send_chat_message",
-        "create_task",
+        "create_hook_rule",
         "update_agent",
         "list_source_projects",
         "get_skill_source_status",
@@ -900,7 +900,7 @@ async fn resume_run_is_one_capability_on_http_public_and_installation() {
     common::relay_fixture::allow_member(&s, "other-member", MAIN_AGENT_ID).await;
     let agent_token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
     for surface in ["owner", "member", "public", "installation"] {
-        let before = saved_mission(&s, &main).await;
+        let before = saved_run(&s, &main).await;
         let id = text(&before, "id");
         let (_, denied) =
             node_management_call(&app, "/mcp", &read, "resume_run", json!({ "runId": id })).await;
@@ -1119,7 +1119,7 @@ async fn concurrent_resume_run_publishes_once_and_a_revoked_grant_cannot_resume(
     let s = service(&root).await;
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
-    let target = saved_mission(&s, &main).await;
+    let target = saved_run(&s, &main).await;
     let id = text(&target, "id");
     let args = json!({ "runId": id });
     let (one, two) = tokio::join!(

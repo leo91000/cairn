@@ -227,48 +227,12 @@ impl Authorization {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin_grant_fixture::Fixture;
-    use crate::{mission_fixture::MissionFixture, validation::text};
+    use crate::{plugin_grant_fixture::Fixture, validation::text};
     use serde_json::json;
     use std::sync::atomic::Ordering;
 
     async fn delegated() -> (Fixture, String) {
         Fixture::delegated_manager().await
-    }
-
-    #[tokio::test]
-    async fn prepared_run_admission_retains_the_original_delegation_proof() {
-        let (f, bearer) = delegated().await;
-        let authorize = crate::installation_mcp::management_authorization(&f.s, Some(&bearer))
-            .await
-            .unwrap();
-        let task =
-            f.s.task_fixture(
-                json!({
-                    "name": "Managed task",
-                    "agentId": crate::config::MAIN_AGENT_ID,
-                    "prompt": "Run",
-                }),
-                None,
-            )
-            .await
-            .unwrap();
-        let prepared = f.s.prepare_run(text(&task, "id"), "mcp").await.unwrap();
-        let id = text(&prepared, "id").to_owned();
-        f.moved_parent.store(true, Ordering::SeqCst);
-        let error =
-            f.s.queue_run_live(prepared, None, Some(bearer), authorize)
-                .await
-                .unwrap_err();
-        assert_eq!(error.status, 403);
-        assert!(
-            f.s.store
-                .read(move |db| db.run(&id))
-                .await
-                .unwrap()
-                .is_none()
-        );
-        f.s.shutdown.cancel();
     }
 
     #[tokio::test]

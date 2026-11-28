@@ -12,7 +12,7 @@ use cairn_installation::{
     service::Service,
     validation::text,
 };
-use common::{AgentFixture, MissionFixture};
+use common::AgentFixture;
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
@@ -358,18 +358,19 @@ return {
         s.agent_fixture(json!({"access":{"installation":true}}), Some(MAIN_AGENT_ID))
             .await
             .unwrap();
-        let task = s
-            .task_fixture(
-                json!({
-                    "name": "Probe",
-                    "agentId": MAIN_AGENT_ID,
-                    "prompt": "Probe",
-                }),
-                None,
-            )
+        let chat = s
+            .chat_create(json!({ "agentId": MAIN_AGENT_ID }))
             .await
             .unwrap();
-        let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
+        let chat_id = text(&chat, "id").to_owned();
+        s.chat_send(&chat_id, json!({ "text": "Probe" }))
+            .await
+            .unwrap();
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let detail = s.chat_detail(&chat_id).await.unwrap();
+        let run = s.store.run(text(&detail, "runId")).await.unwrap();
         s.store
             .change_run(
                 text(&run, "id"),

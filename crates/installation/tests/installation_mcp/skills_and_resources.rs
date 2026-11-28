@@ -67,17 +67,6 @@ async fn skill_lifecycle_matches_http_public_and_installation_without_granting_a
         )
         .await;
         assert_eq!(result(&forgotten)["detached"], true);
-        let task = s.task_fixture(json!({"name":"Uses review", "prompt":"Review", "agentId": MAIN_AGENT_ID, "skills":["global/review"], "worktree":false}), None).await.unwrap();
-        let refused = invoke("delete_skill", json!({"scope":"global", "name":"review"})).await;
-        assert_eq!(refused["result"]["isError"], true);
-        common::owner_api_route(
-            &s,
-            "DELETE",
-            &format!("/api/tasks/{}", text(&task, "id")),
-            Value::Null,
-        )
-        .await
-        .unwrap();
         let deleted = invoke("delete_skill", json!({"scope":"global", "name":"review"})).await;
         assert_eq!(result(&deleted)["deleted"], true);
         let current = s.store.agent(text(&manager, "id")).await.unwrap().unwrap();

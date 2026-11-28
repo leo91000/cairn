@@ -19,7 +19,8 @@ data class HookRuleVersion(
         conversationId?.let { java.util.UUID.fromString(it) }
         require(savedAt in 0L..9007199254740991L)
         require(
-            Regex("^(app|publicMcp|installationAgent|duplicate|template)\$").containsMatchIn(source)
+            Regex("^(app|publicMcp|installationAgent|duplicate|template|migration)\$")
+                .containsMatchIn(source)
         )
         require(version >= 0L)
     }

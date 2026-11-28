@@ -354,7 +354,7 @@ impl Db<'_> {
             runs_by_status,
             agents: count("agents")?,
             projects: count("projects")?,
-            missions: count("missions")?,
+            hook_rules: count("hook_rules")?,
             concurrency,
         })
     }

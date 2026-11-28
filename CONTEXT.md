@@ -8,7 +8,7 @@ Cairn permet de conduire des conversations avec des agents et de retrouver leur 
 Commande confiée par un agent à son environnement pour continuer indépendamment
 du tour de conversation qui l’a démarrée. Sa fin comprend son résultat et l’arrêt
 de ses processus ; elle ne signifie pas que l’environnement est arrêté.
-_Avoid_ : tâche (qui désigne le travail planifié ou délégué)
+_Avoid_ : tâche (qui désigne le travail délégué)
 
 **Placement automatique** :
 Le choix d’une node autorisée et disponible pour un nouvel environnement de travail, qu’elle exécute des VM ou des processus natifs. Le type d’environnement choisi est conservé pendant la conversation, sauf migration explicite de son mode d’exécution. Il ne change jamais la node d’un environnement existant : seul un changement de node confirmé fait repartir ailleurs une conversation dont l’environnement existe encore.
@@ -106,8 +106,8 @@ Possibilité de travail vérifiée sur une node, distincte de la seule présence
 Part des ressources d’une node attribuée à une exécution dans les plafonds configurés. Elle est prise en compte avant d’accepter d’autres travaux sur cette node.
 Pour le disque natif compatible, le manager protège aussi la capacité accordée mais encore inutilisée ; il peut l’agrandir automatiquement par incréments dans le budget commun. Le workspace et le `/tmp` géré consomment la même capacité.
 
-**Limite de stockage par tâche** :
-Plafond d’agrandissement d’un environnement de travail, commun aux conversations et aux exécutions de mission d’une installation, fixé par son propriétaire. Une baisse conserve les capacités déjà accordées ; un agent ne peut pas relever cette limite.
+**Limite de stockage par conversation** :
+Plafond d’agrandissement d’un environnement de travail d’une installation, fixé par son propriétaire. Une baisse conserve les capacités déjà accordées ; un agent ne peut pas relever cette limite.
 
 **Changement de node d’une conversation** :
 Passage sur une autre node d’exécution d’une conversation dont l’environnement de travail existe encore, confirmé explicitement par la personne, le client MCP ou l’agent qui le demande. Son environnement de travail expire : elle conserve son historique, ses pièces jointes et ses artefacts, pas ses fichiers de travail.
@@ -176,10 +176,6 @@ Le texte libre qu’une personne ajoute aux choix retenus pour une question d’
 Une question d’explication posée pendant qu’un agent travaille sur une réponse, sur l’une de ses réponses ou un passage choisi. Claude Code y répond depuis le contexte de la conversation en refusant les outils demandés ; les hooks de politique gérée par l’opérateur peuvent toutefois s’exécuter avant ce refus et produire des effets ; Antigravity y répond depuis une copie de la conversation enregistrée jusqu’à sa dernière étape terminée, en refusant tous les outils ; Codex et OpenCode ne le proposent pas, faute de pouvoir retirer leurs outils avant la réponse ; la réponse s’affiche à part, reliée à la réponse concernée. Elle ne dirige pas le travail en cours, n’entre pas dans la file d’attente et ne modifie pas l’historique de la conversation.
 _Avoid_ : steering, message, fork de conversation
 
-**Demandeur d’une mission** :
-La conversation ou la mission dont l’agent a lancé l’exécution d’une mission. Une mission bloquée qui attend son demandeur lui revient plutôt qu’à l’utilisateur, tant que ce demandeur existe.
-_Avoid_ : parent, orchestrateur
-
 **Tâche déléguée** :
 Une conversation qu’un agent autorisé à déléguer crée depuis une conversation,
 éventuellement sur un autre agent de code et un autre modèle, pour un travail qui
@@ -189,15 +185,11 @@ délègue pas à son tour. L’accès à l’agent de sa conversation demandeuse
 poursuivre, l’orienter ou répondre à ses questions, tant que cette conversation existe.
 _Avoid_ : sous-agent (réservé aux sous-agents natifs d’un agent de code), parent, enfant
 
-**Mise de côté d’un résultat** :
-Le choix d’un compte de retirer de « Pour vous » le résultat bloqué d’une mission : écarté jusqu’à son prochain résultat, ou reporté jusqu’à une heure donnée. Chaque membre met de côté pour lui seul.
-_Avoid_ : archivage (qui retire la mission elle-même)
-
-**Auteur d’une tâche** :
-Le compte Cairn qui a créé une tâche. Le retrait de cet auteur met fin aux lancements planifiés de ses tâches, et les lancements planifiés d’une tâche sur un agent auquel il n’a pas ou plus accès sont suspendus ; leur travail reste partagé avec toute l’installation.
+**Report d’une conversation** :
+Le choix d’un compte de reporter jusqu’à une heure donnée une conversation de « Pour vous » ; chaque membre reporte pour lui seul, jusqu’au prochain événement de cette conversation.
 
 **Skill** :
-Un savoir-faire réutilisable que les agents appliquent : ses instructions et les fichiers qui les accompagnent (références, modèles, scripts, images). Une skill est globale ou propre à un projet ; une conversation ou une exécution reçoit les skills sélectionnées telles qu’elles étaient à sa création.
+Un savoir-faire réutilisable que les agents appliquent : ses instructions et les fichiers qui les accompagnent (références, modèles, scripts, images). Une skill est globale ou propre à un projet ; une conversation reçoit toutes les skills de son agent telles qu’elles étaient à sa création.
 _Avoid_ : prompt, plugin
 
 **Source d’une skill** :
@@ -261,10 +253,10 @@ _Avoid_ : transport natif
 **Hook** :
 Un événement qu’un plugin déclare pouvoir émettre, avec ce qu’il transporte : par
 exemple un message écrit dans un salon Discord, avec son auteur et son fil. Cairn émet
-aussi les siens pour les conversations rattachées à une clé (réponse prête, question,
-progression, fin). Un hook ne fait rien seul ; ce sont les règles de hook qui y
-réagissent. Le hook d’un plugin s’accorde à un agent ; ceux de Cairn suivent l’accès à
-l’agent de la conversation.
+aussi les siens : ceux des conversations rattachées à une clé (réponse prête,
+question, progression, fin) et l’Horloge. Un hook ne fait rien seul ; ce sont les
+règles de hook qui y réagissent. Le hook d’un plugin s’accorde à un agent ; ceux d’une
+conversation suivent l’accès à son agent, et l’Horloge n’exige aucun droit.
 _Avoid_ : webhook (le mécanisme HTTP), trigger
 
 **Règle de hook** :
@@ -284,6 +276,17 @@ _Avoid_ : template, recette
 Le traitement d’un événement par une règle de hook, de sa première condition à sa
 dernière action, avec la version de la règle en vigueur à son début.
 _Avoid_ : exécution, run (réservés au travail d’un agent)
+
+**Horloge** :
+Le hook que Cairn émet à heure fixe pour une règle qui l’écoute, selon un cron ou une
+date unique dans un fuseau donné. Après une interruption, les créneaux manqués ne
+donnent qu’un déclenchement.
+_Avoid_ : cron (la syntaxe), timer, planificateur
+
+**Programmation** :
+Une règle de hook qui écoute l’Horloge et démarre un agent avec un brief. Chaque
+déclenchement ouvre une nouvelle conversation ordinaire, dont elle est l’origine.
+_Avoid_ : mission, tâche planifiée, routine
 
 **Agent d’exécution d’une règle** :
 L’agent dont les droits encadrent le hook de plugin qu’une règle écoute et les outils

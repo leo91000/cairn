@@ -7,7 +7,6 @@ import type { ConversationEnvironmentState } from './ConversationEnvironmentStat
 import type { EnvironmentExpirationCause } from './EnvironmentExpirationCause'
 import type { ExclusiveReservation } from './ExclusiveReservation'
 import type { ExecutionResources } from './ExecutionResources'
-import type { OutcomeDismissal } from './OutcomeDismissal'
 import type { Retry } from './Retry'
 import type { RunRequester } from './RunRequester'
 import type { RunSnapshot } from './RunSnapshot'
@@ -21,7 +20,6 @@ import type { RunWorkspace } from './RunWorkspace'
  */
 export interface Run {
   snapshot: RunSnapshot | null
-  sourceTaskId?: string | null
   isolated: boolean
   workspaces: Array<RunWorkspace>
   taskName: string
@@ -34,7 +32,6 @@ export interface Run {
   wakeup?: ChatWakeup | null
   chatExecution?: ChatExecution | null
   outcome?: import('../../contracts').TaskOutcome | null
-  dismissal?: OutcomeDismissal | null
   resources?: ExecutionResources | null
   nativeMode?: import('../../nodes').NativeModeRequest | null
   suspendedByExclusive?: ExclusiveReservation | null

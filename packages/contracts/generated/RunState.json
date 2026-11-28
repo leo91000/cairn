@@ -85,12 +85,6 @@
         },
         "runId": {
           "type": "string"
-        },
-        "taskId": {
-          "type": [
-            "string",
-            "null"
-          ]
         }
       },
       "required": [

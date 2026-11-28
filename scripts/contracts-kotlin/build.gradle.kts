@@ -47,8 +47,6 @@ tasks.test {
     inputs.file(rootProject.file("../../tests/fixtures/plugin-package-contracts.json"))
     inputs.file(rootProject.file("../../packages/contracts/generated/plugin-wire.json"))
     inputs.file(rootProject.file("../../tests/fixtures/project-contracts.json"))
-    inputs.file(rootProject.file("../../packages/contracts/generated/mission-wire.json"))
-    inputs.file(rootProject.file("../../tests/fixtures/mission-contracts.json"))
     inputs.file(rootProject.file("../../tests/fixtures/run-contracts.json"))
     inputs.file(rootProject.file("../../tests/fixtures/node-contracts.json"))
     inputs.file(rootProject.file("../../tests/fixtures/placement-contracts.json"))

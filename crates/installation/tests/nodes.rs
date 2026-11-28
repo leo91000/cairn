@@ -1008,19 +1008,42 @@ async fn a_task_cannot_use_the_local_runner_without_node_permission() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    let task = json!({
-        "name": "Restricted node task",
-        "prompt": "Do nothing",
-        "agentId": MAIN_AGENT_ID,
-        "enabled": false,
-    });
-    let (status, task) = owner
-        .send("POST", "/api/tasks", json!({ "settings": task }))
+    let (status, chat) = owner
+        .send("POST", "/api/chats", json!({ "agentId": MAIN_AGENT_ID }))
         .await;
-    assert_eq!(status, StatusCode::OK, "{task}");
-    let path = format!("/api/tasks/{}/run", task["id"].as_str().unwrap());
-    let (status, error) = owner.send("POST", &path, json!({})).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+    assert_eq!(status, StatusCode::OK, "{chat}");
+    let chat_id = chat["id"].as_str().unwrap();
+    let (status, message) = owner
+        .send(
+            "POST",
+            &format!("/api/chats/{chat_id}/messages"),
+            json!({ "id": id(), "text": "Do nothing" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{message}");
+    owner
+        .service
+        .chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let detail = owner.service.chat_detail(chat_id).await.unwrap();
+    assert!(detail["runId"].is_null(), "{detail}");
+    assert!(detail["error"].is_string(), "{detail}");
+    let run = owner
+        .service
+        .snapshot(
+            json!({
+                "id": id(),
+                "name": "Restricted node conversation",
+                "prompt": "Do nothing",
+                "agentId": MAIN_AGENT_ID,
+            }),
+            "chat",
+        )
+        .await
+        .unwrap();
+    let error = placement::check(&owner.service, &run).await.unwrap_err();
+    assert_eq!(error.status, 403, "{error:?}");
 }
 
 #[tokio::test]

@@ -1,5 +1,3 @@
-use common::{MissionFixture, StoreMissionFixture};
-
 mod common;
 
 use common::{RelayedInstallation, login};
@@ -312,38 +310,56 @@ async fn removal_and_departure_close_member_streams_and_preserve_owner_access() 
         let (cookie, session) = member(&relay, "member@example.test").await;
         let id = relay.session["installations"][0]["id"].as_str().unwrap();
         let api = format!("/api/installations/{id}/api");
-        let task: Value = request(
+        let chat: Value = request(
             &relay,
             &cookie,
             &session,
             Method::POST,
-            &format!("{api}/tasks"),
+            &format!("{api}/chats"),
         )
-        .json(&json!({"settings": json!({
-            "name": "Member work",
-            "prompt": "Continue independently",
-            "agentId": MAIN_AGENT_ID,
-        })}))
+        .json(&json!({ "agentId": MAIN_AGENT_ID }))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-        let response = request(
+        let chat_id = chat["id"].as_str().unwrap();
+        let sent = request(
             &relay,
             &cookie,
             &session,
             Method::POST,
-            &format!("{api}/tasks/{}/run", task["id"].as_str().unwrap()),
+            &format!("{api}/chats/{chat_id}/messages"),
         )
-        .json(&json!({}))
+        .json(&json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "text": "Continue independently",
+        }))
         .send()
         .await
         .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let run: Value = response.json().await.unwrap();
-        let run_path = format!("{api}/runs/{}/stream", run["id"].as_str().unwrap());
+        assert_eq!(sent.status(), StatusCode::OK);
+        relay
+            .installation
+            .chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let detail: Value = request(
+            &relay,
+            &cookie,
+            &session,
+            Method::GET,
+            &format!("{api}/chats/{chat_id}"),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        let run_id = detail["runId"].as_str().unwrap().to_owned();
+        let run_path = format!("{api}/runs/{run_id}/stream");
         let mut run_stream = request(&relay, &cookie, &session, Method::GET, &run_path)
             .send()
             .await
@@ -461,7 +477,7 @@ async fn removal_and_departure_close_member_streams_and_preserve_owner_access() 
                 .is_some()
         );
         let run: Value = relay
-            .get(&format!("/runs/{}", run["id"].as_str().unwrap()))
+            .get(&format!("/runs/{run_id}"))
             .send()
             .await
             .unwrap()
@@ -1155,29 +1171,65 @@ async fn expired_invitations_are_hidden_and_cannot_be_accepted() {
     relay.close().await;
 }
 
+fn clock_rule_definition(name: &str, prompt: &str, agent_id: &str) -> Value {
+    json!({
+        "name": name,
+        "description": "Scheduled hook rule.",
+        "trigger": {
+            "type": "clock",
+            "cron": "0 9 * * *",
+            "timezone": "UTC",
+        },
+        "executionAgentId": agent_id,
+        "steps": [{
+            "type": "action",
+            "id": "run",
+            "action": {
+                "type": "startAgent",
+                "agentId": agent_id,
+                "prompt": { "type": "literal", "value": prompt },
+            },
+        }],
+        "limits": {
+            "triggeringsPerHour": 60,
+            "conversationsPerHour": 10,
+        },
+    })
+}
+
+fn has_block(rule: &Value, kind: &str) -> bool {
+    rule["blocks"]
+        .as_array()
+        .is_some_and(|blocks| blocks.iter().any(|block| block["kind"] == kind))
+}
+
 #[tokio::test]
-async fn shared_tasks_record_the_verified_author_and_only_the_owner_can_delete() {
+async fn shared_hook_rules_record_the_verified_creator_and_restrict_deletion() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let (cookie, session) = member(&relay, "task-author@example.test").await;
+    let (cookie, session) = member(&relay, "rule-author@example.test").await;
+    let (other_cookie, other_session) = member(&relay, "other-member@example.test").await;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
-    let task_path = format!("/api/installations/{id}/api/tasks");
-    let response = request(&relay, &cookie, &session, Method::POST, &task_path)
-        .json(&json!({"settings": json!({
-            "name": "Shared task",
-            "prompt": "Keep working",
-            "agentId": cairn_installation::config::MAIN_AGENT_ID,
-        })}))
+    let rules_path = format!("/api/installations/{id}/api/hook-rules");
+    let response = request(&relay, &cookie, &session, Method::POST, &rules_path)
+        .json(&json!({
+            "definition": clock_rule_definition(
+                "Shared rule",
+                "Keep working",
+                cairn_installation::config::MAIN_AGENT_ID,
+            ),
+            "enabled": true,
+        }))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let task: Value = response.json().await.unwrap();
-    assert_eq!(task["authorId"], session["account"]["id"]);
-    assert!(task["authorId"].is_string());
+    let rule: Value = response.json().await.unwrap();
+    assert_eq!(rule["creatorAccountId"], session["account"]["id"]);
+    assert!(rule["creatorAccountId"].is_string());
 
-    let path = format!("{task_path}/{}", task["id"].as_str().unwrap());
+    let path = format!("{rules_path}/{}", rule["id"].as_str().unwrap());
     assert_eq!(
-        request(&relay, &cookie, &session, Method::DELETE, &path)
+        request(&relay, &other_cookie, &other_session, Method::DELETE, &path)
             .send()
             .await
             .unwrap()
@@ -1196,12 +1248,12 @@ async fn shared_tasks_record_the_verified_author_and_only_the_owner_can_delete()
 }
 
 #[tokio::test]
-async fn members_cannot_rewrite_or_resume_another_authors_task() {
+async fn members_cannot_rewrite_or_enable_another_creators_hook_rule() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let (cookie, session) = member(&relay, "task-editor@example.test").await;
+    let (cookie, session) = member(&relay, "rule-editor@example.test").await;
     let (other_cookie, other_session) = member(&relay, "other-author@example.test").await;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
-    let tasks = format!("/api/installations/{id}/api/tasks");
+    let rules_path = format!("/api/installations/{id}/api/hook-rules");
     let other_agent: Value = request(
         &relay,
         &relay.cookie,
@@ -1209,7 +1261,15 @@ async fn members_cannot_rewrite_or_resume_another_authors_task() {
         Method::POST,
         &format!("/api/installations/{id}/api/agents"),
     )
-    .json(&json!({ "settings": { "name": "Alternative agent", "access": cairn_contracts::AccessPolicy::default(), "exclusiveNodes": [], "plugins": [] }, "review": {} }))
+    .json(&json!({
+        "settings": {
+            "name": "Alternative agent",
+            "access": cairn_contracts::AccessPolicy::default(),
+            "exclusiveNodes": [],
+            "plugins": [],
+        },
+        "review": {},
+    }))
     .send()
     .await
     .unwrap()
@@ -1218,41 +1278,62 @@ async fn members_cannot_rewrite_or_resume_another_authors_task() {
     .unwrap();
     assert!(other_agent["id"].is_string());
 
-    let input = json!({
-        "name": "Paused commitment",
-        "prompt": "Owner-approved work",
-        "agentId": cairn_installation::config::MAIN_AGENT_ID,
-        "cron": "0 9 * * *",
-        "timezone": "UTC",
-        "enabled": false,
-    });
+    let definition = clock_rule_definition(
+        "Paused commitment",
+        "Owner-approved work",
+        cairn_installation::config::MAIN_AGENT_ID,
+    );
 
     for (author_cookie, author_session) in [
         (&relay.cookie, &relay.session),
         (&other_cookie, &other_session),
     ] {
-        let task: Value = request(&relay, author_cookie, author_session, Method::POST, &tasks)
-            .json(&json!({"settings": input}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        let path = format!("{tasks}/{}", task["id"].as_str().unwrap());
+        let rule: Value = request(
+            &relay,
+            author_cookie,
+            author_session,
+            Method::POST,
+            &rules_path,
+        )
+        .json(&json!({ "definition": definition, "enabled": false }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        let rule_id = rule["id"].as_str().unwrap();
+        let path = format!("{rules_path}/{rule_id}");
 
-        for (field, value) in [
-            ("prompt", json!("Unapproved work")),
-            ("cron", json!("* * * * *")),
-            ("timezone", json!("Europe/Paris")),
-            ("enabled", json!(true)),
-            ("worktree", json!(false)),
-            ("agentId", other_agent["id"].clone()),
-        ] {
-            let mut changed = task.clone();
-            changed[field] = value;
+        let mutations = [
+            ("prompt", {
+                let mut d = definition.clone();
+                d["steps"][0]["action"]["prompt"]["value"] = json!("Unapproved work");
+                d
+            }),
+            ("cron", {
+                let mut d = definition.clone();
+                d["trigger"]["cron"] = json!("* * * * *");
+                d
+            }),
+            ("timezone", {
+                let mut d = definition.clone();
+                d["trigger"]["timezone"] = json!("Europe/Paris");
+                d
+            }),
+            ("executionAgentId", {
+                let mut d = definition.clone();
+                d["executionAgentId"] = other_agent["id"].clone();
+                d
+            }),
+        ];
+        for (field, changed) in mutations {
             let response = request(&relay, &cookie, &session, Method::PUT, &path)
-                .json(&mission_replacement(&task, &changed))
+                .json(&json!({
+                    "ruleId": rule_id,
+                    "revision": rule["revision"],
+                    "definition": changed,
+                }))
                 .send()
                 .await
                 .unwrap();
@@ -1263,30 +1344,42 @@ async fn members_cannot_rewrite_or_resume_another_authors_task() {
             );
         }
 
-        let stored: Vec<Value> = relay
-            .get("/tasks")
+        let enabled_response = request(
+            &relay,
+            &cookie,
+            &session,
+            Method::POST,
+            &format!("{path}/enabled"),
+        )
+        .json(&json!({ "ruleId": rule_id, "enabled": true }))
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(enabled_response.status(), StatusCode::FORBIDDEN);
+
+        let unchanged: Value = relay
+            .get(&format!("/hook-rules/{rule_id}"))
             .send()
             .await
             .unwrap()
-            .json::<cairn_contracts::ListMissionsOutput>()
+            .json()
             .await
-            .unwrap()
-            .tasks
-            .into_iter()
-            .map(|m| serde_json::to_value(m).unwrap())
-            .collect();
-        let unchanged = stored
-            .iter()
-            .find(|stored| stored["id"] == task["id"])
             .unwrap();
-        assert_eq!(unchanged["prompt"], "Owner-approved work");
-        assert_eq!(unchanged["enabled"], false);
+        assert_eq!(
+            unchanged["definition"]["steps"][0]["action"]["prompt"]["value"],
+            "Owner-approved work"
+        );
+        assert!(has_block(&unchanged, "disabled"));
 
-        let mut changed = task.clone();
-        changed["prompt"] = "Author's updated work".into();
+        let mut updated = definition.clone();
+        updated["steps"][0]["action"]["prompt"]["value"] = json!("Author's updated work");
         assert_eq!(
             request(&relay, author_cookie, author_session, Method::PUT, &path)
-                .json(&mission_replacement(&task, &changed))
+                .json(&json!({
+                    "ruleId": rule_id,
+                    "revision": rule["revision"],
+                    "definition": updated,
+                }))
                 .send()
                 .await
                 .unwrap()
@@ -1298,49 +1391,77 @@ async fn members_cannot_rewrite_or_resume_another_authors_task() {
 }
 
 #[tokio::test]
-async fn removing_a_task_author_stops_their_schedules_and_preserves_admitted_work() {
+async fn removing_a_rule_creator_stops_their_schedules_and_preserves_admitted_work() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let (cookie, session) = member(&relay, "scheduled-author@example.test").await;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
-    let tasks = format!("/api/installations/{id}/api/tasks");
-    let input = json!({
-        "name": "Scheduled shared task",
-        "prompt": "Keep working",
-        "agentId": cairn_installation::config::MAIN_AGENT_ID,
-        "cron": "0 9 * * *",
-        "timezone": "UTC",
-        "enabled": true,
-    });
-    let task: Value = request(&relay, &cookie, &session, Method::POST, &tasks)
-        .json(&json!({"settings": input}))
+    let api = format!("/api/installations/{id}/api");
+    let rules_path = format!("{api}/hook-rules");
+    let definition = clock_rule_definition(
+        "Scheduled shared rule",
+        "Keep working",
+        cairn_installation::config::MAIN_AGENT_ID,
+    );
+    let member_rule: Value = request(&relay, &cookie, &session, Method::POST, &rules_path)
+        .json(&json!({ "definition": definition, "enabled": true }))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    let task_id = task["id"].as_str().unwrap();
-    let owner_task: Value = request(&relay, &relay.cookie, &relay.session, Method::POST, &tasks)
-        .json(&json!({"settings": input}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let run: Value = request(
+    let owner_rule: Value = request(
         &relay,
-        &cookie,
-        &session,
+        &relay.cookie,
+        &relay.session,
         Method::POST,
-        &format!("{tasks}/{task_id}/run"),
+        &rules_path,
     )
+    .json(&json!({ "definition": definition, "enabled": true }))
     .send()
     .await
     .unwrap()
     .json()
     .await
     .unwrap();
+
+    let chat: Value = request(
+        &relay,
+        &cookie,
+        &session,
+        Method::POST,
+        &format!("{api}/chats"),
+    )
+    .json(&json!({ "agentId": cairn_installation::config::MAIN_AGENT_ID }))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let chat_id = chat["id"].as_str().unwrap();
+    let sent = request(
+        &relay,
+        &cookie,
+        &session,
+        Method::POST,
+        &format!("{api}/chats/{chat_id}/messages"),
+    )
+    .json(&json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "text": "Keep working",
+    }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(sent.status(), StatusCode::OK);
+    relay
+        .installation
+        .chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let detail = relay.installation.chat_detail(chat_id).await.unwrap();
+    let run_id = detail["runId"].as_str().unwrap().to_owned();
 
     let removed = request(
         &relay,
@@ -1356,33 +1477,34 @@ async fn removing_a_task_author_stops_their_schedules_and_preserves_admitted_wor
     .await
     .unwrap();
     assert_eq!(removed.status(), StatusCode::NO_CONTENT);
-    let stored: Vec<Value> = relay
-        .get("/tasks")
+    let listed: Value = relay
+        .get("/hook-rules")
         .send()
         .await
         .unwrap()
-        .json::<cairn_contracts::ListMissionsOutput>()
+        .json()
         .await
-        .unwrap()
-        .tasks
-        .into_iter()
-        .map(|m| serde_json::to_value(m).unwrap())
-        .collect();
-    let retired = stored
-        .iter()
-        .find(|value| value["id"] == task["id"])
         .unwrap();
-    assert_eq!(retired["enabled"], false);
-    assert_eq!(retired["nextRun"], Value::Null);
-    assert_eq!(retired["authorId"], session["account"]["id"]);
-    let owner_task = stored
+    let rules = listed["rules"].as_array().unwrap();
+    let retired = rules
         .iter()
-        .find(|value| value["id"] == owner_task["id"])
+        .find(|value| value["id"] == member_rule["id"])
         .unwrap();
-    assert_eq!(owner_task["enabled"], true);
-    assert_eq!(owner_task["authorId"], relay.session["account"]["id"]);
+    assert!(has_block(retired, "membershipEnded"), "{retired}");
+    assert!(retired["nextRun"].is_null(), "{retired}");
+    assert_eq!(retired["creatorAccountId"], session["account"]["id"]);
+    let owner_stored = rules
+        .iter()
+        .find(|value| value["id"] == owner_rule["id"])
+        .unwrap();
+    assert_eq!(owner_stored["blocks"], json!([]));
+    assert!(owner_stored["nextRun"].is_number(), "{owner_stored}");
+    assert_eq!(
+        owner_stored["creatorAccountId"],
+        relay.session["account"]["id"]
+    );
     let admitted: Value = relay
-        .get(&format!("/runs/{}", run["id"].as_str().unwrap()))
+        .get(&format!("/runs/{run_id}"))
         .send()
         .await
         .unwrap()
@@ -1394,50 +1516,29 @@ async fn removing_a_task_author_stops_their_schedules_and_preserves_admitted_wor
 }
 
 #[tokio::test]
-async fn offline_removal_and_reinvitation_do_not_revive_old_task_commitments() {
+async fn offline_removal_and_reinvitation_do_not_revive_old_hook_rule_commitments() {
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
     let (cookie, session) = member(&relay, "returning-author@example.test").await;
     let id = relay.session["installations"][0]["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    let tasks = format!("/api/installations/{id}/api/tasks");
-    let input = json!({
-        "name": "Old commitment",
-        "prompt": "Keep working",
-        "agentId": cairn_installation::config::MAIN_AGENT_ID,
-        "cron": "0 9 * * *",
-        "timezone": "UTC",
-        "enabled": true,
-    });
-    let task: Value = request(&relay, &cookie, &session, Method::POST, &tasks)
-        .json(&json!({"settings": input}))
+    let rules_path = format!("/api/installations/{id}/api/hook-rules");
+    let definition = clock_rule_definition(
+        "Old commitment",
+        "Keep working",
+        cairn_installation::config::MAIN_AGENT_ID,
+    );
+    let rule: Value = request(&relay, &cookie, &session, Method::POST, &rules_path)
+        .json(&json!({ "definition": definition, "enabled": true }))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    let task_path = format!("{tasks}/{}", task["id"].as_str().unwrap());
-    let edited: Value = request(
-        &relay,
-        &relay.cookie,
-        &relay.session,
-        Method::PUT,
-        &task_path,
-    )
-    .json(&mission_replacement(&task, &{
-        let mut edited = input.clone();
-        edited["name"] = "Edited by owner".into();
-        edited
-    }))
-    .send()
-    .await
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    assert_eq!(edited["authorId"], session["account"]["id"]);
+    let rule_id = rule["id"].as_str().unwrap().to_owned();
+    let rule_path = format!("{rules_path}/{rule_id}");
 
     relay.stop.cancel();
     (&mut relay.connector).await.unwrap().unwrap();
@@ -1501,92 +1602,122 @@ async fn offline_removal_and_reinvitation_do_not_revive_old_task_commitments() {
         relay.stop.clone(),
         relay.direct.clone(),
     ));
-    let stored: Vec<Value> = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let retired: Value = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let response = relay.get("/tasks").send().await.unwrap();
+            let response = relay.get("/hook-rules").send().await.unwrap();
             if response.status() == StatusCode::OK {
-                break response
-                    .json::<cairn_contracts::ListMissionsOutput>()
-                    .await
-                    .unwrap()
-                    .tasks
-                    .into_iter()
-                    .map(|m| serde_json::to_value(m).unwrap())
-                    .collect();
+                let listed: Value = response.json().await.unwrap();
+                if let Some(found) = listed["rules"]
+                    .as_array()
+                    .and_then(|rules| rules.iter().find(|value| value["id"] == rule["id"]))
+                    && has_block(found, "membershipEnded")
+                {
+                    break found.clone();
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
     .await
     .unwrap();
-    let retired = stored
-        .iter()
-        .find(|value| value["id"] == task["id"])
-        .unwrap();
-    assert_eq!(retired["enabled"], false);
-    assert_eq!(retired["authorRemoved"], true);
-    assert_eq!(retired["nextRun"], Value::Null);
+    assert!(has_block(&retired, "membershipEnded"), "{retired}");
+    assert!(retired["nextRun"].is_null(), "{retired}");
+
     // Account access to agents belonged to the earlier membership as well.
-    for (actor_cookie, actor_session, refused) in [
-        (&cookie, &session, StatusCode::FORBIDDEN),
-        (&relay.cookie, &relay.session, StatusCode::CONFLICT),
-    ] {
-        assert_eq!(
-            request(&relay, actor_cookie, actor_session, Method::PUT, &task_path)
-                .json(&mission_replacement(&task, &input))
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            refused
-        );
-    }
+    assert_eq!(
+        request(&relay, &cookie, &session, Method::POST, &rules_path)
+            .json(&json!({ "definition": definition, "enabled": true }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request(
+            &relay,
+            &relay.cookie,
+            &relay.session,
+            Method::PUT,
+            &rule_path
+        )
+        .json(&json!({
+            "ruleId": rule_id,
+            "revision": retired["revision"],
+            "definition": definition,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+
     allow_main(&relay, &session).await;
     assert_eq!(
-        request(&relay, &cookie, &session, Method::PUT, &task_path)
-            .json(&mission_replacement(&task, &input))
+        request(&relay, &cookie, &session, Method::PUT, &rule_path)
+            .json(&json!({
+                "ruleId": rule_id,
+                "revision": retired["revision"],
+                "definition": definition,
+            }))
             .send()
             .await
             .unwrap()
             .status(),
         StatusCode::CONFLICT
     );
-    let replacement: Value = request(&relay, &cookie, &session, Method::POST, &tasks)
-        .json(&json!({"settings": input}))
+    assert_eq!(
+        request(
+            &relay,
+            &cookie,
+            &session,
+            Method::POST,
+            &format!("{rule_path}/enabled"),
+        )
+        .json(&json!({ "ruleId": rule_id, "enabled": true }))
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::CONFLICT
+    );
+    let replacement: Value = request(&relay, &cookie, &session, Method::POST, &rules_path)
+        .json(&json!({ "definition": definition, "enabled": true }))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(replacement["enabled"], true);
-    assert_eq!(replacement["authorId"], session["account"]["id"]);
-    assert_ne!(replacement["authorAccessId"], task["authorAccessId"]);
+    assert_eq!(replacement["blocks"], json!([]));
+    assert!(replacement["nextRun"].is_number(), "{replacement}");
+    assert_eq!(replacement["creatorAccountId"], session["account"]["id"]);
     relay.close().await;
 }
 
 #[tokio::test]
-async fn leaving_or_deleting_the_author_account_stops_their_schedules() {
+async fn leaving_or_deleting_the_creator_account_stops_their_schedules() {
     for deleting_account in [false, true] {
         let relay = RelayedInstallation::new(axum::Router::new()).await;
         let email = "departing-author@example.test";
         let (cookie, session) = member(&relay, email).await;
         let id = relay.session["installations"][0]["id"].as_str().unwrap();
-        let task: Value = request(
+        let rule: Value = request(
             &relay,
             &cookie,
             &session,
             Method::POST,
-            &format!("/api/installations/{id}/api/tasks"),
+            &format!("/api/installations/{id}/api/hook-rules"),
         )
-        .json(&json!({"settings": json!({
-            "name": "Member commitment",
-            "prompt": "Scheduled work",
-            "agentId": cairn_installation::config::MAIN_AGENT_ID,
-            "cron": "0 9 * * *",
-            "timezone": "UTC",
+        .json(&json!({
+            "definition": clock_rule_definition(
+                "Member commitment",
+                "Scheduled work",
+                cairn_installation::config::MAIN_AGENT_ID,
+            ),
             "enabled": true,
-        })}))
+        }))
         .send()
         .await
         .unwrap()
@@ -1609,761 +1740,25 @@ async fn leaving_or_deleting_the_author_account_stops_their_schedules() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        let tasks: Vec<Value> = relay
-            .get("/tasks")
-            .send()
-            .await
-            .unwrap()
-            .json::<cairn_contracts::ListMissionsOutput>()
-            .await
-            .unwrap()
-            .tasks
-            .into_iter()
-            .map(|m| serde_json::to_value(m).unwrap())
-            .collect();
-        let task = tasks
-            .iter()
-            .find(|stored| stored["id"] == task["id"])
-            .unwrap();
-        assert_eq!(task["enabled"], false);
-        assert_eq!(task["authorRemoved"], true);
-        assert_eq!(task["authorId"], session["account"]["id"]);
-        relay.close().await;
-    }
-}
-
-#[tokio::test]
-async fn an_authority_wait_never_delays_already_admitted_work() {
-    use std::{sync::Arc, time::Duration};
-    let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let id = relay.session["installations"][0]["id"].as_str().unwrap();
-    let tasks = format!("/api/installations/{id}/api/tasks");
-    let mut task: Value = request(&relay, &relay.cookie, &relay.session, Method::POST, &tasks)
-        .json(&json!({"settings": json!({
-            "name": "Due commitment",
-            "prompt": "Approved work",
-            "agentId": cairn_installation::config::MAIN_AGENT_ID,
-            "cron": "0 9 * * *",
-            "enabled": true,
-        })}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let queued: Value = request(
-        &relay,
-        &relay.cookie,
-        &relay.session,
-        Method::POST,
-        &format!("{tasks}/{}/run", task["id"].as_str().unwrap()),
-    )
-    .send()
-    .await
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    task["nextRun"] = 1.into();
-    relay
-        .installation
-        .store
-        .put_mission_fixture(task)
-        .await
-        .unwrap();
-    let entered = Arc::new(tokio::sync::Semaphore::new(0));
-    let arrival = entered.clone();
-    let proxy = AuthorPolicyProxy::new(
-        &relay,
-        axum::Router::new().route(
-            "/api/relay/{installation}/task-authors",
-            axum::routing::get(move || {
-                let arrival = arrival.clone();
-                async move {
-                    arrival.add_permits(1);
-                    std::future::pending::<StatusCode>().await
-                }
-            }),
-        ),
-    )
-    .await;
-    relay
-        .installation
-        .worker
-        .start(relay.installation.clone())
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-
-    let launching = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let run: Value = relay
-                .get(&format!("/runs/{}", queued["id"].as_str().unwrap()))
-                .send()
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-            if !run["startedAt"].is_null() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
-
-    relay.installation.shutdown.cancel();
-    relay.installation.worker.close().await;
-    proxy.close().await;
-    relay.close().await;
-    launching.expect("The beacon authority delayed launching already admitted work");
-}
-
-#[tokio::test]
-async fn a_deferred_author_check_preserves_its_due_time_without_blocking_other_tasks() {
-    use axum::{extract::Path, http::HeaderMap, response::IntoResponse};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-    let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let id = relay.session["installations"][0]["id"].as_str().unwrap();
-    let tasks_path = format!("/api/installations/{id}/api/tasks");
-    for name in ["First commitment", "Second commitment"] {
-        let mut task: Value = request(
-            &relay,
-            &relay.cookie,
-            &relay.session,
-            Method::POST,
-            &tasks_path,
-        )
-        .json(&json!({"settings": json!({
-            "name": name,
-            "prompt": "Approved work",
-            "agentId": cairn_installation::config::MAIN_AGENT_ID,
-            "cron": "0 9 * * *",
-            "enabled": true,
-        })}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-        task["nextRun"] = 1.into();
-        relay
-            .installation
-            .store
-            .put_mission_fixture(task)
-            .await
-            .unwrap();
-    }
-    let tasks: Vec<Value> = relay
-        .get("/tasks")
-        .send()
-        .await
-        .unwrap()
-        .json::<cairn_contracts::ListMissionsOutput>()
-        .await
-        .unwrap()
-        .tasks
-        .into_iter()
-        .map(|m| serde_json::to_value(m).unwrap())
-        .collect();
-    let deferred_id = tasks[0]["id"].as_str().unwrap();
-    let admitted_id = tasks[1]["id"].as_str().unwrap();
-    let checks = Arc::new(AtomicUsize::new(0));
-    let upstream = relay.app.url.clone();
-    let proxy = AuthorPolicyProxy::new(
-        &relay,
-        axum::Router::new().route(
-            "/api/relay/{installation}/task-authors",
-            axum::routing::get(move |Path(id): Path<String>, headers: HeaderMap| {
-                let checks = checks.clone();
-                let upstream = upstream.clone();
-                async move {
-                    if checks.fetch_add(1, Ordering::SeqCst) == 1 {
-                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-                    }
-                    let response = reqwest::Client::new()
-                        .get(format!("{upstream}/api/relay/{id}/task-authors"))
-                        .header("authorization", headers["authorization"].clone())
-                        .send()
-                        .await
-                        .unwrap();
-                    (response.status(), response.bytes().await.unwrap()).into_response()
-                }
-            }),
-        ),
-    )
-    .await;
-
-    relay.installation.schedule().await.unwrap();
-    let runs: Vec<Value> = relay
-        .get("/runs")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        runs.len(),
-        1,
-        "One failed author check must not defer unrelated commitments"
-    );
-    assert_eq!(runs[0]["taskId"], admitted_id);
-    let tasks: Vec<Value> = relay
-        .get("/tasks")
-        .send()
-        .await
-        .unwrap()
-        .json::<cairn_contracts::ListMissionsOutput>()
-        .await
-        .unwrap()
-        .tasks
-        .into_iter()
-        .map(|m| serde_json::to_value(m).unwrap())
-        .collect();
-    let deferred = tasks.iter().find(|task| task["id"] == deferred_id).unwrap();
-    assert_eq!(deferred["nextRun"], 1);
-    assert_eq!(deferred["enabled"], true);
-    assert!(
-        deferred["scheduleWaitReason"]
-            .as_str()
-            .unwrap()
-            .contains("unavailable")
-    );
-
-    relay.installation.schedule().await.unwrap();
-    relay.installation.schedule().await.unwrap();
-    let runs: Vec<Value> = relay
-        .get("/runs")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        runs.len(),
-        2,
-        "Recovery must admit each occurrence only once"
-    );
-    let tasks: Vec<Value> = relay
-        .get("/tasks")
-        .send()
-        .await
-        .unwrap()
-        .json::<cairn_contracts::ListMissionsOutput>()
-        .await
-        .unwrap()
-        .tasks
-        .into_iter()
-        .map(|m| serde_json::to_value(m).unwrap())
-        .collect();
-    assert!(
-        tasks
-            .iter()
-            .all(|task| task["nextRun"].as_i64().unwrap() > 1)
-    );
-    assert!(
-        tasks
-            .iter()
-            .all(|task| task["scheduleWaitReason"].is_null())
-    );
-
-    proxy.close().await;
-    relay.close().await;
-}
-
-#[tokio::test]
-async fn revoked_and_unclaimed_identities_explain_scheduled_work_without_audit_flooding() {
-    use std::os::unix::fs::PermissionsExt;
-    let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let id = relay.session["installations"][0]["id"].as_str().unwrap();
-    let mut task: Value = request(
-        &relay,
-        &relay.cookie,
-        &relay.session,
-        Method::POST,
-        &format!("/api/installations/{id}/api/tasks"),
-    )
-    .json(&json!({"settings": json!({
-        "name": "Waiting commitment",
-        "prompt": "Approved work",
-        "agentId": cairn_installation::config::MAIN_AGENT_ID,
-        "cron": "0 9 * * *",
-        "enabled": true,
-    })}))
-    .send()
-    .await
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    task["nextRun"] = 1.into();
-    relay
-        .installation
-        .store
-        .put_mission_fixture(task)
-        .await
-        .unwrap();
-    let identity_path = relay
-        .installation
-        .config
-        .data_dir
-        .join("installation-relay/identity.json");
-    let original = tokio::fs::read(&identity_path).await.unwrap();
-    let mut revoked: Value = serde_json::from_slice(&original).unwrap();
-    revoked["token"] = "fixture-invalid-token".into();
-    tokio::fs::write(&identity_path, serde_json::to_vec(&revoked).unwrap())
-        .await
-        .unwrap();
-
-    relay.installation.schedule().await.unwrap();
-    relay.installation.schedule().await.unwrap();
-    let tasks: Vec<Value> = relay
-        .get("/tasks")
-        .send()
-        .await
-        .unwrap()
-        .json::<cairn_contracts::ListMissionsOutput>()
-        .await
-        .unwrap()
-        .tasks
-        .into_iter()
-        .map(|m| serde_json::to_value(m).unwrap())
-        .collect();
-    assert_eq!(
-        tasks[0]["scheduleWaitReason"],
-        "Installation identity revoked."
-    );
-    assert_eq!(tasks[0]["nextRun"], 1);
-    assert_eq!(tasks[0]["enabled"], true);
-    let audit: cairn_contracts::ListAuditOutput = relay
-        .get("/audit")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        audit
-            .entries
-            .iter()
-            .filter(|entry| entry.action == "schedule.deferred")
-            .count(),
-        1
-    );
-
-    tokio::fs::remove_file(&identity_path).await.unwrap();
-    relay.installation.schedule().await.unwrap();
-    relay.installation.schedule().await.unwrap();
-    let tasks: Vec<Value> = relay
-        .get("/tasks")
-        .send()
-        .await
-        .unwrap()
-        .json::<cairn_contracts::ListMissionsOutput>()
-        .await
-        .unwrap()
-        .tasks
-        .into_iter()
-        .map(|m| serde_json::to_value(m).unwrap())
-        .collect();
-    assert_eq!(
-        tasks[0]["scheduleWaitReason"],
-        "Installation is not claimed. Run cairn claim before scheduling work."
-    );
-    let runs: Value = relay
-        .get("/runs")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(runs, json!([]));
-    let audit: cairn_contracts::ListAuditOutput = relay
-        .get("/audit")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        audit
-            .entries
-            .iter()
-            .filter(|entry| entry.action == "schedule.deferred")
-            .count(),
-        2
-    );
-
-    tokio::fs::write(&identity_path, original).await.unwrap();
-    tokio::fs::set_permissions(identity_path, std::fs::Permissions::from_mode(0o600))
-        .await
-        .unwrap();
-    relay.installation.schedule().await.unwrap();
-    let tasks: Vec<Value> = relay
-        .get("/tasks")
-        .send()
-        .await
-        .unwrap()
-        .json::<cairn_contracts::ListMissionsOutput>()
-        .await
-        .unwrap()
-        .tasks
-        .into_iter()
-        .map(|m| serde_json::to_value(m).unwrap())
-        .collect();
-    assert!(
-        tasks[0]["scheduleWaitReason"].is_null(),
-        "Recovery stayed deferred: {}",
-        tasks[0]["scheduleWaitReason"]
-    );
-    let runs: Vec<Value> = relay
-        .get("/runs")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(runs.len(), 1);
-    relay.close().await;
-}
-
-#[tokio::test]
-async fn a_task_preparation_error_advances_only_its_occurrence_and_is_audited_and_shown_once() {
-    let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let id = relay.session["installations"][0]["id"].as_str().unwrap();
-    let tasks = format!("/api/installations/{id}/api/tasks");
-    for (name, skills) in [
-        ("Invalid skill", json!(["global/missing-skill"])),
-        ("Valid work", Value::Null),
-    ] {
-        let mut task: Value = request(&relay, &relay.cookie, &relay.session, Method::POST, &tasks)
-            .json(&json!({"settings": json!({
-                "name": name,
-                "prompt": "Approved work",
-                "agentId": cairn_installation::config::MAIN_AGENT_ID,
-                "cron": "0 9 * * *",
-                "enabled": true,
-                "skills": skills,
-            })}))
+        let listed: Value = relay
+            .get("/hook-rules")
             .send()
             .await
             .unwrap()
             .json()
             .await
             .unwrap();
-        task["nextRun"] = 1.into();
-        // Replay the persisted wait status from an earlier authority outage.
-        task["scheduleWaitReason"] = "Task-author check unavailable.".into();
-        // An earlier skipped occurrence clears once a later one is admitted.
-        task["scheduleFailure"] =
-            json!({ "message": "Earlier failure", "scheduledFor": 0, "at": 0 });
-        relay
-            .installation
-            .store
-            .put_mission_fixture(task)
-            .await
-            .unwrap();
-    }
-    relay.installation.schedule().await.unwrap();
-    relay.installation.schedule().await.unwrap();
-    let runs: Vec<Value> = relay
-        .get("/runs")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(runs.len(), 1);
-    let run: Value = relay
-        .get(&format!("/runs/{}", runs[0]["id"].as_str().unwrap()))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(run["snapshot"]["task"]["name"], "Valid work");
-    let tasks: Vec<Value> = relay
-        .get("/tasks")
-        .send()
-        .await
-        .unwrap()
-        .json::<cairn_contracts::ListMissionsOutput>()
-        .await
-        .unwrap()
-        .tasks
-        .into_iter()
-        .map(|m| serde_json::to_value(m).unwrap())
-        .collect();
-    assert!(
-        tasks
-            .iter()
-            .all(|task| task["nextRun"].as_i64().unwrap() > 1)
-    );
-    assert!(
-        tasks
-            .iter()
-            .all(|task| task["scheduleWaitReason"].is_null())
-    );
-
-    let skipped = tasks
-        .iter()
-        .find(|task| task["name"] == "Invalid skill")
-        .unwrap();
-    assert_eq!(skipped["scheduleFailure"]["scheduledFor"], 1);
-    assert_ne!(skipped["scheduleFailure"]["message"], "Earlier failure");
-    assert!(
-        !skipped["scheduleFailure"]["message"]
-            .as_str()
+        let stored = listed["rules"]
+            .as_array()
             .unwrap()
-            .is_empty()
-    );
-    let admitted = tasks
-        .iter()
-        .find(|task| task["name"] == "Valid work")
-        .unwrap();
-    assert!(admitted["scheduleFailure"].is_null());
-
-    let audit: cairn_contracts::ListAuditOutput = relay
-        .get("/audit")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        audit
-            .entries
             .iter()
-            .filter(|entry| entry.action == "schedule.failed")
-            .count(),
-        1
-    );
-    relay.close().await;
-}
-
-// Replaces only the authority's HTTP transport; requests still use the real relay.
-struct AuthorPolicyProxy {
-    identity_path: std::path::PathBuf,
-    original: Vec<u8>,
-    server: tokio::task::JoinHandle<()>,
-}
-
-impl AuthorPolicyProxy {
-    async fn new(relay: &RelayedInstallation, routes: axum::Router) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
-        let server = tokio::spawn(async move {
-            axum::serve(listener, routes).await.unwrap();
-        });
-        let identity_path = relay
-            .installation
-            .config
-            .data_dir
-            .join("installation-relay/identity.json");
-        let original = tokio::fs::read(&identity_path).await.unwrap();
-        let mut identity: Value = serde_json::from_slice(&original).unwrap();
-        identity["origin"] = origin.into();
-        tokio::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap())
-            .await
+            .find(|stored| stored["id"] == rule["id"])
             .unwrap();
-        Self {
-            identity_path,
-            original,
-            server,
-        }
+        assert!(has_block(stored, "membershipEnded"), "{stored}");
+        assert!(stored["nextRun"].is_null(), "{stored}");
+        assert_eq!(stored["creatorAccountId"], session["account"]["id"]);
+        relay.close().await;
     }
-
-    async fn close(self) {
-        tokio::fs::write(self.identity_path, self.original)
-            .await
-            .unwrap();
-        self.server.abort();
-    }
-}
-
-#[tokio::test]
-async fn task_pause_and_archive_need_no_beacon_round_trip() {
-    let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let (cookie, session) = member(&relay, "pause-author@example.test").await;
-    let id = relay.session["installations"][0]["id"].as_str().unwrap();
-    let tasks = format!("/api/installations/{id}/api/tasks");
-    let mut commitments = Vec::new();
-    for (author_cookie, author_session) in [(&relay.cookie, &relay.session), (&cookie, &session)] {
-        let response = request(&relay, author_cookie, author_session, Method::POST, &tasks)
-            .json(&json!({"settings": json!({
-                "name": "Active commitment",
-                "prompt": "Approved work",
-                "agentId": cairn_installation::config::MAIN_AGENT_ID,
-                "cron": "0 9 * * *",
-                "enabled": true,
-            })}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        commitments.push(response.json::<Value>().await.unwrap());
-    }
-    let proxy = AuthorPolicyProxy::new(
-        &relay,
-        axum::Router::new().route(
-            "/api/relay/{installation}/task-authors",
-            axum::routing::get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
-        ),
-    )
-    .await;
-
-    for mut task in commitments {
-        let path = format!("{tasks}/{}", task["id"].as_str().unwrap());
-        task["enabled"] = false.into();
-        let paused = request(&relay, &cookie, &session, Method::PUT, &path)
-            .json(&mission_replacement(&task, &task))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(paused.status(), StatusCode::OK);
-        let paused: Value = paused.json().await.unwrap();
-        assert_eq!(paused["enabled"], false);
-        assert!(paused["nextRun"].is_null());
-        assert_eq!(paused["authorId"], task["authorId"]);
-
-        task = paused;
-        task["archived"] = true.into();
-        let archived = request(&relay, &cookie, &session, Method::PUT, &path)
-            .json(&mission_replacement(&task, &task))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(archived.status(), StatusCode::OK);
-        assert_eq!(archived.json::<Value>().await.unwrap()["archived"], true);
-
-        task["enabled"] = true.into();
-        task["archived"] = false.into();
-        assert_ne!(
-            request(&relay, &cookie, &session, Method::PUT, &path)
-                .json(&mission_replacement(&task, &task))
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::OK
-        );
-    }
-    proxy.close().await;
-    relay.close().await;
-}
-
-#[tokio::test]
-async fn temporary_authority_outage_defers_schedules_without_disabling_them() {
-    use axum::{extract::Path, http::HeaderMap, response::IntoResponse, routing::get};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-    let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let mut task = relay
-        .installation
-        .task_fixture(
-            json!({
-                "name": "Owner commitment",
-                "prompt": "Scheduled work",
-                "agentId": cairn_installation::config::MAIN_AGENT_ID,
-                "cron": "0 9 * * *",
-                "timezone": "UTC",
-                "enabled": true,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    // Only time and transport are fixture-controlled; all authorization is real.
-    task["nextRun"] = 1.into();
-    relay
-        .installation
-        .store
-        .put_mission_fixture(task.clone())
-        .await
-        .unwrap();
-    let unavailable = Arc::new(AtomicBool::new(true));
-    let gate = unavailable.clone();
-    let upstream = relay.app.url.clone();
-    let routes = axum::Router::new().route(
-        "/api/relay/{installation}/task-authors",
-        get(move |Path(id): Path<String>, headers: HeaderMap| {
-            let gate = gate.clone();
-            let upstream = upstream.clone();
-            async move {
-                if gate.load(Ordering::SeqCst) {
-                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
-                }
-                let response = reqwest::Client::new()
-                    .get(format!("{upstream}/api/relay/{id}/task-authors"))
-                    .header("authorization", headers["authorization"].clone())
-                    .send()
-                    .await
-                    .unwrap();
-                (response.status(), response.bytes().await.unwrap()).into_response()
-            }
-        }),
-    );
-    let proxy = AuthorPolicyProxy::new(&relay, routes).await;
-    relay.installation.schedule().await.unwrap();
-    let stored: Vec<Value> = relay
-        .get("/tasks")
-        .send()
-        .await
-        .unwrap()
-        .json::<cairn_contracts::ListMissionsOutput>()
-        .await
-        .unwrap()
-        .tasks
-        .into_iter()
-        .map(|m| serde_json::to_value(m).unwrap())
-        .collect();
-    assert_eq!(stored[0]["enabled"], true);
-    assert_eq!(stored[0]["nextRun"], 1);
-    let runs: Value = relay
-        .get("/runs")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(runs, json!([]));
-    unavailable.store(false, Ordering::SeqCst);
-    relay.installation.schedule().await.unwrap();
-    let runs: Value = relay
-        .get("/runs")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(runs.as_array().unwrap().len(), 1);
-    assert_eq!(runs[0]["taskId"], task["id"]);
-    assert_eq!(runs[0]["trigger"], "schedule");
-    proxy.close().await;
-    relay.close().await;
 }
 
 #[tokio::test]
@@ -2548,138 +1943,4 @@ async fn author_policy_requires_the_current_machine_identity_and_never_browser_c
         StatusCode::UNAUTHORIZED
     );
     relay.close().await;
-}
-
-#[tokio::test]
-async fn author_removal_during_slow_preparation_prevents_late_scheduled_admission() {
-    use std::time::Duration;
-    use tokio::io::AsyncWriteExt;
-
-    let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let (cookie, session) = member(&relay, "slow-author@example.test").await;
-    let id = relay.session["installations"][0]["id"].as_str().unwrap();
-    let mut task: Value = request(
-        &relay,
-        &cookie,
-        &session,
-        Method::POST,
-        &format!("/api/installations/{id}/api/tasks"),
-    )
-    .json(&json!({"settings": json!({
-        "name": "Slow preparation",
-        "prompt": "Scheduled work",
-        "agentId": cairn_installation::config::MAIN_AGENT_ID,
-        "cron": "0 9 * * *",
-        "timezone": "UTC",
-        "enabled": true,
-    })}))
-    .send()
-    .await
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    task["nextRun"] = 1.into();
-    relay
-        .installation
-        .store
-        .put_mission_fixture(task)
-        .await
-        .unwrap();
-    let directory = relay.installation.config.home.join(".agents/skills/block");
-    tokio::fs::create_dir_all(&directory).await.unwrap();
-    let fifo = directory.join("SKILL.md");
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .unwrap()
-            .success()
-    );
-    let installation = relay.installation.clone();
-    let scheduled = tokio::spawn(async move { installation.schedule().await });
-    // Writer open is a deterministic barrier: snapshot opened the real skill,
-    // but its read cannot finish until the writer closes after the withdrawal.
-    let mut writer = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::fs::OpenOptions::new().write(true).open(&fifo),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let removed = request(
-        &relay,
-        &relay.cookie,
-        &relay.session,
-        Method::DELETE,
-        &format!(
-            "/api/installations/{id}/sharing/members/{}",
-            session["account"]["id"].as_str().unwrap()
-        ),
-    )
-    .send()
-    .await
-    .unwrap();
-    writer
-        .write_all(b"---\nname: block\ndescription: Regression fixture.\n---\nScheduled work.\n")
-        .await
-        .unwrap();
-    // Tokio queues file writes on its blocking pool. Finish that write before
-    // dropping the last writer and starting the scheduler completion deadline.
-    writer.flush().await.unwrap();
-    drop(writer);
-    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
-    tokio::time::timeout(Duration::from_secs(5), scheduled)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let runs: Value = relay
-        .get("/runs")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        runs,
-        json!([]),
-        "A prepared snapshot is not work already admitted before removal"
-    );
-    let tasks: Vec<Value> = relay
-        .get("/tasks")
-        .send()
-        .await
-        .unwrap()
-        .json::<cairn_contracts::ListMissionsOutput>()
-        .await
-        .unwrap()
-        .tasks
-        .into_iter()
-        .map(|m| serde_json::to_value(m).unwrap())
-        .collect();
-    assert_eq!(tasks[0]["enabled"], false);
-    relay.close().await;
-}
-
-fn mission_replacement(current: &Value, settings: &Value) -> Value {
-    let mut settings = settings.clone();
-    settings.as_object_mut().unwrap().retain(|key, _| {
-        [
-            "name",
-            "prompt",
-            "agentId",
-            "projectId",
-            "skills",
-            "tags",
-            "cron",
-            "timezone",
-            "enabled",
-            "archived",
-            "worktree",
-        ]
-        .contains(&key.as_str())
-    });
-    json!({"taskId":current["id"],"revision":current["revision"],"settings":settings})
 }

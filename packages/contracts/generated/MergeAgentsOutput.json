@@ -14,15 +14,9 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
-        },
-        "tasks": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
         }
       },
       "required": [
-        "tasks",
         "chats",
         "runs"
       ],

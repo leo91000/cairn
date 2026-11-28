@@ -366,10 +366,10 @@ pub const INTERACTIVE: &str = "This is an interactive chat. Use cairn_workspace.
     as authorization to publish changes. Use cairn_workspace.pending_questions and \
     cairn_workspace.withdraw_question to retire a question that became unnecessary \
     or was answered in ordinary chat. Withdrawal never supplies approval. A completed \
-    outcome retires unanswered questions at the end of the turn; report needs_input \
-    when an answer is still required.";
+    outcome retires unanswered questions at the end of the turn; a blocked outcome \
+    preserves pending questions.";
 
-pub fn prompt(run: &Value, chat: bool) -> String {
+pub fn prompt(run: &Value, _chat: bool) -> String {
     // Set at launch from the plugins granting this run's agent (`agents::with_instructions`).
     let plugins = if run["isolated"] == true {
         text(run, "pluginInstructions")
@@ -387,7 +387,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             workspace or /tmp. Wait for successful publication and include the returned \
             durable URL in your reply. Before your final response, unless ending a \
             confirmed deferred wait with cairn_workspace.wait_for, call \
-            cairn_workspace.report_outcome with completed, blocked, or needs_input, a \
+            cairn_workspace.report_outcome with completed or blocked, a \
             concrete reason, and validation/delivery evidence. A successful process or \
             local commit is not a completed request when an authorized push, CI check, \
             or release remains blocked. Use waitingOn external only for work already \
@@ -398,12 +398,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
     } else {
         ""
     };
-    let interaction = if chat {
-        INTERACTIVE
-    } else {
-        "This unattended task cannot answer clarification questions; report a \
-            concrete blocker if required information is missing."
-    };
+    let interaction = INTERACTIVE;
     let projects = crate::project_workspaces::catalog(run)
         .iter()
         .map(|project| project_line(run, project))

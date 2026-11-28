@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "How an account snoozes a conversation until a later time, or brings it back early.\nA snooze lasts until its deadline or until the conversation has later activity.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "finishedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "kind": {
+          "const": "snooze",
+          "type": "string"
+        },
+        "until": {
+          "description": "At most 30 days ahead.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "finishedAt",
+        "until"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "restore",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ConversationSnoozeAction"
+}

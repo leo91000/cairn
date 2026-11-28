@@ -7,11 +7,6 @@ mod node_fixture;
 use node_fixture::DbNodeFixture;
 use run_fixture::DbRunFixture;
 
-#[path = "../tests/common/mission_fixture.rs"]
-mod mission_fixture;
-
-use mission_fixture::MissionFixture;
-
 #[path = "../tests/common/agent_fixture.rs"]
 mod agent_fixture;
 
@@ -56,7 +51,7 @@ async fn main() -> Result<()> {
     let arg = |index: usize| args.get(index).cloned().unwrap_or(Value::Null);
     let string = |index: usize| args.get(index).and_then(Value::as_str).unwrap_or("");
     let result = match operation {
-        "agent" | "project" | "task" | "enqueue" | "skill" | "detail" => {
+        "agent" | "project" | "skill" | "detail" => {
             let service = open_service(config).await?;
             let existing = args.get(1).and_then(Value::as_str);
             match operation {
@@ -89,8 +84,6 @@ async fn main() -> Result<()> {
                     };
                     serde_json::to_value(project)?
                 }
-                "task" => service.task_fixture(arg(0), existing).await?,
-                "enqueue" => service.enqueue(string(0), "manual", None).await?,
                 "skill" => service.skills.save(string(0), string(1), None).await?,
                 _ => service.chat_detail(string(0)).await?,
             }
@@ -176,7 +169,6 @@ async fn main() -> Result<()> {
                 "get" if string(0) == "agents" => {
                     db.agent_snapshot(string(1))?.unwrap_or(Value::Null)
                 }
-                "get" if string(0) == "tasks" => serde_json::to_value(db.mission(string(1))?)?,
                 "get" if string(0) == "nodes" => {
                     db.node_boundary(string(1))?.unwrap_or(Value::Null)
                 }
@@ -185,17 +177,12 @@ async fn main() -> Result<()> {
                 }
                 "get" => db.get(string(0), string(1))?.unwrap_or(Value::Null),
                 "list" if string(0) == "agents" => db.agent_snapshots()?.into(),
-                "list" if string(0) == "tasks" => serde_json::to_value(db.missions()?)?,
                 "list" if string(0) == "nodes" => db.nodes_boundary()?.into(),
                 "list" if string(0) == "chats" => db.conversations_boundary()?.into(),
                 "list" => db.list(string(0))?.into(),
                 "projects" => serde_json::to_value(db.projects()?)?,
                 "put" if string(0) == "agents" => {
                     serde_json::to_value(db.save_agent(&serde_json::from_value(arg(1))?)?)?
-                }
-                "put" if string(0) == "tasks" => {
-                    db.save_mission(&serde_json::from_value(arg(1))?)?;
-                    arg(1)
                 }
                 "put" if string(0) == "nodes" => db.put_node_fixture(&arg(1))?,
                 "put" if string(0) == "chats" => {

@@ -25,6 +25,32 @@ fn origin_schema() -> Value {
     })
 }
 
+/// The payload Cairn emits for its Clock hook (ADR-0094).
+pub(crate) fn clock_payload() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "scheduledAt": {
+                "type": ["string", "null"],
+                "description": "The scheduled date and time in RFC 3339 format, or null when triggered with Run now.",
+            },
+            "emittedAt": {
+                "type": "string",
+                "description": "When Cairn emitted the event, in RFC 3339 format.",
+            },
+            "timezone": {
+                "type": "string",
+                "description": "The IANA timezone configured on the rule.",
+            },
+            "manual": {
+                "type": "boolean",
+                "description": "True when triggered with Run now instead of waiting for the clock.",
+            },
+        },
+        "required": ["emittedAt", "timezone", "manual"],
+    })
+}
+
 /// The payload Cairn emits for each of its hooks.
 pub(crate) fn cairn_payload(hook: CairnHookKind) -> Value {
     let mut properties = json!({
@@ -236,6 +262,11 @@ fn conditions() -> Vec<RuleCatalogEntry> {
             "Author quota",
             "The author triggered this rule fewer times than a limit within a window. Triggerings that acted count, once each, for the authors their quota conditions examined.",
         ),
+        entry(
+            "ruleConversationWorking",
+            "A conversation started by this rule is working",
+            "True while any active conversation started by this rule has a turn queued, running or waiting for a wakeup. An unanswered question alone does not count.",
+        ),
     ]
 }
 
@@ -421,6 +452,21 @@ pub(crate) async fn build(
         .iter()
         .map(|profile| profile.id)
         .collect::<Vec<_>>();
+    hooks.push(RuleCatalogHook {
+        trigger: HookRuleTrigger::Clock {
+            cron: Some("0 9 * * *".into()),
+            at: None,
+            timezone: "Europe/Paris".into(),
+        },
+        title: "Clock".into(),
+        description: "Runs on a 5-field cron schedule or at a single date, in an IANA timezone."
+            .into(),
+        plugin_id: None,
+        instance_name: None,
+        payload_schema: clock_payload(),
+        resource_fields: Vec::new(),
+        agent_ids: every.clone(),
+    });
     for hook in CairnHookKind::ALL {
         let (title, description) = cairn_hook(hook);
         hooks.push(RuleCatalogHook {

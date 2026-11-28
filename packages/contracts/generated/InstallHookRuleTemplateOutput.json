@@ -43,12 +43,22 @@
           "description": "Whether this version may reach native agents and conversations.",
           "type": "boolean"
         },
+        "nextRun": {
+          "description": "Next scheduled occurrence for an active clock rule, in epoch milliseconds.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "revision": {
           "description": "Changes with every write, including state changes.",
           "type": "string"
         },
         "source": {
-          "pattern": "^(app|publicMcp|installationAgent|duplicate|template)$",
+          "pattern": "^(app|publicMcp|installationAgent|duplicate|template|migration)$",
           "type": "string"
         },
         "updatedAt": {
@@ -110,6 +120,11 @@
         "liftBudget": {
           "type": "boolean"
         },
+        "runNow": {
+          "default": false,
+          "description": "Trigger this clock rule immediately without waiting for its next occurrence.",
+          "type": "boolean"
+        },
         "viewDetails": {
           "description": "Whether the triggering history shows payloads and action results.",
           "type": "boolean"
@@ -123,6 +138,7 @@
         "delete",
         "emergencyPause",
         "liftBudget",
+        "runNow",
         "viewDetails"
       ],
       "type": "object"
@@ -263,6 +279,44 @@
           "required": [
             "type",
             "hook"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Cairn's clock hook: a 5-field cron schedule or a single date in an IANA timezone.",
+          "properties": {
+            "at": {
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "cron": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timezone": {
+              "default": "Europe/Paris",
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": {
+              "const": "clock",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "timezone"
           ],
           "type": "object"
         }
@@ -725,6 +779,20 @@
             "author",
             "limit",
             "windowMinutes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A conversation started by this rule has a turn queued, running or waiting for a wakeup.\nAn unanswered question alone does not count.",
+          "properties": {
+            "type": {
+              "const": "ruleConversationWorking",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
           ],
           "type": "object"
         }

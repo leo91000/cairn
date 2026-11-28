@@ -3,12 +3,9 @@ use common::node_fixture::*;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
-use crate::common::run_fixture::DbRunFixture;
 use crate::common::run_fixture::RunFixture;
 use common::AgentFixture;
-use common::MissionFixture;
 use common::StoreAgentFixture;
-use common::StoreMissionFixture;
 
 mod common;
 #[path = "native_nodes/lineage_cycles.rs"]
@@ -518,62 +515,6 @@ async fn delegated_call(f: &Fixture, configuration: &Value, name: &str, args: Va
     assert_eq!(status, StatusCode::OK, "{value}");
     assert!(value["result"].is_object(), "{value}");
     value
-}
-
-// This installation has one owner (TRUSTED) and two current members. Native
-// directing principals and authenticated mission roles are supplied independently.
-async fn mission_authority(f: &Fixture) -> tokio::task::JoinHandle<()> {
-    let policy = serde_json::to_value(cairn_protocol::TaskAuthorPolicy {
-        owner: cairn_protocol::TaskAuthorGrant {
-            account_id: TRUSTED.into(),
-            access_id: "one".into(),
-        },
-        members: [(OTHER, "two"), ("fixture-owner", "fixture-owner")]
-            .into_iter()
-            .map(|(account, access)| cairn_protocol::TaskAuthorGrant {
-                account_id: account.into(),
-                access_id: access.into(),
-            })
-            .collect(),
-    })
-    .unwrap();
-    let app = Router::new().route(
-        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
-        axum::routing::get(move || {
-            let policy = policy.clone();
-            async move { axum::Json(policy) }
-        }),
-    );
-    let (origin, server) = common::serve_locally(app).await;
-    let path = f
-        .service
-        .config
-        .data_dir
-        .join("installation-relay/identity.json");
-    let mut identity: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    identity["origin"] = origin.into();
-    std::fs::write(path, serde_json::to_vec(&identity).unwrap()).unwrap();
-    server
-}
-
-async fn trust_owner(f: &Fixture) {
-    let mut node = f.node.clone();
-    node["nativeAccounts"] = json!([TRUSTED, "fixture-owner"]);
-    f.service.store.put_node_fixture(node).await.unwrap();
-    let mut authority = f
-        .service
-        .store
-        .kv("native-authority")
-        .await
-        .unwrap()
-        .unwrap();
-    authority["accounts"]["fixture-owner"] =
-        json!({ "email": "owner@example.test", "accessId": "fixture-owner" });
-    f.service
-        .store
-        .set("native-authority", authority, None)
-        .await
-        .unwrap();
 }
 
 async fn unplaced_administrator_preview(backend: &str) {

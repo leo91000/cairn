@@ -16,16 +16,6 @@ pub(crate) struct RunOperation {
 
 pub(crate) const RUN_OPERATIONS: &[RunOperation] = &[
     RunOperation {
-        name: "run_task",
-        scope: "run",
-        description: "Queue a new mission run with the mission's current settings and agent permissions. This creates a new run, unlike resume_run.",
-    },
-    RunOperation {
-        name: "retry_run",
-        scope: "run",
-        description: "Create a new run of the original run's mission with current settings. This does not resume the saved session or reuse its workspace.",
-    },
-    RunOperation {
         name: "cancel_run",
         scope: "run",
         description: "Cancel queued, executing or waiting work, including pending recovery. Existing external effects are preserved.",
@@ -73,7 +63,6 @@ fn decode<T: serde::de::DeserializeOwned>(input: Value) -> Result<T> {
 impl RunOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let input = match self.name {
-            "run_task" => schema_for::<RunMissionInput>(Contract::Deserialize),
             "list_runs" => schema_for::<ListRunsInput>(Contract::Deserialize),
             "get_run" => schema_for::<GetRunInput>(Contract::Deserialize),
             "read_run_history" => schema_for::<ReadRunHistoryInput>(Contract::Deserialize),
@@ -112,7 +101,6 @@ impl RunOperation {
         context: ResumeContext,
         member_account: Option<String>,
     ) -> Result<Value> {
-        let human = matches!(&context, ResumeContext::Human(_));
         let bearer = match context {
             ResumeContext::Human(_) => None,
             ResumeContext::Public(scopes, _) => {
@@ -132,24 +120,6 @@ impl RunOperation {
         let authorize =
             crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?;
         match self.name {
-            "run_task" => {
-                let input: RunMissionInput = decode(input)?;
-                self.enqueue(
-                    s,
-                    &input.task_id.to_string(),
-                    if human { "manual" } else { "mcp" },
-                    bearer,
-                    member_account,
-                    authorize,
-                )
-                .await
-            }
-            "retry_run" => {
-                let input: RunInput = decode(input)?;
-                let run = s.store.run_state(&input.run_id.to_string()).await?;
-                self.enqueue(s, &run.task_id, "retry", bearer, member_account, authorize)
-                    .await
-            }
             "cancel_run" => {
                 let input: RunInput = decode(input)?;
                 let id = input.run_id.to_string();
@@ -162,7 +132,7 @@ impl RunOperation {
                 // Cleanup removes private files before its final database commit. Hold the
                 // same lock as grant revocation across that effect so a revoke cannot race it.
                 let _membership = if member_account.is_some() {
-                    Some(s.missions.authors.lock().await)
+                    Some(s.memberships.authors.lock().await)
                 } else {
                     None
                 };
@@ -300,29 +270,5 @@ impl RunOperation {
             }
             _ => unreachable!("registered run operation"),
         }
-    }
-
-    async fn enqueue(
-        &self,
-        s: &Arc<Service>,
-        task: &str,
-        trigger: &str,
-        bearer: Option<String>,
-        member_account: Option<String>,
-        authorize: crate::authorization::Authorization,
-    ) -> Result<Value> {
-        let run = s.prepare_run(task, trigger).await?;
-        let authorize = if let Some(account) = member_account {
-            let agent = crate::validation::text(&run["snapshot"]["agent"], "id").to_owned();
-            authorize.with_guard(move |db| {
-                crate::agent_access::authorize_member_agent_in(db, &account, &agent)
-            })
-        } else {
-            authorize
-        };
-        authorize.recheck().await?;
-        let run: Run =
-            serde_json::from_value(s.queue_run_live(run, None, bearer, authorize).await?)?;
-        Ok(serde_json::to_value(run)?)
     }
 }

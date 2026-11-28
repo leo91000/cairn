@@ -247,24 +247,12 @@ pub(crate) async fn remove(
     let _files = super::bundle::access(&root).await.write_owned().await;
     let directory = super::skill_directory(&root, name).await?;
     authority.recheck(s).await?;
-    let key = format!("{scope}/{name}");
     let source_scope = scope.to_owned();
     let source_name = name.to_owned();
     let detail = serde_json::json!({"scope": scope, "name": name});
     s.store
         .transaction(move |db| {
             authority.authorize(db)?;
-            let selected = db.missions()?.iter().any(|task| {
-                task.settings
-                    .skills
-                    .as_ref()
-                    .is_some_and(|skills| skills.contains(&key))
-            });
-            if selected {
-                return Err(Error::conflict(
-                    "This skill is selected by a task. Update that task first.",
-                ));
-            }
             std::fs::remove_dir_all(directory)?;
             db.forget_skill_source(&source_scope, &source_name)?;
             db.audit("skill.deleted", &detail)

@@ -18,7 +18,6 @@ export function workspaceRouter(base = '/') {
     history: createWebHistory(base),
     routes: [
       { path: '/', component: () => import('./views/Fil.vue') },
-      { path: '/fil/runs/:id', component: () => import('./views/Fil.vue') },
       { path: '/atelier', component: () => import('./views/Atelier.vue') },
       { path: '/chats/:id?', component: () => import('./views/Chats.vue') },
       { path: '/plugins', component: () => import('./views/Plugins.vue') },
@@ -26,7 +25,6 @@ export function workspaceRouter(base = '/') {
       { path: '/plugins/:id', component: () => import('./views/PluginGeneric.vue') },
       { path: '/mcps', component: () => import('./views/Mcps.vue') },
       { path: '/mcps/callback', component: () => import('./views/McpCallback.vue') },
-      { path: '/tasks', component: () => import('./views/Tasks.vue') },
       { path: '/rules', component: () => import('./views/Rules.vue') },
       { path: '/rules/new', component: () => import('./views/RuleEditor.vue') },
       { path: '/rules/:id/edit', component: () => import('./views/RuleEditor.vue') },

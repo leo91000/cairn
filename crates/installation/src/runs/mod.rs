@@ -395,10 +395,6 @@ impl Db<'_> {
         self.run_records(RunStatus::Queued)
     }
 
-    pub(crate) fn waiting_run_records(&self) -> Result<Vec<RunRecord>> {
-        self.run_records(RunStatus::Waiting)
-    }
-
     fn run_records(&self, status: RunStatus) -> Result<Vec<RunRecord>> {
         if self.0.is_autocommit() {
             let tx = rusqlite::Transaction::new_unchecked(

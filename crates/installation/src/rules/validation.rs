@@ -220,6 +220,14 @@ pub(crate) fn check(db: &Db<'_>, request: &Request<'_>) -> Result<Checked> {
                 name: hook.key().to_owned(),
             });
         }
+        HookRuleTrigger::Clock { .. } => {
+            uses.insert(Use {
+                kind: "clock",
+                agent_id: agent.clone(),
+                instance_id: String::new(),
+                name: String::new(),
+            });
+        }
     }
 
     let mut index = Vec::new();
@@ -322,7 +330,9 @@ pub(crate) fn warnings(
     definition: &HookRuleDefinition,
     creator: &str,
 ) -> Result<Vec<HookRuleWarning>> {
-    if tests_author(&definition.steps) {
+    if matches!(definition.trigger, HookRuleTrigger::Clock { .. })
+        || tests_author(&definition.steps)
+    {
         return Ok(Vec::new());
     }
     let mut started = BTreeSet::new();
@@ -379,7 +389,8 @@ pub(crate) fn tests_author(nodes: &[RuleNode]) -> bool {
             RuleCondition::AuthorIn { .. }
             | RuleCondition::AuthorStartedConversation { .. }
             | RuleCondition::AuthorQuota { .. } => true,
-            RuleCondition::ConversationExists { .. } => false,
+            RuleCondition::ConversationExists { .. }
+            | RuleCondition::RuleConversationWorking {} => false,
         }
     }
     nodes.iter().any(|node| match node {
@@ -402,6 +413,41 @@ fn trigger_payload(
 ) -> Result<Option<Value>> {
     match &request.definition.trigger {
         HookRuleTrigger::Cairn { hook } => Ok(Some(catalog::cairn_payload(*hook))),
+        HookRuleTrigger::Clock { cron, at, timezone } => {
+            if timezone.trim().is_empty() || timezone.parse::<chrono_tz::Tz>().is_err() {
+                checker.problem("/trigger/timezone", "Choose a valid IANA timezone.");
+            }
+            match (
+                cron.as_deref().map(str::trim).filter(|c| !c.is_empty()),
+                *at,
+            ) {
+                (Some(pattern), None) => {
+                    if let Err(error) =
+                        crate::service::next_occurrences(pattern, timezone, crate::config::now(), 1)
+                    {
+                        checker.problem("/trigger/cron", &error.message);
+                    }
+                }
+                (None, Some(target)) => {
+                    if target <= 0 {
+                        checker.problem("/trigger/at", "Choose a valid date and time.");
+                    }
+                }
+                (Some(_), Some(_)) => {
+                    checker.problem(
+                        "/trigger",
+                        "Choose either a 5-field cron schedule or a single date, not both.",
+                    );
+                }
+                (None, None) => {
+                    checker.problem(
+                        "/trigger",
+                        "Enter a 5-field cron schedule or a single date.",
+                    );
+                }
+            }
+            Ok(Some(catalog::clock_payload()))
+        }
         HookRuleTrigger::Plugin { instance_id, hook } => {
             let instance = instance_id.to_string();
             let Some((connection, manifest)) = request.instances.manifest(&instance) else {
@@ -930,6 +976,7 @@ impl Checker {
                     );
                 }
             }
+            RuleCondition::RuleConversationWorking {} => {}
         }
     }
 }

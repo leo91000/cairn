@@ -24,13 +24,13 @@ const emit = defineEmits<{ cleanup: [] }>()
       Starting commit <code :title="entry.revision || undefined">{{ entry.revision?.slice(0, 12) }}</code>
     </p>
     <UiButton
-      v-if="canCleanUpWorktree && !active && run.workspace && run.snapshot.task.worktree && !run.isolated"
+      v-if="canCleanUpWorktree && !active && run.workspace && !run.isolated"
       size="small"
       @click="emit('cleanup')"
     >
       Clean up worktree
     </UiButton>
-    <p v-if="!active && run.isolated && run.snapshot.task.worktree" class="muted text-muted">
+    <p v-if="!active && run.isolated" class="muted text-muted">
       Workspace and conversation are saved in a private VM disk. Resume this run to continue working.
     </p>
     <h3>Selected skills</h3>

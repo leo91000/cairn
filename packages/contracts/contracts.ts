@@ -10,13 +10,12 @@ export const serviceSpeed = z.string().max(40).regex(/^(?:[a-z][a-z0-9_-]*)?$/)
 export { MAIN_AGENT_ID } from './constants'
 export type { Agent } from './generated/typescript/Agent'
 export type { AgentAvatar } from './generated/typescript/AgentAvatar'
-export type { Mission as Task } from './generated/typescript/Mission'
 export type { PluginProject } from './generated/typescript/PluginProject'
 export type { PluginProjectPage } from './generated/typescript/PluginProjectPage'
-/** Who must act next on work that is blocked or needs input; the user when absent. */
+/** Who must act next on blocked work; the user when absent. */
 export type OutcomeWaitingOn = 'user' | 'requester' | 'external'
 export interface TaskOutcome {
-  status: 'completed' | 'blocked' | 'needs_input'
+  status: 'completed' | 'blocked'
   reason: string
   waitingOn?: OutcomeWaitingOn
   evidence: string[]

@@ -741,20 +741,8 @@ async fn preparing_runs_keep_their_original_cancellation_reservation() {
     .await
     .unwrap();
     common::relay_fixture::claimed(&service).await.unwrap();
-    let task = service
-        .task_fixture(
-            json!({
-                "name": "Preparing run",
-                "prompt": "Inspect the workspace.",
-                "worktree": false,
-                "agentId": MAIN_AGENT_ID,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run = service
-        .enqueue(text(&task, "id"), "manual", None)
+    let (_, run) = service
+        .chat_run_fixture(MAIN_AGENT_ID, None, "Inspect the workspace.")
         .await
         .unwrap();
     let run_id = text(&run, "id");

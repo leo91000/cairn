@@ -1,16 +1,10 @@
-//! Commands on an existing run are distinct from admitting a new mission run.
+//! Commands and wire views for conversation runs.
 use crate::*;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunInput {
     pub run_id: RunId,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RunMissionInput {
-    pub task_id: MissionId,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -108,9 +102,27 @@ pub struct RunRequester {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub chat_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional = nullable)]
-    pub task_id: Option<String>,
+}
+
+fn default_worktree() -> bool {
+    true
+}
+
+/// Frozen conversation prompt and identity metadata captured in a run snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunTaskSnapshot {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub agent_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default = "default_worktree")]
+    pub worktree: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -156,9 +168,6 @@ pub struct Run {
     #[serde(default)]
     pub snapshot: Option<RunSnapshot>,
     #[serde(default)]
-    #[ts(optional = nullable)]
-    pub source_task_id: Option<String>,
-    #[serde(default)]
     pub isolated: bool,
     #[serde(default)]
     pub workspaces: Vec<RunWorkspace>,
@@ -197,9 +206,6 @@ pub struct Run {
     #[ts(optional = nullable)]
     #[ts(type = "import('../../contracts').TaskOutcome | null")]
     pub outcome: Option<serde_json::Value>,
-    #[serde(default)]
-    #[ts(optional = nullable)]
-    pub dismissal: Option<crate::OutcomeDismissal>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub resources: Option<crate::ExecutionResources>,
@@ -284,7 +290,7 @@ pub struct ListRunsInput {
     )]
     pub status: Option<RunStatus>,
     #[serde(default)]
-    pub task_id: Option<MissionId>,
+    pub task_id: Option<ConversationId>,
 }
 
 fn run_limit() -> u16 {

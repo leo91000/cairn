@@ -2,7 +2,7 @@
 import type { RunStatus, TaskOutcome } from '../../../../packages/contracts/contracts'
 
 defineProps<{ outcome?: TaskOutcome | null, status: RunStatus }>()
-const labels = { completed: 'Completed', blocked: 'Blocked', needs_input: 'Your input needed' }
+const labels = { completed: 'Completed', blocked: 'Blocked' }
 </script>
 
 <template>

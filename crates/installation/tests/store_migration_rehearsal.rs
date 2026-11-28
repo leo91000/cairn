@@ -32,7 +32,7 @@ fn rehearsal_upgrades_only_the_copy_and_is_stable_on_reopen() {
         upgraded,
         json!({
             "versionBefore": 37,
-            "versionAfter": 38,
+            "versionAfter": 39,
             "quickCheck": "ok",
             "foreignKeyCheck": "ok",
         })
@@ -52,8 +52,8 @@ fn rehearsal_upgrades_only_the_copy_and_is_stable_on_reopen() {
     );
     drop(migrated);
     let reopened = store_migration::upgrade_copy(copy.path()).unwrap();
-    assert_eq!(reopened["versionBefore"], 38);
-    assert_eq!(reopened["versionAfter"], 38);
+    assert_eq!(reopened["versionBefore"], 39);
+    assert_eq!(reopened["versionAfter"], 39);
 }
 
 #[test]

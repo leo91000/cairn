@@ -8,14 +8,14 @@ import kotlinx.serialization.Serializable
 data class InstallationOverview(
     val agents: Long,
     val concurrency: Long,
-    val missions: Long,
+    val hookRules: Long,
     val projects: Long,
     val runsByStatus: RunsByStatus,
 ) {
     init {
         require(agents >= 0L)
         require(concurrency >= 0L)
-        require(missions >= 0L)
+        require(hookRules >= 0L)
         require(projects >= 0L)
     }
 }

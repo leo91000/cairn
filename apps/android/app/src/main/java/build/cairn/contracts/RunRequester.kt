@@ -9,8 +9,6 @@ data class RunRequester(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val chatId: String? = null,
     val runId: String,
-    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
-    val taskId: String? = null,
 ) {
     init {}
 }

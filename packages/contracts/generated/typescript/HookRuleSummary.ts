@@ -25,5 +25,9 @@ export interface HookRuleSummary {
   toolInstanceIds: Array<PluginInstanceId>
   blocks: Array<HookRuleBlock>
   allowed: HookRuleAllowed
+  /**
+   * Next scheduled occurrence for an active clock rule, in epoch milliseconds.
+   */
+  nextRun?: number | null
   updatedAt: number
 }

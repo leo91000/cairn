@@ -1,6 +1,6 @@
+use crate::common::ChatRunFixture;
 use crate::common::run_fixture::DbRunFixture;
 use crate::common::run_fixture::RunFixture;
-use common::MissionFixture;
 
 mod common;
 
@@ -65,18 +65,12 @@ impl App {
         body
     }
 
-    /// How the account set the mission run aside, as the Fil lists it.
-    async fn dismissal(&self, who: &RelayContext, run: &str) -> Value {
-        let runs = self.get(who, "/api/tasks/activity").await;
-        find(&runs, "id", run)["dismissal"].clone()
-    }
-
-    async fn dismiss(&self, task: &str, action: Value) -> (StatusCode, Value) {
+    async fn snooze(&self, who: &RelayContext, chat: &str, action: Value) -> (StatusCode, Value) {
         self.request(
-            &self.owner,
+            who,
             "POST",
-            "/api/dismissals",
-            json!({ "taskId": task, "action": action }),
+            "/api/snoozes",
+            json!({ "chatId": chat, "action": action }),
         )
         .await
     }
@@ -136,10 +130,6 @@ impl App {
 
 fn chat_read(id: &str, finished_at: &Value) -> Value {
     json!({ "target": { "kind": "chat", "chatId": id }, "finishedAt": finished_at })
-}
-
-fn mission_read(id: &str, finished_at: &Value) -> Value {
-    json!({ "target": { "kind": "mission", "taskId": id }, "finishedAt": finished_at })
 }
 
 fn find<'a>(list: &'a Value, key: &str, id: &str) -> &'a Value {
@@ -260,45 +250,13 @@ async fn errors_can_be_read_without_changing_their_status() {
 }
 
 #[tokio::test]
-async fn mission_runs_are_unread_until_their_mission_is_opened() {
-    let app = App::new().await;
-    let task = app
-        .service
-        .task_fixture(
-            json!({ "name": "Release notes", "prompt": "Write them", "agentId": MAIN_AGENT_ID }),
-            None,
-        )
-        .await
-        .unwrap();
-    let task_id = text(&task, "id");
-    app.get(&app.owner, "/api/tasks/activity").await;
-    let run = app
-        .finished_run(task_id, "schedule", RunStatus::Succeeded)
-        .await;
-
-    let runs = app.get(&app.owner, "/api/tasks/activity").await;
-    let item = find(&runs, "id", &run);
-    assert_eq!(item["unread"], true, "{item}");
-    assert_eq!(item["preview"], "Release ready. I shipped the 0.53 notes.");
-    // An account that starts reading afterwards does not inherit it.
-    let runs = app.get(&app.member, "/api/tasks/activity").await;
-    assert_eq!(find(&runs, "id", &run)["unread"], false);
-
-    let (status, _) = app
-        .read(&app.owner, &[mission_read(task_id, &item["finishedAt"])])
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    let runs = app.get(&app.owner, "/api/tasks/activity").await;
-    assert_eq!(find(&runs, "id", &run)["unread"], false);
-}
-
-#[tokio::test]
-async fn marking_as_read_accepts_only_conversations_and_missions() {
+async fn marking_as_read_accepts_only_conversations() {
     let app = App::new().await;
     let at = json!(now() - 1000);
     for items in [
         json!([]),
         json!([{ "target": { "kind": "agent", "agentId": id() }, "finishedAt": at }]),
+        json!([{ "target": { "kind": "mission", "taskId": id() }, "finishedAt": at }]),
         json!([chat_read("not-a-uuid", &at)]),
         json!([format!("chat:{}", id())]),
         json!([chat_read(&id(), &json!(0))]),
@@ -312,10 +270,7 @@ async fn marking_as_read_accepts_only_conversations_and_missions() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{items}: {body}");
     }
     let (status, body) = app
-        .read(
-            &app.member,
-            &[chat_read(&id(), &at), mission_read(&id(), &at)],
-        )
+        .read(&app.member, &[chat_read(&id(), &at), chat_read(&id(), &at)])
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["read"], 2);
@@ -358,43 +313,6 @@ async fn reading_an_observed_completion_does_not_consume_newer_work() {
         .await;
     let listed = app.get(&app.owner, "/api/chats").await;
     assert_eq!(find(&listed, "id", chat_id)["unread"], false);
-}
-
-#[tokio::test]
-async fn opening_an_old_mission_run_leaves_the_latest_result_unread() {
-    let app = App::new().await;
-    let task = app
-        .service
-        .task_fixture(
-            json!({
-                "name": "Release notes",
-                "prompt": "Write them",
-                "agentId": MAIN_AGENT_ID,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let task_id = text(&task, "id");
-    app.get(&app.owner, "/api/tasks/activity").await;
-    let first = app
-        .finished_run(task_id, "schedule", RunStatus::Succeeded)
-        .await;
-    let old = app.service.store.run(&first).await.unwrap();
-    let latest = app
-        .finished_run(task_id, "schedule", RunStatus::Succeeded)
-        .await;
-    let (status, _) = app
-        .request(
-            &app.owner,
-            "POST",
-            "/api/reads",
-            json!({ "items": [mission_read(task_id, &old["finishedAt"])] }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    let runs = app.get(&app.owner, "/api/tasks/activity").await;
-    assert_eq!(find(&runs, "id", &latest)["unread"], true);
 }
 
 #[tokio::test]
@@ -451,100 +369,196 @@ async fn the_live_conversation_list_follows_each_subscribers_reads() {
 }
 
 #[tokio::test]
-async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_again() {
+async fn conversations_can_be_snoozed_restored_and_cleared_by_mark_read() {
     let app = App::new().await;
-    let task = app
-        .service
-        .task_fixture(
-            json!({ "name": "Device proof", "prompt": "Prove it", "agentId": MAIN_AGENT_ID }),
-            None,
-        )
-        .await
-        .unwrap();
-    let task_id = text(&task, "id");
-    let blocked =
-        |status: &str| json!({ "outcome": { "status": status, "reason": "CI is the parent's." } });
-    let run = app.finished_run(task_id, "mcp", RunStatus::Succeeded).await;
+    app.get(&app.owner, "/api/chats").await;
+    app.get(&app.member, "/api/chats").await;
+    let chat = app.finished_chat().await;
+    let chat_id = text(&chat, "id");
+    let run_id = app.service.conversation_boundary(chat_id).await.unwrap()["runId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let stored = app
         .service
         .store
-        .change_run_fixture(&run, blocked("blocked"))
+        .change_run_fixture(
+            &run_id,
+            json!({ "outcome": { "status": "blocked", "reason": "Waiting on deployment approval." } }),
+        )
         .await
         .unwrap();
     let finished_at = stored["finishedAt"].as_i64().unwrap();
-    assert!(app.dismissal(&app.owner, &run).await.is_null());
 
-    let (status, body) = app
-        .dismiss(
-            task_id,
-            json!({ "kind": "dismiss", "finishedAt": finished_at }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        app.dismissal(&app.owner, &run).await,
-        json!({ "until": null })
-    );
-    // Each member sets work aside on their own.
-    assert!(app.dismissal(&app.member, &run).await.is_null());
+    let listed = app.get(&app.owner, "/api/chats").await;
+    let item = find(&listed, "id", chat_id);
+    assert_eq!(item["outcome"]["status"], "blocked");
+    assert!(item["snoozedUntil"].is_null());
+    assert_eq!(item["unread"], true);
 
-    // Input the agent asked for can only be snoozed.
-    app.service
-        .store
-        .change_run_fixture(&run, blocked("needs_input"))
-        .await
-        .unwrap();
-    assert!(app.dismissal(&app.owner, &run).await.is_null());
     let until = now() + 60_000;
-    let (_, snoozed) = app
-        .dismiss(
-            task_id,
+    let (status, snoozed) = app
+        .snooze(
+            &app.owner,
+            chat_id,
             json!({ "kind": "snooze", "finishedAt": finished_at, "until": until }),
         )
         .await;
-    assert_eq!(
-        snoozed,
-        json!({ "taskId": task_id, "dismissal": { "until": until } })
-    );
-    assert_eq!(
-        app.dismissal(&app.owner, &run).await,
-        json!({ "until": until })
-    );
+    assert_eq!(status, StatusCode::OK, "{snoozed}");
+    assert_eq!(snoozed, json!({ "chatId": chat_id, "snoozedUntil": until }));
 
-    let (status, restored) = app.dismiss(task_id, json!({ "kind": "restore" })).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(restored, json!({ "taskId": task_id, "dismissal": null }));
-    assert!(app.dismissal(&app.owner, &run).await.is_null());
+    // Owner sees snoozedUntil and unread=false while snooze is active; member is unaffected.
+    let owner_list = app.get(&app.owner, "/api/chats").await;
+    let owner_item = find(&owner_list, "id", chat_id);
+    assert_eq!(owner_item["snoozedUntil"], until);
+    assert_eq!(owner_item["unread"], false);
+    let member_list = app.get(&app.member, "/api/chats").await;
+    assert!(find(&member_list, "id", chat_id)["snoozedUntil"].is_null());
+    assert_eq!(find(&member_list, "id", chat_id)["unread"], true);
 
-    // A later finish asks again.
-    app.dismiss(
-        task_id,
-        json!({ "kind": "dismiss", "finishedAt": finished_at }),
+    // Restore brings it back to For you.
+    let (status, restored) = app
+        .snooze(&app.owner, chat_id, json!({ "kind": "restore" }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored, json!({ "chatId": chat_id, "snoozedUntil": null }));
+    let owner_list = app.get(&app.owner, "/api/chats").await;
+    assert!(find(&owner_list, "id", chat_id)["snoozedUntil"].is_null());
+    assert_eq!(find(&owner_list, "id", chat_id)["unread"], true);
+
+    // Mark read clears any active snooze ("écarter devient marquer lu").
+    app.snooze(
+        &app.owner,
+        chat_id,
+        json!({ "kind": "snooze", "finishedAt": finished_at, "until": until }),
     )
     .await;
-    let next = app.finished_run(task_id, "mcp", RunStatus::Succeeded).await;
-    app.service
-        .store
-        .change_run_fixture(&next, blocked("blocked"))
-        .await
-        .unwrap();
-    let runs = app.get(&app.owner, "/api/tasks/activity").await;
-    assert!(find(&runs, "id", &next)["dismissal"].is_null());
+    let (status, _) = app
+        .read(&app.owner, &[chat_read(chat_id, &json!(finished_at))])
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let owner_list = app.get(&app.owner, "/api/chats").await;
+    let owner_item = find(&owner_list, "id", chat_id);
+    assert!(owner_item["snoozedUntil"].is_null());
+    assert_eq!(owner_item["unread"], false);
 
+    // Validation checks on /api/snoozes.
     for action in [
-        json!({ "kind": "dismiss" }),
-        json!({ "kind": "dismiss", "finishedAt": 0 }),
-        json!({ "kind": "hide", "finishedAt": finished_at }),
+        json!({ "kind": "snooze" }),
+        json!({ "kind": "snooze", "finishedAt": 0, "until": until }),
+        json!({ "kind": "dismiss", "finishedAt": finished_at }),
         json!({ "kind": "snooze", "finishedAt": finished_at, "until": now() - 1 }),
         json!({ "kind": "snooze", "finishedAt": finished_at, "until": now() + 31 * 24 * 60 * 60 * 1000 }),
     ] {
-        let (status, body) = app.dismiss(task_id, action.clone()).await;
+        let (status, body) = app.snooze(&app.owner, chat_id, action.clone()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{action}: {body}");
     }
     let (status, body) = app
-        .dismiss("not-a-task", json!({ "kind": "restore" }))
+        .snooze(&app.owner, "not-a-chat", json!({ "kind": "restore" }))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+#[tokio::test]
+async fn rule_started_conversations_stay_quiet_unless_blocked_or_a_person_writes() {
+    let app = App::new().await;
+    app.get(&app.owner, "/api/chats").await;
+    let chat = app.finished_chat().await;
+    let chat_id = text(&chat, "id").to_owned();
+    let rule_id = id();
+
+    // Attach chat as started by a clock rule without human participation.
+    let chat_id_for_db = chat_id.clone();
+    let rule_id_for_db = rule_id.clone();
+    app.service
+        .store
+        .transaction(move |db| {
+            db.0.execute(
+                "INSERT INTO hook_rules(id,creator_account_id,creator_access_id,creator_owner,version,created_at,updated_at) \
+                 VALUES(?1,'owner-account','owner-access',1,1,?2,?2)",
+                rusqlite::params![rule_id_for_db, now()],
+            )?;
+            db.0.execute(
+                "INSERT INTO hook_rule_conversations(chat_id,creator_account_id,rule_id,agent_id,origin,created_at) \
+                 VALUES(?1,'owner-account',?2,?3,?4,?5)",
+                rusqlite::params![
+                    chat_id_for_db,
+                    rule_id_for_db,
+                    MAIN_AGENT_ID,
+                    json!({ "ruleName": "Morning digest", "schedule": true }).to_string(),
+                    now(),
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    // Quiet on ordinary completion.
+    let listed = app.get(&app.owner, "/api/chats").await;
+    let item = find(&listed, "id", &chat_id);
+    assert_eq!(item["originRule"]["ruleId"], rule_id);
+    assert_eq!(item["originRule"]["ruleName"], "Morning digest");
+    assert_eq!(item["originRule"]["schedule"], true);
+    assert_eq!(item["personParticipated"], false);
+    assert_eq!(
+        item["unread"], false,
+        "quiet rule chat must not be unread: {item}"
+    );
+
+    // Surfaces when blocked waiting on user.
+    let run_id = app.service.conversation_boundary(&chat_id).await.unwrap()["runId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    app.service
+        .store
+        .change_run_fixture(
+            &run_id,
+            json!({ "outcome": { "status": "blocked", "reason": "Needs review." } }),
+        )
+        .await
+        .unwrap();
+    let listed = app.get(&app.owner, "/api/chats").await;
+    assert_eq!(find(&listed, "id", &chat_id)["unread"], true);
+
+    // Waiting on external does NOT surface.
+    app.service
+        .store
+        .change_run_fixture(
+            &run_id,
+            json!({ "outcome": { "status": "blocked", "reason": "CI running", "waitingOn": "external" } }),
+        )
+        .await
+        .unwrap();
+    let listed = app.get(&app.owner, "/api/chats").await;
+    assert_eq!(find(&listed, "id", &chat_id)["unread"], false);
+
+    // Once a person participates, even an ordinary completion becomes unread.
+    app.service
+        .store
+        .change_run_fixture(
+            &run_id,
+            json!({ "outcome": { "status": "completed", "reason": "Done." } }),
+        )
+        .await
+        .unwrap();
+    let chat_id_for_writer = chat_id.clone();
+    app.service
+        .store
+        .transaction(move |db| {
+            db.0.execute(
+                "INSERT INTO conversation_writers(chat_id,kind,account_id,updated_at) VALUES(?1,'person','owner-account',?2)",
+                rusqlite::params![chat_id_for_writer, now()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let listed = app.get(&app.owner, "/api/chats").await;
+    let item = find(&listed, "id", &chat_id);
+    assert_eq!(item["personParticipated"], true);
+    assert_eq!(item["unread"], true);
 }
 
 async fn tool(app: &Router, endpoint: &str, bearer: &str, name: &str, input: Value) -> Value {
@@ -581,14 +595,10 @@ async fn installation_token(s: &Arc<Service>) -> String {
         )
         .await
         .unwrap();
-    let task = s
-        .task_fixture(
-            json!({ "name": "Caller", "prompt": "Manage", "agentId": agent["id"] }),
-            None,
-        )
+    let (_chat, run) = s
+        .chat_run_fixture(text(&agent, "id"), None, "Manage")
         .await
         .unwrap();
-    let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
     s.store
         .change_run(
             text(&run, "id"),
@@ -664,81 +674,58 @@ async fn personal_state_follows_the_authorizing_account_and_never_an_execution()
 }
 
 #[tokio::test]
-async fn mission_outcomes_set_aside_on_a_tool_stay_with_its_account() {
+async fn conversation_snoozes_on_a_tool_stay_with_its_account() {
     let app = App::new().await;
     let execution = installation_token(&app.service).await;
     let public = common::relay_fixture::grant(&app.service, &["read", "manage"]).await;
-    let task = app
-        .service
-        .task_fixture(
-            json!({ "name": "Device proof", "prompt": "Prove it", "agentId": MAIN_AGENT_ID }),
-            None,
-        )
-        .await
-        .unwrap();
-    let task_id = text(&task, "id");
-    for who in [&app.owner, &app.member] {
-        app.get(who, "/api/tasks/activity").await;
-    }
-    let run = app.finished_run(task_id, "mcp", RunStatus::Succeeded).await;
-    let stored = app
-        .service
-        .store
-        .change_run_fixture(
-            &run,
-            json!({ "outcome": { "status": "blocked", "reason": "Waiting for review." } }),
-        )
-        .await
-        .unwrap();
-    let dismiss = json!({
-        "taskId": task_id,
-        "action": { "kind": "dismiss", "finishedAt": stored["finishedAt"] },
+    app.get(&app.owner, "/api/chats").await;
+    app.get(&app.member, "/api/chats").await;
+    let chat = app.finished_chat().await;
+    let chat_id = text(&chat, "id");
+    let finished_at =
+        find(&app.get(&app.owner, "/api/chats").await, "id", chat_id)["finishedAt"].clone();
+    let until = now() + 60_000;
+    let snooze = json!({
+        "chatId": chat_id,
+        "action": { "kind": "snooze", "finishedAt": finished_at, "until": until },
     });
 
     let refused = tool(
         &app.router,
         "/mcp-installation",
         &execution,
-        "set_outcome_aside",
-        dismiss.clone(),
+        "snooze_chat",
+        snooze.clone(),
     )
     .await;
     assert_eq!(refused["result"]["isError"], true, "{refused}");
     assert!(refused.to_string().contains("no delegation"), "{refused}");
-    let set = tool(&app.router, "/mcp", &public, "set_outcome_aside", dismiss).await;
+    let set = tool(&app.router, "/mcp", &public, "snooze_chat", snooze).await;
     assert_eq!(
         result(&set),
-        &json!({ "taskId": task_id, "dismissal": { "until": null } })
+        &json!({ "chatId": chat_id, "snoozedUntil": until })
     );
 
-    // Each surface lists the latest run with its own caller's state; executions get none.
+    let owner = app.get(&app.owner, "/api/chats").await;
+    assert_eq!(find(&owner, "id", chat_id)["snoozedUntil"], until);
+    let member = app.get(&app.member, "/api/chats").await;
+    assert!(find(&member, "id", chat_id)["snoozedUntil"].is_null());
+
+    let page = json!({ "view": "active", "limit": 100, "offset": 0 });
+    let public_chats = tool(&app.router, "/mcp", &public, "list_chats", page.clone()).await;
     assert_eq!(
-        app.dismissal(&app.owner, &run).await,
-        json!({ "until": null })
+        find(&result(&public_chats)["chats"], "id", chat_id)["snoozedUntil"],
+        until
     );
-    assert!(app.dismissal(&app.member, &run).await.is_null());
-    let activity = tool(
-        &app.router,
-        "/mcp",
-        &public,
-        "list_task_activity",
-        json!({}),
-    )
-    .await;
-    let listed = find(result(&activity), "id", &run);
-    assert_eq!(listed["dismissal"], json!({ "until": null }));
-    assert_eq!(listed["unread"], true);
-    let activity = tool(
+    let exec_chats = tool(
         &app.router,
         "/mcp-installation",
         &execution,
-        "list_task_activity",
-        json!({}),
+        "list_chats",
+        page,
     )
     .await;
-    let listed = find(result(&activity), "id", &run);
-    assert!(listed["dismissal"].is_null(), "{listed}");
-    assert_eq!(listed["unread"], false);
+    assert!(find(&result(&exec_chats)["chats"], "id", chat_id)["snoozedUntil"].is_null());
 }
 
 #[tokio::test]

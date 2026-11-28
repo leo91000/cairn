@@ -37,7 +37,8 @@ struct Pool {
 const READERS: usize = 4;
 
 const PRE_COMPACTION_DATABASE_VERSION: i64 = 37;
-pub(crate) const DATABASE_VERSION: i64 = 38;
+const PRE_MISSION_SUNSET_DATABASE_VERSION: i64 = crate::migrations::PRE_MISSION_SUNSET_VERSION;
+pub(crate) const DATABASE_VERSION: i64 = crate::migrations::TARGET_VERSION;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -174,7 +175,7 @@ fn upgrade_compact_schema(writer: &mut Connection, directory: &Path) -> Result<(
          DROP TABLE IF EXISTS remote_deletions;",
     )?;
     Db(&tx).remove("manager-staging-retirements", "backend-conversion")?;
-    tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
+    tx.pragma_update(None, "user_version", PRE_MISSION_SUNSET_DATABASE_VERSION)?;
     tx.commit()?;
     Ok(())
 }
@@ -186,7 +187,14 @@ impl Store {
         let fresh = !file.exists();
         let mut writer = Connection::open(&file)?;
         let version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !fresh && !matches!(version, PRE_COMPACTION_DATABASE_VERSION | DATABASE_VERSION) {
+        if !fresh
+            && !matches!(
+                version,
+                PRE_COMPACTION_DATABASE_VERSION
+                    | PRE_MISSION_SUNSET_DATABASE_VERSION
+                    | DATABASE_VERSION
+            )
+        {
             return Err(Error::bad(
                 "Unsupported installation database version; use a compatible release or an explicit migration.",
             ));
@@ -198,6 +206,9 @@ impl Store {
         writer.execute_batch("PRAGMA foreign_keys=ON;")?;
         if version == PRE_COMPACTION_DATABASE_VERSION {
             upgrade_compact_schema(&mut writer, directory)?;
+            crate::migrations::upgrade_to_v39(&mut writer)?;
+        } else if version == PRE_MISSION_SUNSET_DATABASE_VERSION {
+            crate::migrations::upgrade_to_v39(&mut writer)?;
         } else if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
@@ -235,7 +246,6 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             crate::plugins::registry::initialize(&Db(&tx))?;
             tx.execute_batch(crate::agent_grants::SCHEMA)?;
             tx.execute_batch(crate::plugins::grants::SCHEMA)?;
-            tx.execute_batch(crate::missions::SCHEMA)?;
             tx.execute_batch(crate::rules::SCHEMA)?;
             tx.execute_batch(crate::rules::engine::SCHEMA)?;
             tx.execute_batch(crate::conversation_writers::SCHEMA)?;

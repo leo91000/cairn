@@ -1,7 +1,7 @@
 use cairn_contracts::EventKind;
 use common::AgentFixture;
+use common::ChatRunFixture;
 use common::McpFixture;
-use common::MissionFixture;
 
 mod common;
 
@@ -47,18 +47,13 @@ async fn served(root: &TempDir) -> (Arc<Service>, String, JoinHandle<()>) {
     (s, origin, server)
 }
 
-/// Enqueues a manual run of a new task of the main agent.
-async fn manual_run(s: &Service, name: &str, prompt: &str) -> Value {
-    let task = json!({
-        "name": name,
-        "agentId": MAIN_AGENT_ID,
-        "prompt": prompt,
-        "worktree": false,
-    });
-    let task = s.task_fixture(task, None).await.unwrap();
-    s.enqueue(task["id"].as_str().unwrap(), "manual", None)
+/// Enqueues a conversation run of the main agent.
+async fn manual_run(s: &Service, _name: &str, prompt: &str) -> Value {
+    let (_chat, run) = s
+        .chat_run_fixture(MAIN_AGENT_ID, None, prompt)
         .await
-        .unwrap()
+        .unwrap();
+    run
 }
 
 fn tool_call(name: &str, arguments: &Value) -> Value {
@@ -747,20 +742,8 @@ async fn gateway_catalog_reuses_validated_tools_without_waiting_for_upstream_or_
         )
         .await
         .unwrap();
-    let task = s
-        .task_fixture(
-            json!({
-                "name": "Restricted discovery",
-                "agentId": agent["id"],
-                "prompt": "Fixture only",
-                "worktree": false,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let restricted = s
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+    let (_chat, restricted) = s
+        .chat_run_fixture(agent["id"].as_str().unwrap(), None, "Fixture only")
         .await
         .unwrap();
     let broad = manual_run(&s, "Broad discovery", "Fixture only").await;
@@ -1160,20 +1143,8 @@ async fn malformed_advertisement_scope(restricted: bool) {
     } else {
         json!(MAIN_AGENT_ID)
     };
-    let task = s
-        .task_fixture(
-            json!({
-                "name": "Malformed discovery",
-                "agentId": agent_id,
-                "prompt": "Fixture only",
-                "worktree": false,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run = s
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+    let (_chat, run) = s
+        .chat_run_fixture(agent_id.as_str().unwrap(), None, "Fixture only")
         .await
         .unwrap();
     let run_id = run["id"].as_str().unwrap();
@@ -1415,7 +1386,7 @@ for (const version of ['2026-07-28', '2025-11-25', '2025-06-18']) {
     if (catalog.tools.map(t => t.name).join(',') !== 'search,execute') throw Error('invalid compact tools');
     const agents = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.list_agents({});'} });
     if (agents.isError || agents.structuredContent.result.agents.length !== 1) throw Error('invalid result ' + JSON.stringify(agents));
-    const denied = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.create_task(input);', input: { name: 'Denied', prompt: 'No' }} });
+    const denied = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.create_chat(input);', input: {}} });
     if (!denied.isError || !denied._meta['mcp/www_authenticate']) throw Error('scope bypass');
     await client.close();
 }

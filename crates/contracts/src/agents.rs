@@ -387,7 +387,6 @@ pub struct MergeAgentsInput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentTransfers {
-    pub tasks: u32,
     pub chats: u32,
     pub runs: u32,
 }

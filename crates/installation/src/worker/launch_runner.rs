@@ -87,8 +87,7 @@ impl Execution<'_> {
             let run = crate::plugins::agents::with_instructions(self.s, self.run).await;
             return Ok(run_output::prompt(&run, false));
         }
-        let mut prompt =
-            crate::waits::mission_prompt(self.run).unwrap_or_else(|| RESUME_PROMPT.to_owned());
+        let mut prompt = RESUME_PROMPT.to_owned();
         let Some(restored) = self.run["restoredAt"].as_i64() else {
             return Ok(prompt);
         };
@@ -904,42 +903,37 @@ impl Execution<'_> {
         // cleanup retirement must not replace its recorded failure.
         let report_expiration =
             exit.timed_out || (retained_completion.is_none() && !saved.native_cleanup_failure());
-        s.store.transaction(move |db| {
-            let current = db.run(&id)?.ok_or_else(|| Error::not_found("Run not found"))?;
-            let expired = report_expiration && deadline.is_some_and(|deadline| now() >= deadline);
-            let status = if !current["cancelRequestedAt"].is_null() {
-                RunStatus::Cancelled
-            } else if expired {
-                let message = "Run exceeded its time limit.";
-                patch.error = Some(Some(message.into()));
-                patch.summary = Some(message.into());
-                patch.wakeup = Some(None);
-                RunStatus::Failed
-            } else if status == RunStatus::Succeeded && current["trigger"] != "chat" && current["wakeup"].is_object() {
-                if !has_session {
-                    return Err(Error::conflict("Cannot wait without a saved agent session. Working files were preserved."));
+        s.store
+            .transaction(move |db| {
+                let current = db
+                    .run(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                let expired =
+                    report_expiration && deadline.is_some_and(|deadline| now() >= deadline);
+                let status = if !current["cancelRequestedAt"].is_null() {
+                    RunStatus::Cancelled
+                } else if expired {
+                    let message = "Run exceeded its time limit.";
+                    patch.error = Some(Some(message.into()));
+                    patch.summary = Some(message.into());
+                    patch.wakeup = Some(None);
+                    RunStatus::Failed
+                } else {
+                    status
+                };
+                patch.status = Some(status);
+                if status == RunStatus::Succeeded {
+                    crate::chats::keep_reply_after_compaction(&current, &mut patch)?;
                 }
-                RunStatus::Waiting
-            } else { status };
-            patch.status = Some(status);
-            if status == RunStatus::Succeeded {
-                crate::chats::keep_reply_after_compaction(&current, &mut patch)?;
-            }
-            if status == RunStatus::Waiting {
-                patch.finished_at = Some(None);
-                patch.resume_available = Some(true);
-                patch.boundary.as_mut().unwrap()["outcome"] = Value::Null;
-            } else if current["trigger"] != "chat" {
-                patch.wakeup = Some(None);
-            }
-            db.change_run(&id, patch)?;
-            let details = if status == RunStatus::Failed && expired {
-                Some(json!({ "error": { "message": "Run exceeded its time limit." } }))
-            } else {
-                details.filter(|_| status == RunStatus::Failed)
-            };
-            db.event(&id, &EventKind::Status, status.as_str(), details.as_ref())
-        }).await
+                db.change_run(&id, patch)?;
+                let details = if status == RunStatus::Failed && expired {
+                    Some(json!({ "error": { "message": "Run exceeded its time limit." } }))
+                } else {
+                    details.filter(|_| status == RunStatus::Failed)
+                };
+                db.event(&id, &EventKind::Status, status.as_str(), details.as_ref())
+            })
+            .await
     }
 
     pub(super) fn failure_message(
@@ -966,13 +960,8 @@ impl Execution<'_> {
         if !saved.last_error().is_empty() {
             return saved.last_error().to_owned();
         }
-        // A conversation shows what continues it: its returned message or its held queue
-        // (ADR-0091). A mission is resumed.
-        let next = if self.run["trigger"] == "chat" {
-            ""
-        } else {
-            " Resume the conversation to continue."
-        };
+        // A conversation shows what continues it: its returned message or its held queue (ADR-0091).
+        let next = "";
         match exit.code {
             Some(crate::runner::CONTROLLER_FAILED) => {
                 format!(

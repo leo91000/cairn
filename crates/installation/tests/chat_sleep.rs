@@ -1,5 +1,4 @@
 use crate::common::run_fixture::DbRunFixture;
-use common::MissionFixture;
 use common::StoreAgentFixture;
 use common::run_fixture::*;
 
@@ -487,7 +486,7 @@ async fn queued_follow_ups_are_not_held_by_a_wakeup_that_cannot_resume() {
 }
 
 #[tokio::test]
-async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions() {
+async fn delay_rejects_invalid_inputs_and_pending_steering() {
     let f = Fixture::new().await;
     for input in [
         json!({ "conditions": [{ "type": "delay", "seconds": 0 }], "reason": "CI" }),
@@ -518,55 +517,6 @@ async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions(
         )
         .await
         .is_err()
-    );
-    let task = f
-        .service
-        .task_fixture(
-            json!({
-                "name": "Scheduled task",
-                "prompt": "Do work",
-                "agentId": cairn_installation::config::MAIN_AGENT_ID,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run = f
-        .service
-        .enqueue(text(&task, "id"), "manual", None)
-        .await
-        .unwrap();
-    f.service
-        .store
-        .change_run(
-            text(&run, "id"),
-            cairn_installation::runs::RunChanges {
-                status: Some(cairn_contracts::RunStatus::Running),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let config = f
-        .service
-        .mcps
-        .run_configuration(&f.service, &run)
-        .await
-        .unwrap();
-    let token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN");
-    let wait = wait_for::schedule(
-        &f.service,
-        token,
-        &json!({
-            "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "CI",
-        }),
-    )
-    .await
-    .unwrap();
-    assert_eq!(wait["deferred"], true);
-    assert_eq!(
-        f.service.store.run(text(&run, "id")).await.unwrap()["wakeup"],
-        wait["wakeup"]
     );
 }
 

@@ -17,13 +17,4 @@ sealed interface ReadTarget {
             java.util.UUID.fromString(chatId)
         }
     }
-
-    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
-    @Serializable
-    @SerialName("mission")
-    data class B(val taskId: String) : ReadTarget {
-        init {
-            java.util.UUID.fromString(taskId)
-        }
-    }
 }

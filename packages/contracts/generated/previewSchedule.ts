@@ -3,5 +3,5 @@ import type { SchedulePreviewInput } from './typescript/SchedulePreviewInput'
 import type { SchedulePreviewOutput } from './typescript/SchedulePreviewOutput'
 
 export function previewSchedule(request: <T>(path: string, options: RequestInit) => Promise<T>, input: SchedulePreviewInput): Promise<SchedulePreviewOutput> {
-  return request<SchedulePreviewOutput>(`/schedule/preview`, { method: 'POST', body: JSON.stringify(input) })
+  return request<SchedulePreviewOutput>(`/hook-rules/schedule/preview`, { method: 'POST', body: JSON.stringify(input) })
 }

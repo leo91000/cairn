@@ -2,14 +2,12 @@ import type {
   Agent,
   Project,
   Skill,
-  Task,
 } from '../../../packages/contracts/contracts'
 import type { McpView } from '../../../packages/contracts/mcp'
 import { reactive, watch } from 'vue'
 import { getInstallationOverview } from '../../../packages/contracts/generated/getInstallationOverview'
 import { listAgents } from '../../../packages/contracts/generated/listAgents'
 import { listMcps } from '../../../packages/contracts/generated/listMcps'
-import { listMissions } from '../../../packages/contracts/generated/listMissions'
 import { listProjects } from '../../../packages/contracts/generated/listProjects'
 import { listSkills } from '../../../packages/contracts/generated/listSkills'
 import { listUsableAgents } from '../../../packages/contracts/generated/listUsableAgents'
@@ -48,7 +46,6 @@ export const state = reactive({
   // Agents a member may use; null for the owner, who uses every agent (ADR-0075).
   usableAgents: null as string[] | null,
   projects: [] as Project[],
-  tasks: [] as Task[],
   skills: [] as Skill[],
   mcps: [] as McpView[],
   // Whether the lists above come from a successful load: until then nothing is reported gone.
@@ -492,13 +489,12 @@ export async function refreshMcps() {
 
 export async function refresh() {
   const scope = connectionScope()
-  let lists: [Agent[], Project[], Task[], Skill[], void, string[] | null]
+  let lists: [Agent[], Project[], Skill[], void, string[] | null]
   try {
     const owner = state.installationRole === 'owner'
     lists = await Promise.all([
       listAgents(api, {}).then(output => output.agents),
       listProjects(api, {}).then(output => output.projects),
-      listMissions(api, {}).then(output => output.tasks),
       listSkills(api, {}),
       refreshMcps(),
       // An older installation without the route offers every agent: the server decides.
@@ -520,11 +516,10 @@ export async function refresh() {
 
   if (connectionScope() !== scope || !state.authenticated || state.signingOut)
     return
-  const [agents, projects, tasks, skills, _mcps, usableAgents] = lists
+  const [agents, projects, skills, _mcps, usableAgents] = lists
   Object.assign(state, {
     agents,
     projects,
-    tasks,
     skills,
     usableAgents,
     workspaceLoaded: true,

@@ -1,7 +1,7 @@
 use crate::common::run_fixture::DbRunFixture;
 use crate::common::run_fixture::RunFixture;
 use common::AgentFixture;
-use common::MissionFixture;
+use common::ChatRunFixture;
 use common::ProjectFixture;
 use common::StoreAgentFixture;
 
@@ -48,16 +48,13 @@ async fn fixture() -> (TempDir, Arc<Service>, Vec<Value>) {
     (root, s, projects)
 }
 
-/// Enqueues a manual run of `agent` on `project`.
+/// Enqueues a conversation run of `agent` on `project`.
 async fn run(s: &Service, project: Value, agent: &str) -> Value {
-    let task = json!({
-        "name": "Probe",
-        "agentId": agent,
-        "projectId": project,
-        "prompt": "Hello",
-    });
-    let task = s.task_fixture(task, None).await.unwrap();
-    s.enqueue(text(&task, "id"), "manual", None).await.unwrap()
+    let (_chat, run) = s
+        .chat_run_fixture(agent, project.as_str(), "Hello")
+        .await
+        .unwrap();
+    run
 }
 
 async fn patch_run(s: &Service, run: &Value, patch: Value) {

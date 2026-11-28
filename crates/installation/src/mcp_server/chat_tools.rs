@@ -54,6 +54,10 @@ fn summary(chat: &Value) -> Result<Value> {
         "canAskSideQuestion",
         "sideQuestionReason",
         "sideQuestionUnavailable",
+        "originRule",
+        "personParticipated",
+        "outcome",
+        "snoozedUntil",
         "unread",
         "preview",
     ] {

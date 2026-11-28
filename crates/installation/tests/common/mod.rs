@@ -285,10 +285,37 @@ pub mod agent_fixture;
 #[allow(unused_imports)]
 pub use agent_fixture::{AgentFixture, StoreAgentFixture};
 
-pub mod mission_fixture;
+/// Fixture helper for tests of other domains that need an admitted conversation run.
+pub trait ChatRunFixture {
+    fn chat_run_fixture(
+        &self,
+        agent_id: &str,
+        project_id: Option<&str>,
+        prompt: &str,
+    ) -> impl std::future::Future<Output = cairn_installation::error::Result<(Value, Value)>>;
+}
 
-#[allow(unused_imports)]
-pub use mission_fixture::{MissionFixture, StoreMissionFixture};
+impl ChatRunFixture for Service {
+    async fn chat_run_fixture(
+        &self,
+        agent_id: &str,
+        project_id: Option<&str>,
+        prompt: &str,
+    ) -> cairn_installation::error::Result<(Value, Value)> {
+        let mut create = serde_json::json!({ "agentId": agent_id });
+        if let Some(project_id) = project_id {
+            create["projectId"] = project_id.into();
+        }
+        let chat = self.chat_create(create).await?;
+        let chat_id = chat["id"].as_str().unwrap().to_owned();
+        self.chat_send(&chat_id, serde_json::json!({ "text": prompt }))
+            .await?;
+        self.chat_tick(&std::collections::HashSet::new()).await?;
+        let detail = self.chat_detail(&chat_id).await?;
+        let run = self.store.run(detail["runId"].as_str().unwrap()).await?;
+        Ok((detail, run))
+    }
+}
 
 /// JSON is fixture input only; production MCP writers accept the current Rust command.
 pub trait McpFixture {

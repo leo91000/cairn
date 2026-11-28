@@ -1,8 +1,6 @@
-use common::MissionFixture;
-
 mod common;
 
-use common::RelayedInstallation;
+use common::{RelayedInstallation, chat_run_fixture};
 use reqwest::StatusCode;
 use serde_json::Value;
 use std::time::Duration;
@@ -87,28 +85,10 @@ async fn conversation_updates_arrive_through_the_real_relay() {
 
 #[tokio::test]
 async fn relay_disconnect_replays_activity_and_does_not_stop_the_run() {
-    use cairn_installation::config::MAIN_AGENT_ID;
-    use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
-    let task = relay
-        .installation
-        .task_fixture(
-            json!({
-                "name": "Relay recovery",
-                "prompt": "Continue independently",
-                "agentId": MAIN_AGENT_ID,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run = relay
-        .installation
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
-        .await
-        .unwrap();
+    let (_, run) = chat_run_fixture(&relay.installation, "Continue independently").await;
     let run_id = run["id"].as_str().unwrap().to_owned();
     let active = run_id.clone();
     relay

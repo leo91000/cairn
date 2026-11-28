@@ -387,6 +387,16 @@ impl Facts for EngineFacts {
             }))
             .map_err(|error| error.message)
     }
+
+    fn rule_conversation_working(&self) -> std::result::Result<bool, String> {
+        let rule = self.rule.clone();
+        self.runtime
+            .block_on(
+                self.store
+                    .read(move |db| conversations::rule_has_working_conversation(db, &rule)),
+            )
+            .map_err(|error| error.message)
+    }
 }
 
 /// Stops a triggering whose rule must not act anymore, in the transaction that would
@@ -554,9 +564,9 @@ pub(super) async fn step(s: &Arc<Service>, id: &str) -> Result<Step> {
     // again after each wait. The cursor stays where it is until it does.
     if !row.creator_owner {
         let verified = if triggering.verify {
-            s.missions.verify_membership_since(s, resumed).await
+            s.memberships.verify_membership_since(s, resumed).await
         } else {
-            s.missions
+            s.memberships
                 .verify_membership(s, std::time::Duration::from_secs(60))
                 .await
         };

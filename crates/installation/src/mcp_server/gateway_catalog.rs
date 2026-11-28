@@ -556,10 +556,7 @@ async fn discover(s: &Arc<Service>, access: &Access) -> Result<Arc<Vec<Value>>> 
 mod tests {
     use super::*;
     use crate::{
-        common::{McpFixture, MissionFixture},
-        config::MAIN_AGENT_ID,
-        run_status::RunStatus,
-        runs::RunChanges,
+        common::McpFixture, config::MAIN_AGENT_ID, run_status::RunStatus, runs::RunChanges,
     };
 
     #[test]
@@ -901,19 +898,19 @@ mod tests {
             .await
             .unwrap();
         let id = text(&connection, "id");
-        let task = s
-            .task_fixture(
-                json!({
-                    "name": "Live gateway fixture",
-                    "agentId": MAIN_AGENT_ID,
-                    "prompt": "Fixture only",
-                    "worktree": false,
-                }),
-                None,
-            )
+        let chat = s
+            .chat_create(json!({ "agentId": MAIN_AGENT_ID }))
             .await
             .unwrap();
-        let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
+        let chat_id = text(&chat, "id").to_owned();
+        s.chat_send(&chat_id, json!({ "text": "Fixture only" }))
+            .await
+            .unwrap();
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let detail = s.chat_detail(&chat_id).await.unwrap();
+        let run = s.store.run(text(&detail, "runId")).await.unwrap();
         s.store
             .change_run(
                 text(&run, "id"),

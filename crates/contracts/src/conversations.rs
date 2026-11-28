@@ -340,6 +340,15 @@ pub struct CodingAgentSwitch {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatRuleOrigin {
+    pub rule_id: HookRuleId,
+    pub rule_name: String,
+    #[serde(default)]
+    pub schedule: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Chat {
@@ -444,6 +453,28 @@ pub struct Chat {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub requester: Option<ChatRequester>,
+    /// The hook rule (including a clock schedule) that started this conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub origin_rule: Option<ChatRuleOrigin>,
+    /// True once any person has written in this conversation.
+    #[serde(default)]
+    pub person_participated: bool,
+    /// Reported outcome of the conversation's latest turn (`completed` or `blocked`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "TaskOutcome"))]
+    #[ts(optional = nullable)]
+    #[ts(type = "import('../../contracts').TaskOutcome | null")]
+    pub outcome: Option<serde_json::Value>,
+    /// When the calling account snoozed this conversation until, in epoch milliseconds.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "nullable_wire"
+    )]
+    #[schemars(range(min = 1_i64, max = 9007199254740991_i64))]
+    #[ts(optional = nullable, type = "number | null")]
+    pub snoozed_until: Option<i64>,
     #[serde(default)]
     #[ts(optional = nullable)]
     #[schemars(

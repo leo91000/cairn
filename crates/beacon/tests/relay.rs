@@ -1,20 +1,13 @@
 mod common;
 
-use common::{Fixture, MissionFixture, RelayedInstallation, login};
+use common::{Fixture, RelayedInstallation, chat_run_fixture, login};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 #[tokio::test]
 async fn history_compression_is_negotiated_and_preserved_through_the_relay() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let task = relay.installation.task_fixture(json!({
-        "name": "Compressed history", "prompt": "Test", "agentId": cairn_installation::config::MAIN_AGENT_ID,
-    }), None).await.unwrap();
-    let run = relay
-        .installation
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
-        .await
-        .unwrap();
+    let (_, run) = chat_run_fixture(&relay.installation, "Test").await;
     let run_id = run["id"].as_str().unwrap().to_owned();
     let id = run_id.clone();
     relay
@@ -90,14 +83,7 @@ async fn history_endpoint_measurement() {
     use std::time::Instant;
     for workload in ["repetitive", "mixed", "noise"] {
         let relay = RelayedInstallation::new(axum::Router::new()).await;
-        let task = relay.installation.task_fixture(json!({
-            "name":"History measurement","prompt":"Test","agentId":cairn_installation::config::MAIN_AGENT_ID,
-        }), None).await.unwrap();
-        let run = relay
-            .installation
-            .enqueue(task["id"].as_str().unwrap(), "manual", None)
-            .await
-            .unwrap();
+        let (_, run) = chat_run_fixture(&relay.installation, "Test").await;
         let run_id = run["id"].as_str().unwrap().to_owned();
         let id = run_id.clone();
         relay.installation.store.transaction(move |db| {

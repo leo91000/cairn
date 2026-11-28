@@ -59,7 +59,7 @@ impl Service {
             Err(error) => return Err(error),
         };
         let held_resource_authority = resource_authority.clone();
-        self.missions
+        self.memberships
             .merge_agents_live(
                 self,
                 input,
@@ -156,16 +156,7 @@ pub(crate) fn merge(
         ));
     }
 
-    let mut tasks = 0;
     let mut chats = 0;
-    for mut mission in db.missions()? {
-        if mission.settings.agent_id == source.id {
-            mission.settings.agent_id = target.id;
-            mission.revision = crate::config::id();
-            db.save_mission(&mission)?;
-            tasks += 1;
-        }
-    }
     for mut record in db.conversations_boundary()? {
         if record["agentId"] != source_id {
             continue;
@@ -206,8 +197,8 @@ pub(crate) fn merge(
             });
         }
         snapshot.agent.id = target.id;
-        if snapshot.task.settings.agent_id == source.id {
-            snapshot.task.settings.agent_id = target.id;
+        if snapshot.task.agent_id == source_id {
+            snapshot.task.agent_id = target_id.to_owned();
         }
         db.change_run(
             text(run, "id"),
@@ -222,7 +213,7 @@ pub(crate) fn merge(
     let result = json!({
         "sourceId": source_id,
         "targetId": target_id,
-        "transferred": { "tasks": tasks, "chats": chats, "runs": runs.len() },
+        "transferred": { "chats": chats, "runs": runs.len() },
         "deleted": true,
     });
     db.audit("agent.merged", &result)?;

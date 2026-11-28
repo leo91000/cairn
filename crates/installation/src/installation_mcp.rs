@@ -1,7 +1,7 @@
 //! Opt-in installation tools for an agent, using its revocable execution grant.
 //! The owner delegates the complete public MCP management catalogue.
 use crate::{
-    error::{Error, Result, required},
+    error::{Error, Result},
     mcp_server::empty_listing,
     mcps::grant_key,
     run_status::RunStatus,
@@ -68,12 +68,14 @@ const OUTSIDE_CONVERSATIONS: &[&str] = &[
     "get_hook_rule_catalog",
     "list_hook_rule_templates",
     "validate_hook_rule",
+    "preview_schedule",
     "create_hook_rule",
     "install_hook_rule_template",
     "replace_hook_rule",
     "set_hook_rule_enabled",
     "set_hook_rule_emergency_pause",
     "lift_hook_rule_budget",
+    "run_hook_rule",
     "duplicate_hook_rule",
     "delete_hook_rule",
     // Agents
@@ -240,25 +242,6 @@ pub(crate) async fn management_authorization(
     }
 }
 
-/// Rechecks the grant and referenced records in the task mutation transaction, and returns the
-/// calling run.
-pub(crate) fn authorize_task_in(
-    db: &Db<'_>,
-    bearer: &str,
-    task: &Value,
-    existing: Option<&str>,
-) -> Result<Value> {
-    let caller = authorize_in(db, bearer)?;
-
-    if let Some(id) = existing {
-        required(db.mission(id)?, "Task not found")?;
-    }
-
-    required(db.agent_snapshot(text(task, "agentId"))?, "Agent not found")?;
-
-    Ok(caller)
-}
-
 pub(crate) async fn rpc(
     s: &Arc<Service>,
     bearer: &str,
@@ -323,13 +306,6 @@ pub(crate) async fn operations(s: &Service, bearer: &str) -> Result<Vec<Value>> 
         .filter(|tool| allowed_in_turn(&run, tool))
         .map(|mut tool| {
             tool.as_object_mut().unwrap().remove("_meta");
-            if tool["name"] == "create_task" {
-                let settings = &mut tool["inputSchema"]["definitions"]["MissionSettings"];
-                settings["properties"]["agentId"]["default"] = agent_id.clone();
-                if let Some(required) = settings["required"].as_array_mut() {
-                    required.retain(|field| field != "agentId");
-                }
-            }
             let properties = match text(&tool, "name") {
                 "create_chat" => Some(&mut tool["inputSchema"]["properties"]),
                 _ => None,
@@ -384,26 +360,6 @@ pub(crate) async fn operation(
                 s,
                 args,
                 crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
-            )
-            .await;
-    }
-    if let Some(op) = crate::capabilities::mission_operation(name) {
-        if name == "create_task"
-            && let Some(settings) = args.get_mut("settings").and_then(Value::as_object_mut)
-        {
-            settings
-                .entry("agentId")
-                .or_insert_with(|| run["snapshot"]["agent"]["id"].clone());
-        }
-        let origin = crate::validation::text(&run, "id").to_owned();
-        return crate::native::policy::PARENT
-            .scope(
-                origin,
-                op.invoke(
-                    s,
-                    args,
-                    crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
-                ),
             )
             .await;
     }

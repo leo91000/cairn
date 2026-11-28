@@ -195,6 +195,7 @@ pub(crate) fn check_manifest(manifest: &Manifest) -> std::result::Result<(), Str
                         .hook(hook)
                         .map(|declaration| declaration.payload_schema.clone()),
                     HookRuleTrigger::Cairn { hook } => Some(catalog::cairn_payload(*hook)),
+                    HookRuleTrigger::Clock { .. } => Some(catalog::clock_payload()),
                 };
                 if let Some(problem) = validation::structure(definition, payload.as_ref()).first() {
                     return Err(format!(

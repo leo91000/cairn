@@ -7,7 +7,6 @@ use crate::{
     validation::text,
     vault::Vault,
 };
-use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -16,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 pub struct Service {
     pub(crate) accepted_jobs: Arc<crate::authorization::Jobs>,
     pub(crate) node_move_operations: Arc<crate::nodes::move_operations::Operations>,
-    pub missions: Arc<crate::missions::Missions>,
+    pub memberships: Arc<crate::memberships::Memberships>,
     pub node_maintenance_tasks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     pub node_lease_deadlines:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
@@ -60,7 +59,7 @@ impl Service {
         let service = Arc::new(Self {
             accepted_jobs: Arc::default(),
             node_move_operations: Arc::default(),
-            missions: Arc::default(),
+            memberships: Arc::default(),
             node_maintenance_tasks: Arc::default(),
             node_lease_deadlines: Arc::default(),
             started: tokio::time::Instant::now(),
@@ -487,13 +486,11 @@ impl Service {
                         .any(|p| Some(p.id.to_string().as_str()) == s["scope"].as_str())
             })
             .collect::<Vec<_>>();
-        let keys = task["skills"].as_array().cloned().unwrap_or_else(|| {
-            available
-                .iter()
-                .filter(|s| s["valid"] == true)
-                .map(|s| skill_key(s).into())
-                .collect()
-        });
+        let keys: Vec<Value> = available
+            .iter()
+            .filter(|s| s["valid"] == true)
+            .map(|s| skill_key(s).into())
+            .collect();
         let access = policy(&agent);
         let mut skills = Vec::new();
         for key in keys {
@@ -544,123 +541,6 @@ impl Service {
             "snapshot": snapshot,
         });
         Ok(run)
-    }
-
-    pub async fn enqueue(
-        &self,
-        task_id: &str,
-        trigger: &str,
-        dedupe: Option<String>,
-    ) -> Result<Value> {
-        let run = self.prepare_run(task_id, trigger).await?;
-        if trigger == "schedule" {
-            return self.missions.enqueue_scheduled(self, run, dedupe).await;
-        }
-        self.queue_run(run, dedupe, None).await
-    }
-
-    pub(crate) async fn prepare_run(&self, task_id: &str, trigger: &str) -> Result<Value> {
-        let run = self
-            .snapshot(
-                serde_json::to_value(required(
-                    self.store.mission(task_id).await?,
-                    "Mission not found",
-                )?)?,
-                trigger,
-            )
-            .await?;
-        crate::nodes::require_node(&run["snapshot"]["agent"])?;
-        Ok(run)
-    }
-
-    pub(crate) async fn queue_run(
-        &self,
-        run: Value,
-        dedupe: Option<String>,
-        bearer: Option<String>,
-    ) -> Result<Value> {
-        let authorize =
-            crate::installation_mcp::management_authorization(self, bearer.as_deref()).await?;
-        self.queue_run_live(run, dedupe, bearer, authorize).await
-    }
-
-    pub(crate) async fn queue_run_live(
-        &self,
-        run: Value,
-        dedupe: Option<String>,
-        bearer: Option<String>,
-        authorize: crate::authorization::Authorization,
-    ) -> Result<Value> {
-        authorize.recheck().await?;
-        let mut run = run;
-        let origin = if run["trigger"] == "schedule" {
-            crate::native::policy::Origin::Stored(run["snapshot"]["task"].clone())
-        } else {
-            crate::native::policy::origin()
-        };
-        crate::native::policy::refresh_for(self, &run["snapshot"]["agent"]).await?;
-        authorize.recheck().await?;
-        let result = self
-            .store
-            .transaction(move |db| {
-                authorize.authorize(db)?;
-                required(
-                    db.agent_snapshot(text(&run["snapshot"]["agent"], "id"))?,
-                    "Agent no longer exists",
-                )?;
-                let grant = crate::native::policy::authorize_origin(
-                    db,
-                    &run["snapshot"]["agent"],
-                    &origin,
-                )?;
-                crate::native::policy::apply(&mut run, &grant);
-                if let Some(bearer) = bearer {
-                    let caller = crate::installation_mcp::authorize_task_in(
-                        db,
-                        &bearer,
-                        &run["snapshot"]["task"],
-                        None,
-                    )?;
-                    run["requestedBy"] = requester(&caller);
-                }
-                if run["trigger"] != "chat" {
-                    crate::coding_agent_configuration::freeze_message(
-                        db,
-                        &mut run,
-                        None,
-                        &Value::Null,
-                    )?;
-                }
-                let run = crate::runs::admit_prepared(db, &run, dedupe.as_deref())?;
-                crate::rules::engine::conversations::record_run(db, &run, &origin)?;
-                db.event(text(&run, "id"), &EventKind::Status, "Queued", None)?;
-                let detail = json!({
-                    "id": run["id"],
-                    "taskId": run["taskId"],
-                    "trigger": run["trigger"],
-                });
-                db.audit("run.queued", &detail)?;
-                Ok(run)
-            })
-            .await?;
-        self.worker.notify();
-        Ok(result)
-    }
-}
-
-/// The conversation or mission whose agent started a run. A conversation's runs carry its id as
-/// their task, so the requester is named without another lookup.
-fn requester(caller: &Value) -> Value {
-    if caller["trigger"] == "chat" {
-        json!({
-            "runId": caller["id"],
-            "chatId": caller["taskId"],
-        })
-    } else {
-        json!({
-            "runId": caller["id"],
-            "taskId": caller["taskId"],
-        })
     }
 }
 
@@ -725,26 +605,7 @@ pub(crate) fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> 
             "This item is used by a plugin delegation. Update the instance first.",
         ));
     }
-    let task_field = if kind == "agents" {
-        "agentId"
-    } else {
-        "projectId"
-    };
-    if kind != "tasks"
-        && db.missions()?.iter().any(|t| {
-            if task_field == "agentId" {
-                t.settings.agent_id.to_string() == id
-            } else {
-                t.settings.project_id.is_some_and(|p| p.to_string() == id)
-            }
-        })
-    {
-        return Err(Error::conflict(
-            "This item is used by a task. Update or remove that task first.",
-        ));
-    }
     let busy = db.active()?.iter().any(|run| match kind {
-        "tasks" => run["taskId"] == id,
         "projects" => uses_project(run, id),
         _ => run["snapshot"]["agent"]["id"] == id,
     });

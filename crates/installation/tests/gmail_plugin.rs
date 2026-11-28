@@ -1,6 +1,6 @@
 //! Gmail and Google OAuth are simulated locally; tests never use personal mail.
 use common::AgentFixture;
-use common::MissionFixture;
+use common::ChatRunFixture;
 
 mod common;
 
@@ -846,15 +846,8 @@ async fn owner_disconnect_removes_tokens_and_confirms_provider_revocation() {
 async fn private_cli_transfers_use_the_run_and_current_account_grant() {
     let f = fixture().await;
     let account = connect(&f, "alice").await;
-    let task =
-        f.s.task_fixture(
-            json!({ "name": "Transfer", "prompt": "Transfer fixtures", "agentId": MAIN_AGENT_ID }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run =
-        f.s.enqueue(text(&task, "id"), "manual", None)
+    let (_chat, run) =
+        f.s.chat_run_fixture(MAIN_AGENT_ID, None, "Transfer fixtures")
             .await
             .unwrap();
     let run =
@@ -913,15 +906,8 @@ async fn installation_management_revocation_during_oauth_refresh_cannot_publish_
     )
     .await
     .unwrap();
-    let task =
-        f.s.task_fixture(
-            json!({ "name": "Check account", "prompt": "Check Gmail", "agentId": MAIN_AGENT_ID }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run =
-        f.s.enqueue(text(&task, "id"), "manual", None)
+    let (_chat, run) =
+        f.s.chat_run_fixture(MAIN_AGENT_ID, None, "Check Gmail")
             .await
             .unwrap();
     let run =
@@ -988,15 +974,8 @@ async fn manage(f: &Fixture, args: Value) -> Value {
     )
     .await
     .unwrap();
-    let task =
-        f.s.task_fixture(
-            json!({ "name": "Set up Gmail", "prompt": "Add a mailbox", "agentId": MAIN_AGENT_ID }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run =
-        f.s.enqueue(text(&task, "id"), "manual", None)
+    let (_chat, run) =
+        f.s.chat_run_fixture(MAIN_AGENT_ID, None, "Add a mailbox")
             .await
             .unwrap();
     let run =

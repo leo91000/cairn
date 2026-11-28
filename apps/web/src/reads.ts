@@ -21,11 +21,14 @@ watch(() => [state.accountId, state.installationId, state.authenticated, state.s
     delete localReads[key]
 }, { flush: 'sync' })
 
-/** A Fil key (`chat:<id>` or `task:<id>`) and the finish of the work read. */
+export function clearLocalRead(chatId: string) {
+  delete localReads[`chat:${chatId}`]
+}
+
+/** A Fil key (`chat:<id>`) and the finish of the work read. */
 function mark(item: Pick<FilItem, 'key' | 'at'>): ReadMark {
-  const [kind, id] = [item.key.slice(0, item.key.indexOf(':')), item.key.slice(item.key.indexOf(':') + 1)]
-  const target: ReadMark['target'] = kind === 'chat' ? { kind: 'chat', chatId: id } : { kind: 'mission', taskId: id }
-  return { target, finishedAt: item.at }
+  const chatId = item.key.startsWith('chat:') ? item.key.slice(5) : item.key
+  return { target: { kind: 'chat', chatId }, finishedAt: item.at }
 }
 
 /** Marks finished work as read for the signed-in account, on every device. */

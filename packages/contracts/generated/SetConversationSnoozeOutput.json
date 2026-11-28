@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "chatId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "snoozedUntil": {
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "chatId",
+    "snoozedUntil"
+  ],
+  "title": "SetConversationSnoozeOutput",
+  "type": "object"
+}

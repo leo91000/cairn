@@ -1,34 +1,12 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { useRoute } from 'vue-router'
 import Icon from '../components/Icon.vue'
-import RunWorkspace from '../components/RunWorkspace.vue'
 import { Plus } from '../icons'
 import { modifier } from '../shortcuts'
-import { filRunPath } from '../signal'
-
-// Home: the Fil beside its reading pane on wide screens, the Fil alone on phones. A mission opened
-// from the Fil reads in that pane; on narrow screens it takes the page, as a conversation does.
-const route = useRoute()
-const runId = computed(() => route.params.id as string | undefined)
 </script>
 
 <template>
-  <div class="fil-page flex h-full min-h-0 min-w-0 flex-1" :class="{ 'tablet:hidden': !runId }">
-    <section
-      v-if="runId"
-      class="fil-run flex min-h-0 min-w-0 flex-1 flex-col px-9 pt-8 pb-7 tablet:px-6 phone:px-3 phone:pt-[max(14px,env(safe-area-inset-top))] phone:pb-3 [&_.back-link]:hidden tablet:[&_.back-link]:inline-flex"
-      aria-label="Reading pane"
-    >
-      <RunWorkspace
-        :key="runId"
-        :run-id="runId"
-        :run-path="filRunPath"
-        :back="{ to: '/', label: 'Back to the Fil' }"
-        mission
-      />
-    </section>
-    <section v-else class="flex min-w-0 flex-1 flex-col items-center justify-center gap-5 px-8 text-center tablet:hidden" aria-label="Reading pane">
+  <div class="fil-page flex h-full min-h-0 min-w-0 flex-1 tablet:hidden">
+    <section class="flex min-w-0 flex-1 flex-col items-center justify-center gap-5 px-8 text-center" aria-label="Reading pane">
       <p class="font-heading text-2xl font-bold tracking-tight text-ink">
         Pick up where your agents are.
       </p>

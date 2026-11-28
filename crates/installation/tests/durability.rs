@@ -1,7 +1,7 @@
 use crate::common::run_fixture::DbRunFixture;
 use cairn_contracts::EventKind;
 use common::AgentFixture;
-use common::MissionFixture;
+use common::ChatRunFixture;
 use common::ProjectFixture;
 
 mod common;
@@ -208,21 +208,12 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
     let main = json!({ "name": "Main", "access": { "projects": [] } });
     assert!(s.agent_fixture(main, Some(MAIN_AGENT_ID)).await.is_err());
     let foreign = json!({
-        "name": "Foreign",
         "agentId": agent["id"],
         "projectId": id(),
-        "prompt": "no",
     });
-    assert!(s.task_fixture(foreign, None).await.is_err());
-    let allowed = json!({
-        "name": "Allowed",
-        "agentId": agent["id"],
-        "prompt": "inspect",
-        "worktree": false,
-    });
-    let task = s.task_fixture(allowed, None).await.unwrap();
-    let run = s
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+    assert!(s.chat_create(foreign).await.is_err());
+    let (_chat, run) = s
+        .chat_run_fixture(agent["id"].as_str().unwrap(), None, "inspect")
         .await
         .unwrap();
     assert!(

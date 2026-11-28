@@ -1,5 +1,5 @@
 use crate::common::run_fixture::DbRunFixture;
-use common::MissionFixture;
+use common::ChatRunFixture;
 
 mod common;
 
@@ -128,16 +128,12 @@ fn guest_exports() -> Router {
     }))
 }
 
-/// Starts a manual run of a new task and marks it running.
-async fn start_run(s: &Arc<Service>, name: &str, prompt: &str) -> Value {
-    let task = s
-        .task_fixture(
-            json!({ "name": name, "prompt": prompt, "agentId": MAIN_AGENT_ID }),
-            None,
-        )
+/// Starts a conversation run and marks it running.
+async fn start_run(s: &Arc<Service>, _name: &str, prompt: &str) -> Value {
+    let (_chat, run) = s
+        .chat_run_fixture(MAIN_AGENT_ID, None, prompt)
         .await
         .unwrap();
-    let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
     s.store
         .change_run(
             text(&run, "id"),
@@ -448,14 +444,10 @@ async fn publication_checks_grants_and_downloads_require_authentication_and_corr
             StatusCode::UNAUTHORIZED
         );
     }
-    let task = s
-        .task_fixture(
-            json!({ "name": "Other", "prompt": "Other", "agentId": MAIN_AGENT_ID }),
-            None,
-        )
+    let (_other_chat, other) = s
+        .chat_run_fixture(MAIN_AGENT_ID, None, "Other")
         .await
         .unwrap();
-    let other = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
     assert_eq!(
         artifacts::http(
             s,

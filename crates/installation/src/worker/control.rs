@@ -764,12 +764,11 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
         .split('/')
         .collect::<Vec<_>>();
     let result = match segments.as_slice() {
-        ["runs", id, action @ ("cancel" | "cleanup" | "retry")] => {
+        ["runs", id, action @ ("cancel" | "cleanup")] => {
             async {
                 let name = match *action {
                     "cancel" => "cancel_run",
-                    "cleanup" => "cleanup_run",
-                    _ => "retry_run",
+                    _ => "cleanup_run",
                 };
                 crate::capabilities::run_operation(name)
                     .expect("run operation")

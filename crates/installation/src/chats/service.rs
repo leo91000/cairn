@@ -1,51 +1,6 @@
 use super::*;
 
 impl Service {
-    pub async fn chat_from_run(&self, run_id: &str) -> Result<Value> {
-        self.chat_from_run_authorized(run_id, |_| Ok(())).await
-    }
-
-    /// Rechecks delegated access in the transaction that transfers the conversation.
-    pub(crate) async fn chat_from_run_authorized<F>(
-        &self,
-        run_id: &str,
-        authorize: F,
-    ) -> Result<Value>
-    where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-    {
-        self.chat_from_run_live(run_id, crate::authorization::Authorization::once(authorize))
-            .await
-    }
-
-    pub(crate) async fn chat_from_run_live(
-        &self,
-        run_id: &str,
-        authorize: crate::authorization::Authorization,
-    ) -> Result<Value> {
-        authorize.recheck().await?;
-        let origin = crate::native::policy::origin();
-        if origin.known() {
-            let run = self.store.run(run_id).await?;
-            crate::native::policy::refresh_for(self, &run["snapshot"]["agent"]).await?;
-        }
-
-        let active = self.worker.active.lock().await;
-        authorize.recheck().await?;
-        if active.contains_key(run_id) {
-            return Err(Error::conflict(
-                "Wait for this run to finish stopping before continuing in chat.",
-            ));
-        }
-        let run_id = run_id.to_owned();
-        self.store
-            .transaction(move |db| {
-                authorize.authorize(db)?;
-                from_run(db, &run_id, &origin)
-            })
-            .await
-    }
-
     pub async fn chat_list(&self) -> Result<Vec<Value>> {
         self.store.read(|db| list(db)).await
     }
@@ -398,18 +353,14 @@ impl Service {
         } else {
             text(&message, "text")
         };
-        let mut settings: cairn_contracts::MissionSettings = serde_json::from_value(json!({
+        let task = json!({
+            "id": chat.id,
             "name": chat.title,
             "prompt": prompt,
             "agentId": chat.agent_id,
             "projectId": chat.project_id,
             "worktree": true,
-        }))?;
-        settings.validate().map_err(Error::bad)?;
-        let mut task = serde_json::to_value(settings)?;
-        task["id"] = chat.id.clone().into();
-        task["createdAt"] = chat.created_at.into();
-        task["nextRun"] = Value::Null;
+        });
         let mut snapshot = self.snapshot(task, "chat").await?;
         snapshot["snapshot"]["delegation"] = crate::delegation::role(
             &serde_json::to_value(&chat)?,

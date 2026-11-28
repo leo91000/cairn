@@ -113,23 +113,21 @@ impl Fixture {
         })
         .await
         .unwrap();
-        let task = service
-            .task_fixture(
-                json!({
-                    "name": "Tool activity test",
-                    "prompt": "Fixture only",
-                    "worktree": false,
-                    "agentId": MAIN_AGENT_ID,
-                }),
-                None,
-            )
+        let chat = service
+            .chat_create(json!({ "agentId": MAIN_AGENT_ID }))
             .await
             .unwrap();
-        let run = service
-            .enqueue(text(&task, "id"), "manual", None)
+        let chat_id = text(&chat, "id").to_owned();
+        service
+            .chat_send(&chat_id, json!({ "text": "Fixture only" }))
             .await
             .unwrap();
-        let id = text(&run, "id").to_owned();
+        service
+            .chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let detail = service.chat_detail(&chat_id).await.unwrap();
+        let id = text(&detail, "runId").to_owned();
         let checkpoint = Checkpoint::new(
             service.store.clone(),
             id.clone(),
@@ -1630,9 +1628,6 @@ async fn terminal_styling_and_utf8_survive_long_diagnostic_fragments() {
         assert_eq!(diagnostics, expected);
     }
 }
-
-#[cfg(test)]
-use crate::mission_fixture::MissionFixture;
 
 #[tokio::test]
 async fn context_usage_survives_log_budget_and_keeps_the_latest_snapshot_on_the_run() {

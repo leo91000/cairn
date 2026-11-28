@@ -501,6 +501,34 @@ impl RelayedInstallation {
     }
 }
 
+/// Creates a conversation, sends `prompt`, admits its run via `chat_tick`, and
+/// returns `(chat_detail, run)`.
+pub async fn chat_run_fixture(
+    installation: &cairn_installation::service::Service,
+    prompt: &str,
+) -> (Value, Value) {
+    let chat = installation
+        .chat_create(json!({ "agentId": cairn_installation::config::MAIN_AGENT_ID }))
+        .await
+        .unwrap();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    installation
+        .chat_send(&chat_id, json!({ "text": prompt }))
+        .await
+        .unwrap();
+    installation
+        .chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let detail = installation.chat_detail(&chat_id).await.unwrap();
+    let run = installation
+        .store
+        .run(detail["runId"].as_str().unwrap())
+        .await
+        .unwrap();
+    (detail, run)
+}
+
 /// A private run deliverable stored directly in the installation, with no preview.
 pub async fn seeded_artifact(
     relay: &RelayedInstallation,
@@ -508,21 +536,7 @@ pub async fn seeded_artifact(
     media_type: &str,
 ) -> (String, String) {
     let installation = &relay.installation;
-    let task = installation
-        .task_fixture(
-            json!({
-                "name": "Report",
-                "prompt": "Make a report",
-                "agentId": cairn_installation::config::MAIN_AGENT_ID,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run = installation
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
-        .await
-        .unwrap();
+    let (_, run) = chat_run_fixture(installation, "Make a report").await;
     let run = run["id"].as_str().unwrap().to_owned();
     let artifact = uuid::Uuid::new_v4().to_string();
     let directory = installation.config.data_dir.join("artifacts");
@@ -594,9 +608,3 @@ pub async fn stream_accounts_with_members(
     }
     cookies
 }
-
-#[path = "../../../installation/tests/common/mission_fixture.rs"]
-pub mod mission_fixture;
-
-#[allow(unused_imports)]
-pub use mission_fixture::{MissionFixture, StoreMissionFixture};

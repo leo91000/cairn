@@ -10,22 +10,23 @@ use serde_json::{Value, json};
 pub fn tool() -> Value {
     json!({
         "name": "report_outcome",
-        "description": "Before your final response, report whether the user's current request was completed, \
-            blocked, or needs user input. Include concrete validation/delivery evidence and a precise \
-            reason. Process exit success alone is not task completion. Replace your report if \
-            circumstances change. When the work is blocked or needs input, waitingOn says who \
-            must act next: user (the person using Cairn, the default), requester (the agent \
-            conversation or mission that started this run, when it kept the remaining steps for \
-            itself), or external (a CI run, a reviewer or another system that finishes on its \
-            own). Use external only for work already underway that can finish without \
-            intervention. Missing credentials, permissions or broken run access require \
-            repair by the user or requester; they are not outside checks.",
+        "description": "Before your final response, report whether the user's current request was completed \
+            or blocked. When clarification from the user is needed, call cairn_workspace.ask_questions \
+            instead; a blocked outcome preserves pending questions while completed retires them. \
+            Include concrete validation/delivery evidence and a precise reason. Process exit success \
+            alone is not task completion. Replace your report if circumstances change. When the work \
+            is blocked, waitingOn says who must act next: user (the person using Cairn, the default), \
+            requester (the agent conversation that delegated this task, when it kept the remaining \
+            steps for itself), or external (a CI run, a reviewer or another system that finishes on \
+            its own). Use external only for work already underway that can finish without \
+            intervention. Missing credentials, permissions or broken run access require repair by \
+            the user or requester; they are not outside checks.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "status": {
                     "type": "string",
-                    "enum": ["completed", "blocked", "needs_input"]
+                    "enum": ["completed", "blocked"]
                 },
                 "reason": {
                     "type": "string",

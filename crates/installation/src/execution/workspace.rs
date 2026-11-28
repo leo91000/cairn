@@ -157,15 +157,6 @@ pub(super) async fn prepare_project(
         ));
     }
     let project_id = text(project, "id").to_owned();
-    let private_copy = microvm || run["snapshot"]["task"]["worktree"] == true;
-    if !private_copy {
-        return Ok(Workspace {
-            project_id,
-            path: source,
-            kind: WorkspaceKind::Direct,
-            revision: None,
-        });
-    }
     let target = if !is_isolated && single {
         root.to_owned()
     } else {

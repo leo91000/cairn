@@ -1,6 +1,6 @@
 use crate::common::run_fixture::DbRunFixture;
 use common::AgentFixture;
-use common::MissionFixture;
+use common::ChatRunFixture;
 use common::StoreAgentFixture;
 use common::account_fixture::AccountFixtures;
 
@@ -330,17 +330,17 @@ impl Fixture {
     }
 
     async fn enqueue(&self, prompt: &str) -> Value {
-        let task = json!({
-            "name": "Fixture run",
-            "prompt": prompt,
-            "worktree": false,
-            "agentId": MAIN_AGENT_ID,
-        });
-        let task = self.service.task_fixture(task, None).await.unwrap();
-        self.service
-            .enqueue(text(&task, "id"), "manual", None)
-            .await
-            .unwrap()
+        if self.process.is_some() {
+            let chat_id = self.start_chat(message(prompt)).await;
+            let run_id = self.chat_run(&chat_id).await;
+            self.service.store.run(&run_id).await.unwrap()
+        } else {
+            self.service
+                .chat_run_fixture(MAIN_AGENT_ID, None, prompt)
+                .await
+                .unwrap()
+                .1
+        }
     }
 
     /// Waits until the run `id` satisfies `condition`.

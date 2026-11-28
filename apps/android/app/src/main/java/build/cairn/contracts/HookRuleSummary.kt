@@ -13,6 +13,8 @@ data class HookRuleSummary(
     val executionAgentId: String,
     val id: String,
     val name: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val nextRun: Long? = null,
     val revision: String,
     val startedAgentIds: List<String>,
     val toolInstanceIds: List<String>,
@@ -23,6 +25,7 @@ data class HookRuleSummary(
     init {
         java.util.UUID.fromString(executionAgentId)
         java.util.UUID.fromString(id)
+        nextRun?.let { require(it in 0L..9007199254740991L) }
         require(updatedAt in 0L..9007199254740991L)
         require(version >= 0L)
     }

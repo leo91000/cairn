@@ -256,6 +256,12 @@ fn conversation_view_with_run(
         })
         .transpose()?
         .flatten();
+    let origin_rule = crate::rules::engine::conversations::origin_rule_for_chat(db, &chat.id)?;
+    let person_participated = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM conversation_entry_writers WHERE chat_id=? AND writer='person')",
+        [&chat.id],
+        |row| row.get::<_, bool>(0),
+    )?;
     let compaction = Some(compaction_state(db, &chat, run)?);
     let coding_agent_switch = coding_agent::progress(db, &chat.id)?;
     let error = if active {
@@ -313,6 +319,14 @@ fn conversation_view_with_run(
         requested_by: chat.requested_by,
         wakeup: chat.wakeup,
         requester,
+        origin_rule,
+        person_participated,
+        outcome: run
+            .as_ref()
+            .and_then(|run| run.get("outcome"))
+            .filter(|value| !value.is_null())
+            .cloned(),
+        snoozed_until: None,
         provider,
         compaction,
         coding_agent_switch,

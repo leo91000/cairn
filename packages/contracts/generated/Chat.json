@@ -556,6 +556,26 @@
       ],
       "type": "object"
     },
+    "ChatRuleOrigin": {
+      "properties": {
+        "ruleId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "ruleName": {
+          "type": "string"
+        },
+        "schedule": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ruleId",
+        "ruleName"
+      ],
+      "type": "object"
+    },
     "ChatSideQuestion": {
       "properties": {
         "answer": {
@@ -960,26 +980,6 @@
       ],
       "type": "object"
     },
-    "MissionPluginGrant": {
-      "additionalProperties": false,
-      "properties": {
-        "authorId": {
-          "type": "string"
-        },
-        "connectionId": {
-          "type": "string"
-        },
-        "revision": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "connectionId",
-        "revision",
-        "authorId"
-      ],
-      "type": "object"
-    },
     "NativeConfigurationSnapshot": {
       "additionalProperties": false,
       "description": "Frozen per message. Contains editable settings only, never credentials.",
@@ -1034,22 +1034,6 @@
       "required": [
         "mode"
       ],
-      "type": "object"
-    },
-    "OutcomeDismissal": {
-      "additionalProperties": false,
-      "description": "An outcome set aside by the calling account: dismissed (`until` null) or snoozed.",
-      "properties": {
-        "until": {
-          "format": "int64",
-          "maximum": 9007199254740991,
-          "minimum": 1,
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
       "type": "object"
     },
     "PluginWaitData": {
@@ -1353,17 +1337,6 @@
           "format": "int64",
           "type": "integer"
         },
-        "dismissal": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/OutcomeDismissal"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "environmentExpirationCause": {
           "default": null,
           "pattern": "^(inactivity|node-change|node-revocation|storage-migration)$",
@@ -1567,13 +1540,6 @@
           ],
           "default": null
         },
-        "sourceTaskId": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "startedAt": {
           "default": null,
           "format": "int64",
@@ -1686,12 +1652,6 @@
         },
         "runId": {
           "type": "string"
-        },
-        "taskId": {
-          "type": [
-            "string",
-            "null"
-          ]
         }
       },
       "required": [
@@ -1793,176 +1753,28 @@
       "type": "object"
     },
     "RunTaskSnapshot": {
-      "description": "Presentation of task settings in a run snapshot. Chats synthesize the same typed\nsettings without creating a mission or a scheduled commitment.",
+      "description": "Frozen conversation prompt and identity metadata captured in a run snapshot.",
       "properties": {
         "agentId": {
-          "format": "uuid",
+          "default": "",
           "type": "string"
         },
-        "archived": {
-          "default": false,
-          "type": "boolean"
-        },
-        "authorAccessId": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "authorId": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "authorRemoved": {
-          "default": false,
-          "type": "boolean"
-        },
-        "createdAt": {
-          "default": null,
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "cron": {
-          "default": null,
-          "maxLength": 100,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "enabled": {
-          "default": true,
-          "type": "boolean"
-        },
         "id": {
-          "format": "uuid",
           "type": "string"
         },
         "name": {
-          "maxLength": 100,
-          "minLength": 1,
+          "default": "",
           "type": "string"
-        },
-        "nativeAuthorityNodes": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "nativeParentAccess": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "nativeParentRunId": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "nativePluginGrants": {
-          "default": null,
-          "items": {
-            "$ref": "#/definitions/MissionPluginGrant"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "nativePrincipals": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "nativeProvenanceUnknown": {
-          "default": false,
-          "type": "boolean"
-        },
-        "nextRun": {
-          "default": null,
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
         },
         "projectId": {
           "default": null,
-          "format": "uuid",
           "type": [
             "string",
             "null"
           ]
         },
         "prompt": {
-          "maxLength": 50000,
-          "minLength": 1,
-          "type": "string"
-        },
-        "revision": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "scheduleFailure": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ScheduleFailure"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "scheduleWaitReason": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "skills": {
-          "default": null,
-          "items": {
-            "maxLength": 160,
-            "type": "string"
-          },
-          "maxItems": 100,
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "tags": {
-          "default": [],
-          "items": {
-            "maxLength": 30,
-            "type": "string"
-          },
-          "maxItems": 10,
-          "type": "array"
-        },
-        "timezone": {
-          "default": "Europe/Paris",
-          "maxLength": 100,
-          "minLength": 1,
+          "default": "",
           "type": "string"
         },
         "worktree": {
@@ -1971,10 +1783,7 @@
         }
       },
       "required": [
-        "id",
-        "name",
-        "prompt",
-        "agentId"
+        "id"
       ],
       "type": "object"
     },
@@ -2001,32 +1810,6 @@
         "projectId",
         "path",
         "kind"
-      ],
-      "type": "object"
-    },
-    "ScheduleFailure": {
-      "additionalProperties": false,
-      "properties": {
-        "at": {
-          "format": "int64",
-          "maximum": 9007199254740991,
-          "minimum": 0,
-          "type": "integer"
-        },
-        "message": {
-          "type": "string"
-        },
-        "scheduledFor": {
-          "format": "int64",
-          "maximum": 9007199254740991,
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "message",
-        "scheduledFor",
-        "at"
       ],
       "type": "object"
     },
@@ -2852,6 +2635,26 @@
       ],
       "description": "Resolved selection for the next implicit message, including changed defaults."
     },
+    "originRule": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ChatRuleOrigin"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The hook rule (including a clock schedule) that started this conversation."
+    },
+    "outcome": {
+      "additionalProperties": true,
+      "description": "Reported outcome of the conversation's latest turn (`completed` or `blocked`).",
+      "type": [
+        "object",
+        "null"
+      ],
+      "x-kotlin-type": "TaskOutcome"
+    },
     "paused": {
       "default": false,
       "type": "boolean"
@@ -2868,6 +2671,11 @@
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
+    },
+    "personParticipated": {
+      "default": false,
+      "description": "True once any person has written in this conversation.",
+      "type": "boolean"
     },
     "preview": {
       "default": null,
@@ -3011,6 +2819,16 @@
     "slug": {
       "default": "",
       "type": "string"
+    },
+    "snoozedUntil": {
+      "description": "When the calling account snoozed this conversation until, in epoch milliseconds.",
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
     },
     "status": {
       "default": "idle",

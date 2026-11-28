@@ -24,17 +24,19 @@ class PersonalSettingsTest {
                 )
                 .jsonObject
         val marks = roundTrip<MarkReadInput>(corpus.getValue("marks"))
-        assertIs<ReadTarget.A>(marks[0].items[0].target)
-        assertIs<ReadTarget.B>(marks[0].items[1].target)
-        val asides = roundTrip<SetOutcomeAsideInput>(corpus.getValue("asides"))
-        assertIs<OutcomeAsideAction.C>(asides[2].action)
-        assertEquals(1761886400000L, (asides[1].action as OutcomeAsideAction.B).until)
-        roundTrip<SetOutcomeAsideOutput>(corpus.getValue("asideOutputs"))
+        assertIs<ReadTarget>(marks[0].items[0].target)
+        assertIs<ReadTarget>(marks[0].items[1].target)
+        val snoozes = roundTrip<SetConversationSnoozeInput>(corpus.getValue("snoozes"))
+        assertIs<ConversationSnoozeAction.B>(snoozes[1].action)
+        assertEquals(1761886400000L, (snoozes[0].action as ConversationSnoozeAction.A).until)
+        roundTrip<SetConversationSnoozeOutput>(corpus.getValue("snoozeOutputs"))
         roundTrip<InstallationSettings>(corpus.getValue("settings"))
         roundTrip<InstallationOverview>(corpus.getValue("overviews"))
         roundTrip<ListAuditOutput>(corpus.getValue("audits"))
-        corpus.getValue("invalidAsides").jsonArray.forEach {
-            assertFails(it.toString()) { json.decodeFromJsonElement<SetOutcomeAsideInput>(it) }
+        corpus.getValue("invalidSnoozes").jsonArray.forEach {
+            assertFails(it.toString()) {
+                json.decodeFromJsonElement<SetConversationSnoozeInput>(it)
+            }
         }
         // Kotlin enforces bounds and patterns its templates support; the server
         // remains authoritative for list sizes.

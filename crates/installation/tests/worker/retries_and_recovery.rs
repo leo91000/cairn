@@ -1681,26 +1681,7 @@ async fn vm_chat_protocol_runs_receive_one_frame_with_plugin_instructions() {
     let plugin = "cairn plugin onepassword read --account ACCOUNT_ID";
     fixture.start().await;
 
-    // Scheduled work: the frame is in the instructions, the turn is the brief.
-    // A leading command stays text: Claude Code would run `/clear` itself.
-    let brief = "/clear stale branches, then check the deployment.";
-    let task = json!({
-        "name": "Scheduled", "prompt": brief, "worktree": false, "agentId": agent["id"],
-    });
-    let task = s.task_fixture(task, None).await.unwrap();
-    let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
-    let finished = fixture.until_finished(text(&run, "id")).await;
-    assert_eq!(finished["status"], RunStatus::Succeeded, "{finished}");
-    let plan = controller.plans.lock().await[0]["chat"].clone();
-    let instructions = text(&plan, "instructions");
-    assert!(instructions.contains(plugin), "{instructions}");
-    assert!(instructions.contains("This unattended task"));
-    assert!(!instructions.contains("This is an interactive chat"));
-    assert!(!instructions.contains(brief));
-    assert_eq!(plan["execution"]["text"], format!("Task brief:\n{brief}"));
-    assert_eq!(plan["execution"]["recovery"], false);
-
-    // Chat turns stay interactive and also receive plugin instructions.
+    // Chat turns stay interactive and receive plugin instructions in one frame.
     let chat = s
         .chat_create(json!({ "agentId": agent["id"] }))
         .await
@@ -1717,6 +1698,7 @@ async fn vm_chat_protocol_runs_receive_one_frame_with_plugin_instructions() {
     assert!(instructions.contains("This is an interactive chat"));
     assert!(!instructions.contains("This unattended task"));
     assert_eq!(plan["execution"]["text"], "Hello");
+    assert_eq!(plan["execution"]["recovery"], false);
     fixture.stop(false).await;
     server.abort();
 }
