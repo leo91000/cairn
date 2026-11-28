@@ -255,15 +255,6 @@ pub(crate) fn replenish(account: &mut Account, driver: &dyn Driver) {
     }
 }
 
-/// Evaluates a refusal that is still tied to a lease, using the normal usage
-/// reset and cooldown rules even if fencing has yet to release that lease.
-fn effective_pending_exhaustion(account: &Account, exhaustion: Exhaustion) -> Option<Exhaustion> {
-    let mut pending = account.clone();
-    pending.exhausted = Some(exhaustion);
-    replenish(&mut pending, account.provider.driver());
-    pending.exhausted
-}
-
 fn fresh(account: &Account, driver: &dyn Driver) -> bool {
     account
         .usage
@@ -333,13 +324,9 @@ impl Accounts {
         self.initialized
             .get_or_try_init(|| async {
                 // Runtime credentials and their leases never survive a manager restart.
-                // Release each lease through the usual transaction so observed quota
-                // refusals are applied before admission starts.
                 s.store
                     .transaction(|db| {
-                        for lease in db.account_leases()? {
-                            db.remove_account_lease(&lease.run_id)?;
-                        }
+                        db.0.execute("DELETE FROM account_leases", [])?;
                         Ok(())
                     })
                     .await?;
@@ -374,21 +361,16 @@ impl Accounts {
         Ok(())
     }
 
-    async fn account_mutex(&self, id: &str) -> Arc<Mutex<()>> {
-        self.locks
+    pub async fn lock(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let account_lock = self
+            .locks
             .lock()
             .await
             .entry(id.into())
             .or_default()
-            .clone()
-    }
+            .clone();
 
-    pub async fn lock(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        self.account_mutex(id).await.lock_owned().await
-    }
-
-    pub(crate) async fn try_lock(&self, id: &str) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-        self.account_mutex(id).await.try_lock_owned().ok()
+        account_lock.lock_owned().await
     }
 
     pub async fn account(&self, s: &Service, id: &str) -> Result<Account> {
@@ -411,8 +393,11 @@ impl Accounts {
     }
 
     pub async fn lease(&self, s: &Service, run_id: &str) -> Result<Option<Lease>> {
-        let run_id = run_id.to_owned();
-        s.store.read(move |db| db.account_lease(&run_id)).await
+        Ok(s.store
+            .read(|db| db.account_leases())
+            .await?
+            .into_iter()
+            .find(|lease| lease.run_id == run_id))
     }
 
     /// The account's leases, ordered by run.
@@ -454,12 +439,10 @@ impl Accounts {
     ) -> Result<Vec<Account>> {
         let driver = provider.driver();
         let connecting = self.connecting.lock().await.clone();
-        let pending_quota = s.store.read(|db| db.pending_quota_accounts()).await?;
         let mut candidates = Vec::new();
         for account in self.of(s, provider).await? {
             let id = account.id.as_str();
             if schedulable(&account, driver, model)
-                && !pending_quota.contains(id)
                 && running(leases, id) < account.parallel_runs()
                 && connecting.as_deref() != Some(id)
                 && !self.recovering(s, id).await?
@@ -740,30 +723,8 @@ impl Accounts {
         let _guard = self.lock(id).await;
         let (id, model) = (id.to_owned(), model.to_owned());
         s.store
-            .transaction(move |db| {
-                let account = required(db.coding_account(&id)?, "Account not found.")?;
-                let exhaustion = Exhaustion {
-                    at: now(),
-                    model,
-                    usage: account.usage.clone(),
-                };
-                Self::save_exhaustion_in(db, account, exhaustion)
-            })
+            .transaction(move |db| db.exhaust_coding_account(&id, &model))
             .await
-    }
-
-    /// Records exhaustion as part of an existing transaction under the account lock.
-    fn save_exhaustion_in(db: &Db<'_>, mut account: Account, exhaustion: Exhaustion) -> Result<()> {
-        if account
-            .exhausted
-            .as_ref()
-            .is_some_and(|previous| previous.at >= exhaustion.at)
-        {
-            return Ok(());
-        }
-        account.exhausted = Some(exhaustion);
-        db.save_coding_account(&account)?;
-        db.audit("account.exhausted", &json!({ "id": account.id }))
     }
 
     pub async fn poll(&self, s: &Service, only_due: bool) -> Result<()> {

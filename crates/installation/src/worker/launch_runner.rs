@@ -492,7 +492,6 @@ impl Execution<'_> {
                     c.start_rejected = Some(false);
                     c.output_interrupted = None;
                     c.provider_failure_attempt = None;
-                    c.managed_quota_failure = None;
                     c.reset_finalization_observation();
                     c.retry_cause = Some(None);
                     c.completed = Some(false);

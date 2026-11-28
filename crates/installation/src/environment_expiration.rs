@@ -626,7 +626,6 @@ fn detach_environment_in(
     };
     let mut fresh = RunCheckpoint {
         completed: Some(true),
-        managed_quota_failure: checkpoint.managed_quota_failure.clone(),
         ..Default::default()
     };
     if mission {
@@ -981,21 +980,6 @@ impl Service {
         if !retirement.local {
             let run = retirement.run_id.clone();
             crate::conversation_deletion::retired::detach(self, &run, &retirement.id).await?;
-            let account_run = run.clone();
-            let quota = self
-                .store
-                .read(move |db| db.pending_quota_for_run(&account_run))
-                .await?;
-            let account_guard = match quota {
-                Some((account, _)) => {
-                    Some(self.accounts.try_lock(&account).await.ok_or_else(|| {
-                        Error::unavailable(
-                            "The coding-agent account is busy. Retrying lease release.",
-                        )
-                    })?)
-                }
-                None => None,
-            };
             let mut detached = retirement.clone();
             *retirement = self
                 .store
@@ -1018,7 +1002,6 @@ impl Service {
                     Ok(detached)
                 })
                 .await?;
-            drop(account_guard);
             // This commit opens admission, independently of physical cleanup.
             self.worker.notify();
             self.worker.notify_retirement();
@@ -1163,7 +1146,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retiring_an_environment_preserves_pending_account_quota() {
+    async fn retiring_an_environment_preserves_account_quota_and_usage_recovery() {
         use crate::accounts::{Account, AccountState, Lease, usage::Usage};
         use crate::provider::Provider;
         use crate::worker::checkpoint::{Checkpoint, EventChanges};
@@ -1218,7 +1201,8 @@ mod tests {
 
         store
             .transaction(move |db| {
-                assert!(db.pending_quota_accounts()?.contains(&lease.account_id));
+                let exhausted = db.coding_account(&lease.account_id)?.unwrap().exhausted;
+                assert_eq!(exhausted.as_ref().unwrap().model, lease.model);
                 request_in(db, &run, &Expiration::new(Cause::NodeChange), false)?;
                 assert!(db.run_state(&run)?.unwrap().session_id.is_none());
                 assert!(
@@ -1234,9 +1218,20 @@ mod tests {
 
                 let mut account = db.coding_account(&next.account_id)?.unwrap();
                 account.usage = Some(Usage::from_value(&json!({
-                    "allowed": true, "checkedAt": now() + 1,
-                    "windows": [{ "id": "primary", "usedPercent": 0 }]
+                    "allowed": true, "checkedAt": account.exhausted.as_ref().unwrap().at + 1,
+                    "windows": [{ "id": "primary", "usedPercent": 100 }]
                 })));
+                crate::accounts::replenish(&mut account, Provider::Codex.driver());
+                assert!(account.exhausted.is_some());
+                db.save_coding_account(&account)?;
+
+                let mut account = db.coding_account(&next.account_id)?.unwrap();
+                account.usage = Some(Usage::from_value(&json!({
+                    "allowed": true, "checkedAt": account.exhausted.as_ref().unwrap().at + 2,
+                    "windows": [{ "id": "primary", "usedPercent": 99 }]
+                })));
+                crate::accounts::replenish(&mut account, Provider::Codex.driver());
+                assert!(account.exhausted.is_none());
                 db.save_coding_account(&account)?;
                 // The other slot becomes usable even if the old controller
                 // remains unreachable and still owns the retiring lease.

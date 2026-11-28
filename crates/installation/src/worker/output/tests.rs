@@ -1684,9 +1684,16 @@ async fn context_usage_survives_log_budget_and_keeps_the_latest_snapshot_on_the_
 
 #[tokio::test]
 async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() {
+    use crate::accounts::usage::Usage;
+
     let mut f = Fixture::new().await;
     let s = &f.service;
     let account_id = crate::accounts::broker::tests::add_account(s, Provider::Codex, "Quota").await;
+    let mut account = s.accounts.account(s, &account_id).await.unwrap();
+    account.usage = Some(Usage::from_value(&json!({
+        "allowed": true, "windows": [{ "id": "primary", "usedPercent": 99 }],
+    })));
+    s.store.save_coding_account(&account).await.unwrap();
     let lease = crate::accounts::Lease {
         account_id: account_id.clone(),
         provider: Provider::Codex,
@@ -1711,6 +1718,7 @@ async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() 
         .unwrap();
 
     let _refresh = s.accounts.lock(&account_id).await;
+    let mut stale = s.accounts.account(s, &account_id).await.unwrap();
     let event = Output::new(
         false,
         json!({"type":"turn.failed","error":{"code":"usage_limit_reached","message":"Quota reached"}}).to_string(),
@@ -1735,6 +1743,18 @@ async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() 
     .unwrap();
     assert!(exhausted);
     assert!(f.checkpoint.snapshot().await.provider_failed());
+    stale.usage = Some(Usage::from_value(&json!({
+        "allowed": true, "windows": [{ "id": "primary", "usedPercent": 100 }],
+    })));
+    s.store.save_coding_account(&stale).await.unwrap();
+    let account = s.accounts.account(s, &account_id).await.unwrap();
+    assert_eq!(account.usage().remaining("fixture-model"), Some(0.));
+    let exhaustion = account.exhausted.unwrap();
+    assert_eq!(exhaustion.model, "fixture-model");
+    assert_eq!(
+        exhaustion.usage.unwrap().remaining("fixture-model"),
+        Some(1.)
+    );
     let mut next = s.accounts.lease(s, &f.id).await.unwrap().unwrap();
     next.run_id = crate::config::id();
     let admission = s

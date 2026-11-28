@@ -31,6 +31,10 @@ pub struct Account {
     pub usage: Option<Usage>,
     pub last_used_at: Option<i64>,
     pub exhausted: Option<Exhaustion>,
+    /// Exhaustion observed when this snapshot was loaded from SQLite. The
+    /// outer option distinguishes a loaded empty row from a new account.
+    #[serde(skip)]
+    pub(super) loaded_exhaustion_at: Option<Option<i64>>,
     pub max_concurrent_runs: Option<u64>,
     /// Why a Codex banked reset is pending or could not be redeemed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +72,7 @@ impl Account {
             usage: None,
             last_used_at: None,
             exhausted: None,
+            loaded_exhaustion_at: None,
             max_concurrent_runs: Some(PARALLEL_RUNS),
             reset_error: None,
             priority: None,

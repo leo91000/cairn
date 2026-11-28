@@ -2,7 +2,6 @@
 mod terminal_tests;
 
 use crate::{
-    accounts::Exhaustion,
     config::now,
     error::Result,
     recovery::ProcessIdentity,
@@ -28,14 +27,6 @@ pub(crate) struct AntigravityProbeRetry {
     /// A launched wrapper may have reached the provider until a trusted
     /// controller rejection proves that it did not start.
     pub started: bool,
-}
-
-/// A terminal quota refusal observed under the managed turn's live account lease.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ManagedQuotaFailure {
-    pub account_id: String,
-    pub exhaustion: Exhaustion,
 }
 
 /// Restart state persisted once in `run_checkpoints`, serialized from this type.
@@ -112,8 +103,6 @@ pub struct RunCheckpoint {
     /// The adapter confirmed failure, independently of controller transport/exit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_failed: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) managed_quota_failure: Option<ManagedQuotaFailure>,
     /// The adapter stopped in Antigravity's CLI probe, before sending input.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub antigravity_probe_failed: Option<bool>,
@@ -1176,24 +1165,11 @@ impl Checkpoint {
                     // reattach a session to the environment already detached.
                     db.change_run(&id, changes)?;
                 }
-                if let Some(saved) = &mut saved {
-                    // Record the refusal with the terminal frame. Account
-                    // refresh may hold its lock across provider I/O, so the
-                    // worker applies exhaustion when it releases the lease.
-                    if managed_quota
-                        && let Some(lease) = db.account_lease(&id)?
-                        && let Some(account) = db.coding_account(&lease.account_id)?
-                    {
-                        saved.managed_quota_failure = Some(ManagedQuotaFailure {
-                            account_id: lease.account_id,
-                            exhaustion: Exhaustion {
-                                model: lease.model,
-                                at: now(),
-                                usage: account.usage,
-                            },
-                        });
-                    }
+                if let Some(saved) = &saved {
                     saved.store_in(db, &id)?;
+                }
+                if managed_quota {
+                    db.exhaust_managed_account(&id)?;
                 }
                 db.event(&id, &kind, &text, Some(&payload))?;
                 Ok(saved)
