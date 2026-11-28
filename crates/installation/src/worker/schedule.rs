@@ -1029,29 +1029,10 @@ pub(super) fn finish_recovery(
                 }
                 message => message,
             };
-            let waiting = current.trigger != "chat" && record.wakeup.is_some();
-            let fresh_wait = record.boundary["environmentState"] == "expired"
-                && record.boundary["sessionHandoff"].is_string();
-            if waiting && current.session_id.is_none() && !fresh_wait {
-                db.change_run(id,crate::runs::RunChanges {
-                    status: Some(RunStatus::Failed),
-                    finished_at: Some(Some(now())),
-                    recovery_pending: Some(false),
-                    account_wait_reason: Some(None),
-                    error: Some(Some("Cannot wait without a saved agent session. Working files were preserved.".into())),
-                    wakeup: Some(None),
-                    ..Default::default()
-                })?;
-                return Ok(false);
-            }
             let mut patch = crate::runs::RunChanges {
-                status: Some(if waiting {
-                    RunStatus::Waiting
-                } else {
-                    RunStatus::Succeeded
-                }),
-                finished_at: Some(if waiting { None } else { Some(now()) }),
-                resume_available: Some(waiting),
+                status: Some(RunStatus::Succeeded),
+                finished_at: Some(Some(now())),
+                resume_available: Some(false),
                 account_wait_reason: Some(None),
                 recovery_pending: Some(false),
                 error: Some(None),
@@ -1060,12 +1041,8 @@ pub(super) fn finish_recovery(
                 boundary: Some(json!({})),
                 ..Default::default()
             };
-            if waiting {
-                patch.boundary.as_mut().unwrap()["outcome"] = Value::Null;
-            } else {
-                // A compaction completed before the restart settles like one that did not.
-                crate::chats::keep_reply_after_compaction(&record.boundary, &mut patch)?;
-            }
+            // A compaction completed during restart preserves the preceding reply.
+            crate::chats::keep_reply_after_compaction(&record.boundary, &mut patch)?;
             db.change_run(id, patch)?;
             return Ok(false);
         }

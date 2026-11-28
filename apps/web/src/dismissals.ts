@@ -33,8 +33,13 @@ async function send(chatId: string, action: ConversationSnoozeAction, until: num
   localSnoozes[chatId] = until
   const latest = () => current === generation && requests.get(chatId) === request
   try {
-    await snoozeChat(api, { chatId, action })
+    const output = await snoozeChat(api, { chatId, action })
     if (latest()) {
+      const observed = chatList.value.find(chat => chat.id === chatId)
+      if ((observed?.snoozedUntil ?? null) === output.snoozedUntil)
+        delete localSnoozes[chatId]
+      else
+        localSnoozes[chatId] = output.snoozedUntil
       if (action.kind === 'restore')
         clearLocalRead(chatId)
       notify(message)

@@ -363,9 +363,12 @@ return {
             .await
             .unwrap();
         let chat_id = text(&chat, "id").to_owned();
-        s.chat_send(&chat_id, json!({ "text": "Probe" }))
-            .await
-            .unwrap();
+        s.chat_send(
+            &chat_id,
+            json!({ "id": cairn_installation::config::id(), "text": "Probe" }),
+        )
+        .await
+        .unwrap();
         s.chat_tick(&std::collections::HashSet::new())
             .await
             .unwrap();

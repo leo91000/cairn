@@ -288,8 +288,9 @@ pub(crate) fn rule_has_working_conversation(db: &Db<'_>, rule_id: &str) -> Resul
             JOIN conversations c ON c.id = h.chat_id \
             WHERE h.rule_id = ?1 AND c.lifecycle = 'active' AND ( \
                 EXISTS(SELECT 1 FROM runs r WHERE r.id = c.run_id AND r.status IN ('queued','running','waiting')) \
-                OR EXISTS(SELECT 1 FROM chat_messages m WHERE m.chat_id = c.id AND m.status IN ('queued','sending')) \
-                OR EXISTS(SELECT 1 FROM durable_wakeups w WHERE w.chat_id = c.id) \
+                OR EXISTS(SELECT 1 FROM chat_messages m WHERE m.chat_id = c.id \
+                   AND m.status IN ('queued','sending') AND (c.paused=0 OR m.question_id IS NOT NULL)) \
+                OR (c.paused=0 AND EXISTS(SELECT 1 FROM durable_wakeups w WHERE w.chat_id = c.id)) \
             ) \
         )",
         [rule_id],

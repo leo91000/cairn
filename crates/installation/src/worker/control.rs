@@ -487,10 +487,6 @@ pub(crate) fn requeue(
     {
         return Err(Error::conflict("This task already has an active run."));
     }
-    // A parked mission completed its provider turn. Explicitly continuing it
-    // creates a new turn, while recovery of interrupted turns keeps its identity.
-    let completed_mission =
-        state.trigger != "chat" && checkpoint.as_ref().is_some_and(RunCheckpoint::completed);
     // A manual resume may arrive before chat_tick observes the terminal turn.
     // Its scheduled continuation must not survive into the resumed execution.
     crate::chats::continuation::cancel_for_run(db, id)?;
@@ -578,10 +574,6 @@ pub(crate) fn requeue(
         }
         execution.recovery = false;
         patch.boundary.as_mut().unwrap()["chatExecution"] = serde_json::to_value(execution)?;
-    }
-    if completed_mission {
-        patch.boundary.as_mut().unwrap()["missionTurnId"] = crate::config::id().into();
-        patch.boundary.as_mut().unwrap()["waitContinuation"] = Value::Null;
     }
     db.change_run(id, patch)?;
     let result = required(db.run(id)?, "Run not found")?;
@@ -1429,35 +1421,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manual_mission_resume_changes_completed_turn_identity_but_keeps_interrupted_turns() {
+    async fn manual_resume_keeps_the_saved_turn_and_clears_transient_state() {
         for completed in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let store = crate::store::Store::open(root.path()).unwrap();
             store
                 .transaction(move |db| {
                     db.add_run_fixture(&json!({
-                    "id": "mission", "taskId": "task", "status": "cancelled", "createdAt": 0,
-                    "resumeAvailable": true, "missionTurnId": "previous-turn",
-                    "waitContinuation": { "observation": { "state": "completed" } },
+                    "id": "run", "taskId": "chat", "trigger": "chat", "status": "cancelled", "createdAt": 0,
+                    "resumeAvailable": true, "chatExecution": { "messageId": "previous-turn" },
                 }), None)?;
-                    db.save_checkpoint_boundary("mission", &json!({
+                    db.save_checkpoint_boundary("run", &json!({
                     "completed": completed, "outputInterrupted": true, "launched": true, "prepared": { "cwd": "/workspace" },
                         "retiredEnvironmentDeadline": 1000,
                         "retainedCompletion": {"messageId": "previous", "finishedAt": 900},
                 }))?;
-                    let resumed = requeue(db, "mission", None, None, None, None)?;
+                    let resumed = requeue(db, "run", None, None, None, None)?;
                     assert_eq!(resumed["status"], "queued");
-                    let checkpoint = db.checkpoint_boundary("mission")?.unwrap();
+                    let checkpoint = db.checkpoint_boundary("run")?.unwrap();
                     assert!(checkpoint["outputInterrupted"].is_null());
                     assert!(checkpoint["retiredEnvironmentDeadline"].is_null());
                     assert!(checkpoint["retainedCompletion"].is_null());
-                    if completed {
-                        assert_ne!(resumed["missionTurnId"], "previous-turn");
-                        assert!(resumed["waitContinuation"].is_null());
-                    } else {
-                        assert_eq!(resumed["missionTurnId"], "previous-turn");
-                        assert!(resumed["waitContinuation"].is_object());
-                    }
+                    assert_eq!(resumed["chatExecution"]["messageId"], "previous-turn");
                     Ok(())
                 })
                 .await

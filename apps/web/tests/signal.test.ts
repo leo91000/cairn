@@ -150,6 +150,14 @@ describe('the Fil', () => {
     expect(fil.forYou[1]).toMatchObject({ to: '/chats/question', subtitle: 'Needs your answer' })
   })
 
+  it('surfaces a paused schedule that failed before its first run', () => {
+    const item = chat('schedule', { paused: true, error: 'Cannot prepare the workspace.', unread: true })
+    expect(filOf([item]).forYou[0]).toMatchObject({
+      kind: 'failed',
+      subtitle: 'Cannot prepare the workspace.',
+    })
+  })
+
   it('leaves questions a member cannot answer waiting for someone with access', () => {
     const question = chat('question', { pendingQuestions: 1, status: 'running' })
     const fil = filOf([question], {}, {}, Date.now(), [])

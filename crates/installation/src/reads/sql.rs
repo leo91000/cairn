@@ -101,6 +101,16 @@ impl Db<'_> {
         Ok(snoozes)
     }
 
+    pub fn snoozed_until(&self, account: &str, chat_id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .0
+            .prepare_cached(
+                "SELECT snoozed_until FROM account_snoozes WHERE account_id=? AND chat_id=?",
+            )?
+            .query_row(params![account, chat_id], |row| row.get(0))
+            .optional()?)
+    }
+
     pub fn set_snooze(
         &self,
         account: &str,
@@ -112,7 +122,8 @@ impl Db<'_> {
                 self.0
                     .prepare_cached(
                         "INSERT INTO account_snoozes VALUES(?,?,?,?) ON CONFLICT DO UPDATE
-                         SET finished_at=excluded.finished_at,snoozed_until=excluded.snoozed_until",
+                         SET finished_at=excluded.finished_at,snoozed_until=excluded.snoozed_until
+                         WHERE excluded.finished_at >= account_snoozes.finished_at",
                     )?
                     .execute(params![account, chat_id, snooze.finished_at, snooze.until])?;
             }

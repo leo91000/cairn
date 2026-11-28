@@ -115,7 +115,8 @@ impl Reads {
             let id = text(chat, "id").to_owned();
             let question = chat["pendingQuestions"].as_u64().unwrap_or(0) > 0;
             let status = chat["status"].as_str();
-            let failed = matches!(status, Some("failed" | "interrupted"));
+            let preparation_failed = chat["paused"] == true && chat["error"].is_string();
+            let failed = matches!(status, Some("failed" | "interrupted")) || preparation_failed;
             let blocked = status == Some("succeeded") && chat["outcome"]["status"] == "blocked";
             let quiet_rule = !chat["originRule"].is_null() && chat["personParticipated"] != true;
             let finished = matches!(status, Some("succeeded" | "failed" | "interrupted"))
@@ -159,7 +160,7 @@ impl Reads {
 
             let unread = (wants_attention || expired_snooze_at.is_some())
                 && db.kv(&format!("plugin-conversation:{id}"))?.is_none()
-                && self.unread(&id, effective_at, blocked);
+                && self.unread(&id, effective_at, blocked || preparation_failed);
             chat["unread"] = unread.into();
             if unread {
                 chat["preview"] = summary_preview(db, text(chat, "runId"))?;
@@ -282,7 +283,8 @@ pub(crate) async fn snooze(
     };
     let account = account.to_owned();
     let chat = input.chat_id.to_string();
-    s.store
+    let snoozed_until = s
+        .store
         .transaction(move |db| {
             db.start_reading(&account, at)?;
             if let Some(snooze) = snooze {
@@ -290,12 +292,12 @@ pub(crate) async fn snooze(
             } else {
                 db.restore_snooze(&account, &chat)?;
             }
-            Ok(())
+            db.snoozed_until(&account, &chat)
         })
         .await?;
     Ok(SetConversationSnoozeOutput {
         chat_id: input.chat_id,
-        snoozed_until: snooze.map(|s| s.until),
+        snoozed_until,
     })
 }
 

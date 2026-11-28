@@ -298,6 +298,66 @@ async fn clock_cron_rule_catches_up_once_guards_overlap_and_runs_now() {
 }
 
 #[tokio::test]
+async fn a_clock_brief_at_the_legacy_limit_can_be_edited_and_duplicated() {
+    let app = App::new().await;
+    let mut definition = schedule_rule_definition(
+        "Preserve the full brief",
+        &json!({ "type": "clock", "cron": "0 9 * * *", "timezone": "UTC" }),
+    );
+    let prompt = "🗒".repeat(50_000);
+    definition["steps"][0]["then"][0]["action"]["prompt"]["value"] = prompt.clone().into();
+    let (status, created) = app
+        .request(
+            &app.owner,
+            "POST",
+            "/api/hook-rules",
+            json!({ "definition": definition }),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Could not save the full legacy brief"
+    );
+    let rule = text(&created, "id");
+    definition["description"] = "Edited description".into();
+    let (status, edited) = app
+        .request(
+            &app.owner,
+            "PUT",
+            &format!("/api/hook-rules/{rule}"),
+            json!({ "ruleId": rule, "revision": created["revision"], "definition": definition }),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Could not edit the full legacy brief"
+    );
+    assert_eq!(
+        edited["definition"]["steps"][0]["then"][0]["action"]["prompt"]["value"],
+        prompt
+    );
+    let (status, copied) = app
+        .request(
+            &app.owner,
+            "POST",
+            &format!("/api/hook-rules/{rule}/duplicate"),
+            json!({ "ruleId": rule }),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Could not duplicate the full legacy brief"
+    );
+    assert_eq!(
+        copied["definition"]["steps"][0]["then"][0]["action"]["prompt"]["value"],
+        prompt
+    );
+}
+
+#[tokio::test]
 async fn clock_single_date_fires_once_and_never_repeats() {
     let app = App::new().await;
     let target = now() + 60_000;
@@ -705,6 +765,33 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         ],
     ).unwrap();
 
+    let converted_run = id();
+    conn.execute(
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,finished_at,snapshot,boundary, \
+          recovery_pending,resume_available,resume_count) \
+         VALUES(?1,?2,'succeeded','chat',?3,?3,?4,?5,0,0,0)",
+        params![
+            converted_run,
+            regular_chat_id,
+            t0,
+            json!({ "agent": agent, "task": { "name": "Existing chat", "prompt": "Old brief", "worktree": false } }).to_string(),
+            json!({ "sourceTaskId": active_mission_id, "sourceTaskPrompt": "Old brief" }).to_string(),
+        ],
+    ).unwrap();
+    conn.execute(
+        "UPDATE conversations SET run_id=?1 WHERE id=?2",
+        params![converted_run, regular_chat_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO run_checkpoints(run_id,state) VALUES(?1,?2)",
+        params![
+            converted_run,
+            json!({ "prepared": { "workspaces": [{ "kind": "direct" }] } }).to_string()
+        ],
+    )
+    .unwrap();
+
     // Seed legacy account_reads & account_dismissals (1 active snooze, 1 permanent dismiss).
     conn.execute(
         "INSERT INTO account_reads VALUES('owner-acct','chat',?1,?2)",
@@ -896,6 +983,17 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         )
         .unwrap();
     assert_eq!(regular_read, t0 + 1000);
+    let converted: (String, String, bool, Option<String>) = migrated.query_row(
+        "SELECT c.run_id,h.rule_id,json_extract(r.snapshot,'$.task.worktree'),json_extract(k.state,'$.prepared') \
+         FROM conversations c JOIN hook_rule_conversations h ON h.chat_id=c.id \
+         JOIN runs r ON r.id=c.run_id JOIN run_checkpoints k ON k.run_id=r.id WHERE c.id=?",
+        [&regular_chat_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).unwrap();
+    assert_eq!(
+        converted,
+        (converted_run, active_mission_id.clone(), true, None)
+    );
     let owner_snooze: i64 = migrated
         .query_row(
             "SELECT snoozed_until FROM account_snoozes WHERE account_id='owner-acct' AND chat_id=?1",

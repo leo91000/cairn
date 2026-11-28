@@ -148,8 +148,8 @@ export function filOf(
     else if (chat.pendingQuestions > 0) {
       forYou.push({ ...base, kind: 'question', subtitle: chat.pendingQuestions > 1 ? `${chat.pendingQuestions} questions need your answer` : 'Needs your answer' })
     }
-    else if (chat.status === 'failed' || chat.status === 'interrupted') {
-      forYou.push({ ...base, kind: 'failed', subtitle: chat.status === 'failed' ? 'Failed' : 'Interrupted' })
+    else if (chat.status === 'failed' || chat.status === 'interrupted' || (chat.paused && chat.error)) {
+      forYou.push({ ...base, kind: 'failed', subtitle: chat.error || (chat.status === 'interrupted' ? 'Interrupted' : 'Failed') })
     }
     else if (blocked) {
       const item = {

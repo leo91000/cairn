@@ -407,6 +407,16 @@ async fn conversations_can_be_snoozed_restored_and_cleared_by_mark_read() {
     assert_eq!(status, StatusCode::OK, "{snoozed}");
     assert_eq!(snoozed, json!({ "chatId": chat_id, "snoozedUntil": until }));
 
+    let (status, stale) = app
+        .snooze(
+            &app.owner,
+            chat_id,
+            json!({ "kind": "snooze", "finishedAt": finished_at - 1, "until": until + 60_000 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{stale}");
+    assert_eq!(stale["snoozedUntil"], until);
+
     // Owner sees snoozedUntil and unread=false while snooze is active; member is unaffected.
     let owner_list = app.get(&app.owner, "/api/chats").await;
     let owner_item = find(&owner_list, "id", chat_id);
@@ -557,13 +567,22 @@ async fn rule_started_conversations_stay_quiet_unless_blocked_or_a_person_writes
         )
         .await
         .unwrap();
-    let chat_id_for_writer = chat_id.clone();
+    let message = id();
+    let (status, sent) = app
+        .request(
+            &app.owner,
+            "POST",
+            &format!("/api/chats/{chat_id}/messages"),
+            json!({ "id": message, "text": "Please continue the review." }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
     app.service
         .store
         .transaction(move |db| {
             db.0.execute(
-                "INSERT INTO conversation_writers(chat_id,kind,account_id,updated_at) VALUES(?1,'person','owner-account',?2)",
-                rusqlite::params![chat_id_for_writer, now()],
+                "UPDATE chat_messages SET status='delivered' WHERE id=?",
+                [&message],
             )?;
             Ok(())
         })

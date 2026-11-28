@@ -2501,30 +2501,29 @@ async fn waiting_mission_restart_releases_attempt_before_deadline_even_when_canc
 }
 
 #[tokio::test]
-async fn completed_mission_recovery_keeps_resume_and_cancellation_wins_atomically() {
+async fn completed_conversation_recovery_preserves_outcome_and_respects_cancellation() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(root.path()).unwrap();
     store
         .transaction(|db| {
             let record = json!({
-                "id": "mission", "taskId": "task", "status": "queued", "createdAt": 0,
+                "id": "run", "taskId": "chat", "trigger": "chat", "status": "queued", "createdAt": 0,
                 "recoveryPending": true, "sessionId": "saved", "resumeAvailable": false,
-                "wakeup": { "id": "wake" },
                 "outcome": { "status": "completed" },
             });
             db.add_run_fixture(&record, None)?;
             let checkpoint = RunCheckpoint::from_value(json!({ "completed": true }))?;
-            assert!(!finish_recovery(db, "mission", Some(&checkpoint))?);
-            let waiting = db.run("mission")?.unwrap();
-            assert_eq!(waiting["status"], "waiting");
-            assert_eq!(waiting["resumeAvailable"], true);
-            assert!(waiting["finishedAt"].is_null());
-            assert!(waiting["outcome"].is_null());
+            assert!(!finish_recovery(db, "run", Some(&checkpoint))?);
+            let finished = db.run("run")?.unwrap();
+            assert_eq!(finished["status"], "succeeded");
+            assert_eq!(finished["resumeAvailable"], false);
+            assert!(finished["finishedAt"].is_number());
+            assert_eq!(finished["outcome"]["status"], "completed");
             for settled in [false, true] {
                 // A stale recovery snapshot preceded this cancellation. Completion
                 // must read it in the same transaction that writes the next state.
                 db.change_run(
-                    "mission",
+                    "run",
                     crate::runs::RunChanges {
                         status: Some(cairn_contracts::RunStatus::Queued),
                         recovery_pending: Some(true),
@@ -2536,11 +2535,11 @@ async fn completed_mission_recovery_keeps_resume_and_cancellation_wins_atomicall
                 let mut checkpoint = checkpoint.clone();
                 if settled {
                     checkpoint.settled = Some(Some(Settled::from_state(
-                        &db.run_state("mission")?.unwrap(),
+                        &db.run_state("run")?.unwrap(),
                     )));
                 }
-                assert!(!finish_recovery(db, "mission", Some(&checkpoint))?);
-                let cancelled = db.run("mission")?.unwrap();
+                assert!(!finish_recovery(db, "run", Some(&checkpoint))?);
+                let cancelled = db.run("run")?.unwrap();
                 assert_eq!(cancelled["status"], "cancelled");
                 assert!(cancelled["wakeup"].is_null());
                 assert_eq!(cancelled["recoveryPending"], false);

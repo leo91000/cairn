@@ -53,7 +53,7 @@ pub(crate) const RULE_OPERATIONS: &[RuleOperation] = &[
     RuleOperation {
         name: "create_hook_rule",
         scope: "manage",
-        description: "Create a hook rule for the owner who authorized this connection; creationId makes retries return the same rule. Installation agents write rules only for the person of a conversation that this person alone wrote, never in delegated or rule-started conversations.",
+        description: "Create a hook rule for the account that authorized this connection. Use the clock trigger and a startAgent action to schedule an agent. Use ruleConversationWorking to skip launches while the previous conversation works. creationId makes retries return the same rule. Installation agents write rules only for the person of a conversation that this person alone wrote, never in delegated or rule-started conversations.",
     },
     RuleOperation {
         name: "replace_hook_rule",

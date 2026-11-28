@@ -639,6 +639,73 @@ async fn agents_and_public_clients_follow_the_rule_write_limits() {
 }
 
 #[tokio::test]
+async fn clock_rules_run_now_through_public_and_eligible_installation_tools() {
+    let f = granted().await;
+    let manager = common::relay_fixture::grant(&f.s, &["read", "manage"]).await;
+    let runner = common::relay_fixture::grant(&f.s, &["read", "run"]).await;
+    let definition = json!({
+        "name": "Check weekly notes",
+        "trigger": { "type": "clock", "cron": "0 9 * * 1", "timezone": "UTC" },
+        "executionAgentId": MAIN_AGENT_ID,
+        "limits": cairn_contracts::HookRuleLimits::default(),
+        "steps": [{
+            "type": "action",
+            "id": "start",
+            "action": {
+                "type": "startAgent",
+                "agentId": MAIN_AGENT_ID,
+                "prompt": { "type": "literal", "value": "Review the notes." },
+            },
+        }],
+    });
+    let created = f
+        .mcp(
+            "/mcp",
+            &manager,
+            "create_hook_rule",
+            json!({ "definition": definition }),
+        )
+        .await;
+    assert!(!refused(&created), "{created}");
+    let rule = mcp_result(&created);
+    assert_eq!(rule["creatorAccountId"], OWNER);
+    let rule_id = text(rule, "id");
+    let command = json!({ "ruleId": rule_id });
+
+    let missing_scope = f
+        .mcp("/mcp", &manager, "run_hook_rule", command.clone())
+        .await;
+    assert!(refused(&missing_scope), "{missing_scope}");
+    assert!(refused(
+        &agent(&f, &f.bearer, "run_hook_rule", command.clone()).await
+    ));
+
+    let public = f
+        .mcp("/mcp", &runner, "run_hook_rule", command.clone())
+        .await;
+    assert!(!refused(&public), "{public}");
+    assert_eq!(mcp_result(&public)["ruleId"], rule_id);
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    let installation = agent(&f, &bearer, "run_hook_rule", command).await;
+    assert!(!refused(&installation), "{installation}");
+    assert_eq!(mcp_result(&installation)["ruleId"], rule_id);
+
+    cairn_installation::rules::engine::tick(&f.s).await.unwrap();
+    let (_, chats) = call(&f, OWNER, "GET", "/api/chats", Value::Null).await;
+    assert_eq!(
+        chats
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|chat| {
+                chat["originRule"]["ruleId"] == rule_id && chat["originRule"]["schedule"] == true
+            })
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn the_catalog_offers_what_usable_agents_hold() {
     let f = granted().await;
     common::relay_fixture::add_member(&f.s, MEMBER, "membership-member").await;

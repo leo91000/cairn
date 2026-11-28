@@ -1,4 +1,4 @@
-//! Durable waits shared by conversations and missions, independent of execution resources.
+//! Durable conversation waits, independent of execution resources.
 //! Cairn provides time waits and run dependencies; plugins granted to the agent add
 //! theirs (see `plugins::conditions`).
 use crate::chats::continuation;
@@ -124,12 +124,12 @@ pub fn tool(plugin_conditions: &[Value], delegates: bool) -> Value {
             it (1 to 86400 seconds), as the deadline of the whole group. \
             If already complete, returns deferred=false and the observation: continue this turn. \
             Otherwise saves a wakeup and returns deferred=true: end this agent turn. Managed jobs and useful containers keep the environment alive within its original deadline. Cairn checks the conditions without waking the LLM and resumes this \
-            conversation or mission when the time or result arrives or the timeout expires, subject to capacity. \
+            conversation when the time or result arrives or the timeout expires, subject to capacity. \
             A time reached is completed, not timed_out. External completion includes failure and \
             cancellation; a group result lists each condition with its result, or null when it has none yet. Plugin-owned result fields are preserved in pluginResult. \
             Inspect the results before acting. Start local background work with start_job, then wait for its jobId; shell backgrounding is not supervised. Run dependencies require installation access; delegated \
             tasks require delegation; plugin \
-            conditions use the agent's plugin grants. One wait is stored per conversation or mission run. Identical \
+            conditions use the agent's plugin grants. One wait is stored per conversation. Identical \
             repeated requests preserve the deadline; a different request replaces the previous wait. \
             Queued follow-ups start after the continuation. A new user message, stop, deletion, \
             terminal turn failure or manual run resume cancels the wait; queue pause holds it.",
@@ -502,9 +502,6 @@ fn input_revision(
     run: &Value,
     chat: Option<&crate::chats::Conversation>,
 ) -> Result<(i64, Vec<String>)> {
-    if run["trigger"] != "chat" {
-        return Ok((0, Vec::new()));
-    }
     let acknowledged = db.0.query_row(
         "SELECT COALESCE(MAX(id),0) FROM events WHERE run_id=? AND type='chat.user'",
         [text(run, "id")],
@@ -525,21 +522,14 @@ fn input_revision(
 fn registering(db: &Db<'_>, bearer: &str, request: &Request) -> Result<(Value, Owner)> {
     let run = crate::project_workspaces::authorize_in(db, bearer)?;
     let owner = Owner::for_run(db, &run)?;
-    if !owner.chat && (run["moveRequest"].is_object() || run["moveReservation"].is_string()) {
-        return Err(Error::conflict(
-            "Finish the node move before registering a mission wait.",
-        ));
+    let chat = owner.conversation.as_ref().unwrap();
+    if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
+        return Err(Error::conflict("This conversation is no longer active."));
     }
-    if owner.chat {
-        let chat = owner.conversation.as_ref().unwrap();
-        if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
-            return Err(Error::conflict("This conversation is no longer active."));
-        }
-        if chat.paused || continuation::has_unhandled_input(db, chat, &run)? {
-            return Err(Error::conflict(
-                "Handle pending user input before registering a wait.",
-            ));
-        }
+    if chat.paused || continuation::has_unhandled_input(db, chat, &run)? {
+        return Err(Error::conflict(
+            "Handle pending user input before registering a wait.",
+        ));
     }
     let mut dependencies = Vec::new();
     if let Some(condition) = &request.condition {

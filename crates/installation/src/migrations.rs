@@ -585,8 +585,6 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             "UPDATE runs SET task_id=?1,trigger='chat', \
              status=CASE WHEN status='waiting' AND ?2 THEN 'succeeded' ELSE status END, \
              finished_at=CASE WHEN status='waiting' AND ?2 THEN coalesce(finished_at,?3) ELSE finished_at END, \
-             snapshot=CASE WHEN json_type(snapshot,'$.task')='object' \
-                 THEN json_set(snapshot,'$.task.worktree',json('true')) ELSE snapshot END, \
              boundary=json_set(boundary,'$.chatExecution',json(?4),'$.sourceTaskId',?5, \
                  '$.sourceTaskPrompt',?6,'$.sourceSessionId',session_id) WHERE id=?7",
             params![chat_id, legacy_wait.is_some(), updated_at, execution.to_string(), run.task_id, brief, run.id],
@@ -596,16 +594,6 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
              WHERE run_id=?1 AND json_extract(state,'$.launched')=1 \
              AND json_extract(state,'$.launchedTurn') IS NULL",
             params![run.id, turn],
-        )?;
-        // The shared project is legacy input, never the migrated conversation's
-        // working directory. Leave the project and saved files in place.
-        tx.execute(
-            "UPDATE run_checkpoints SET state=json_remove(state,'$.prepared','$.workspaceInitialized') \
-             WHERE run_id=?1 AND EXISTS( \
-                 SELECT 1 FROM json_each(state,'$.prepared.workspaces') \
-                 WHERE json_extract(value,'$.kind')='direct' \
-             )",
-            [&run.id],
         )?;
         if legacy_wait.is_some() {
             tx.execute(
@@ -659,6 +647,17 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             ],
         )?;
     }
+
+    // Include conversations the old converter had already created. Their saved
+    // direct preparation cannot become the working directory of another turn.
+    tx.execute_batch(
+        "UPDATE runs SET snapshot=json_set(snapshot,'$.task.worktree',json('true')) \
+         WHERE json_type(boundary,'$.sourceTaskId')='text' AND json_type(snapshot,'$.task')='object'; \
+         UPDATE run_checkpoints SET state=json_remove(state,'$.prepared','$.workspaceInitialized') \
+         WHERE run_id IN (SELECT id FROM runs WHERE json_type(boundary,'$.sourceTaskId')='text') \
+           AND EXISTS(SELECT 1 FROM json_each(state,'$.prepared.workspaces') \
+                      WHERE json_extract(value,'$.kind')='direct');",
+    )?;
 
     // Migrate account_reads and account_dismissals to v39 chat-only tables.
     tx.execute_batch(

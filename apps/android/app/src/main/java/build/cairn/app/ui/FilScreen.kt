@@ -40,7 +40,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -101,7 +100,7 @@ internal data class FeedItem(
     /** The opening of the agent's final message, for finished work not read yet. */
     val preview: String? = null,
     val requester: FeedRequester? = null,
-    val schedule: String? = null,
+    val originRule: build.cairn.contracts.ChatRuleOrigin? = null,
     /** The coding agent of its latest turn. */
     val harness: String? = null,
     val statusLabel: String = subtitle,
@@ -213,13 +212,14 @@ internal fun buildFeed(
                             )
                         },
                     harness = chat.provider,
-                    schedule = chat.originRule?.ruleName,
+                    originRule = chat.originRule,
                     project = chat.projectName,
                     statusLabel =
                         when (kind) {
                             FeedKind.QUESTION -> "Répondre"
                             FeedKind.RECONNECT -> "Connexion requise"
                             FeedKind.REVIEW -> "Bloquée"
+                            FeedKind.FAILED_CHAT -> "Échec"
                             FeedKind.SNOOZED -> "Reportée"
                             FeedKind.RUNNING_CHAT ->
                                 if (chat.exclusiveSuspended) "Suspendue"
@@ -249,7 +249,8 @@ internal fun buildFeed(
                 wait?.account != null ->
                     forYou +=
                         item(FeedKind.RECONNECT, "Compte ${wait.account} requis pour continuer")
-                chat.status in setOf("failed", "interrupted") ->
+                chat.status in setOf("failed", "interrupted") ||
+                    (chat.paused && chat.error != null) ->
                     forYou +=
                         item(
                             FeedKind.FAILED_CHAT,
@@ -358,47 +359,6 @@ internal fun threadFeed(items: List<FeedItem>): List<Pair<FeedItem, Boolean>> {
     return rows
 }
 
-/** A Fil row, or a run of quiet scheduled conversations folded into one. */
-internal sealed interface FeedEntry {
-    data class Line(val item: FeedItem, val nested: Boolean) : FeedEntry
-
-    data class Fold(val items: List<FeedItem>) : FeedEntry {
-        val key
-            get() = "fold:${items.first().key}"
-    }
-}
-
-/**
- * Folds consecutive scheduled conversations that finished as expected and were read into one row,
- * so that scheduled checks stop crowding the work worth reading. A lone one, a conversation with
- * delegated work below it, and nested rows stay as they are.
- */
-internal fun foldFeed(rows: List<Pair<FeedItem, Boolean>>): List<FeedEntry> {
-    fun quiet(index: Int): Boolean {
-        val (item, nested) = rows[index]
-        return !nested &&
-            item.schedule != null &&
-            item.finished &&
-            !item.unread &&
-            rows.getOrNull(index + 1)?.second != true
-    }
-
-    val entries = mutableListOf<FeedEntry>()
-    var index = 0
-    while (index < rows.size) {
-        var end = index
-        while (end < rows.size && quiet(end)) end++
-        if (end - index >= 2) {
-            entries += FeedEntry.Fold(rows.subList(index, end).map { it.first })
-            index = end
-        } else {
-            entries += FeedEntry.Line(rows[index].first, rows[index].second)
-            index++
-        }
-    }
-    return entries
-}
-
 /** The Fil in reading order, one key per item: what a swipe between pages moves through. */
 internal fun Feed.keys() = threadFeed(all).map { (item, _) -> item.key }
 
@@ -458,7 +418,6 @@ fun FilScreen(
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
     val feed = buildFeed(chats.orEmpty(), vm.localReads, vm.localSnoozes, now, state.usableAgents)
     var selectedView by rememberSaveable { mutableIntStateOf(0) }
-    var unfolded by rememberSaveable { mutableStateOf(listOf<String>()) }
     // A finished result previewed by a long press, without opening or reading it.
     var peeked by remember { mutableStateOf<FeedItem?>(null) }
     val views = listOf(feed.unread, feed.ongoing, feed.all)
@@ -532,35 +491,7 @@ fun FilScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        // Quiet scheduled conversations fold together.
-        val entries = foldFeed(threadFeed(visible))
-        val lines = entries.flatMap { entry ->
-            when (entry) {
-                is FeedEntry.Line -> listOf(entry)
-                is FeedEntry.Fold ->
-                    listOf(entry) +
-                        if (entry.key in unfolded)
-                            entry.items.map { FeedEntry.Line(it, nested = true) }
-                        else emptyList()
-            }
-        }
-        items(
-            lines,
-            key = {
-                when (it) {
-                    is FeedEntry.Line -> it.item.key
-                    is FeedEntry.Fold -> it.key
-                }
-            },
-        ) { line ->
-            if (line is FeedEntry.Fold) {
-                FoldRow(line, line.key in unfolded, now) {
-                    unfolded =
-                        if (line.key in unfolded) unfolded - line.key else unfolded + line.key
-                }
-                return@items
-            }
-            val (item, nested) = line as FeedEntry.Line
+        items(threadFeed(visible), key = { it.first.key }) { (item, nested) ->
             FeedRow(
                 item,
                 { open(item) },
@@ -583,95 +514,6 @@ fun FilScreen(
     }
 }
 
-/**
- * Quiet scheduled conversations folded into one row: two stacked avatars, their count and names.
- */
-@Composable
-private fun FoldRow(fold: FeedEntry.Fold, open: Boolean, now: Long, toggle: () -> Unit) {
-    val rotation by
-        androidx.compose.animation.core.animateFloatAsState(
-            if (open) 180f else 0f,
-            tween(200),
-            label = "fil-fold",
-        )
-    Surface(
-        onClick = toggle,
-        color = Color.Transparent,
-        modifier =
-            Modifier.fillMaxWidth().testTag("fil-fold").semantics {
-                stateDescription = if (open) "Déplié" else "Replié"
-            },
-    ) {
-        Row(
-            Modifier.widthIn(max = 760.dp)
-                .heightIn(min = 56.dp)
-                .padding(start = 22.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(Modifier.size(28.dp)) {
-                Box(Modifier.align(Alignment.TopStart).alpha(0.8f)) {
-                    AgentAvatar(
-                        fold.items[1].agent,
-                        fold.items[1].agentKey.ifBlank { fold.items[1].agent },
-                        19.dp,
-                    )
-                }
-                Box(
-                    Modifier.align(Alignment.BottomEnd)
-                        .background(MaterialTheme.colorScheme.background, RoundedCornerShape(7.dp))
-                        .padding(1.5.dp)
-                ) {
-                    AgentAvatar(
-                        fold.items[0].agent,
-                        fold.items[0].agentKey.ifBlank { fold.items[0].agent },
-                        19.dp,
-                    )
-                }
-            }
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "${fold.items.size} programmations terminées",
-                        Modifier.weight(1f),
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Stamp(fold.items.first().stamp, now)
-                }
-                Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        CairnIcons.Retry,
-                        null,
-                        Modifier.size(12.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(
-                        fold.items.joinToString(" · ") { it.title },
-                        Modifier.weight(1f).padding(start = 4.dp),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            // Where other rows have their actions, so times line up.
-            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                Icon(
-                    CairnIcons.Down,
-                    null,
-                    Modifier.size(20.dp).rotate(rotation),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-/** A finished result's opening, read without opening the work, which stays unread. */
 @Composable
 internal fun PeekSheet(item: FeedItem, now: Long, close: () -> Unit, open: () -> Unit) {
     ModalBottomSheet(
@@ -1150,22 +992,13 @@ private fun FeedRow(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
-                            if (!nested && item.schedule != null)
-                                Icon(
-                                    CairnIcons.Retry,
-                                    "Programmation",
-                                    Modifier.padding(start = if (item.finished) 0.dp else 4.dp)
-                                        .size(12.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
                             // The avatar already names the agent: the detail line gives the
                             // project.
                             if (!nested)
                                 Text(
-                                    (if (item.finished || item.schedule != null) "" else " · ") +
+                                    (if (item.finished) "" else " · ") +
                                         (item.project?.ifBlank { null } ?: item.agent),
-                                    Modifier.weight(1f)
-                                        .padding(start = if (item.schedule != null) 4.dp else 0.dp),
+                                    Modifier.weight(1f),
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
@@ -1189,6 +1022,17 @@ private fun FeedRow(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
                         )
+                    item.originRule?.let { origin ->
+                        val type = if (origin.schedule) "Programmation" else "Règle"
+                        Text(
+                            "$type · ${origin.ruleName}",
+                            Modifier.padding(start = inset),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                     if (!nested)
                         item.requester?.let {
                             Text(

@@ -100,7 +100,7 @@ test('offers recovery when Connections cannot load after a deployment', async ({
   deployed = true
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
-  await page.getByRole('link', { name: 'Connections', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Atelier sections' }).getByRole('link', { name: 'Connections', exact: true }).click()
   await expect(page.getByRole('alert').filter({ hasText: 'Reload Cairn' })).toContainText('This page couldn’t load.')
   await expect(page).toHaveURL(`${webUrl}/installations/demo/atelier`)
   await expect(page.getByRole('heading', { name: 'Atelier', exact: true })).toBeVisible()

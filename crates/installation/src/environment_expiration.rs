@@ -572,14 +572,12 @@ fn detach_environment_in(
     }
 
     let chat = db.conversation_for_run(run_id)?;
-    let mission = run["trigger"] != "chat";
     let interrupted = RunStatus::of(&run).is_some_and(RunStatus::is_active);
     let waiting = chat.as_ref().is_some_and(|chat| chat.wakeup.is_some());
     let chat_ready = chat.as_ref().is_none_or(|chat| {
         chat.lifecycle == cairn_contracts::ConversationLifecycle::Active && !chat.paused
     });
-    let resume =
-        expiration.continue_turn && chat_ready && (mission || run["chatExecution"].is_object());
+    let resume = expiration.continue_turn && chat_ready && run["chatExecution"].is_object();
     let node_change = expiration.cause == Cause::NodeChange;
     let keep_pins = expiration.cause == Cause::NodeRevocation;
 
@@ -628,23 +626,17 @@ fn detach_environment_in(
         completed: Some(true),
         ..Default::default()
     };
-    if mission {
-        fresh.remaining_ms = checkpoint.remaining_ms;
-        boundary["sessionHandoff"] = crate::chats::handoff_context(db, run_id)?.into();
-    }
     if resume {
         fresh.completed = Some(false);
         fresh.launched = Some(false);
         // An earlier attempt of this turn may have delivered its message.
         fresh.launched_turn = checkpoint.launched_turn.clone();
-        if !mission {
-            fresh.turn_pending = Some(true);
-            fresh.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
-            let mut execution = run["chatExecution"].clone();
-            execution["context"] = crate::chats::handoff_context(db, run_id)?.into();
-            execution["recovery"] = false.into();
-            boundary["chatExecution"] = execution;
-        }
+        fresh.turn_pending = Some(true);
+        fresh.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
+        let mut execution = run["chatExecution"].clone();
+        execution["context"] = crate::chats::handoff_context(db, run_id)?.into();
+        execution["recovery"] = false.into();
+        boundary["chatExecution"] = execution;
         changes.status = Some(RunStatus::Queued);
         changes.cancel_requested_at = Some(None);
         changes.error = Some(None);
@@ -654,7 +646,7 @@ fn detach_environment_in(
         // The turn already ended with a scheduled wait, which keeps its continuation.
         changes.status = Some(RunStatus::Succeeded);
         changes.cancel_requested_at = Some(None);
-    } else if interrupted && !(mission && run["wakeup"].is_object()) {
+    } else if interrupted {
         changes.status = Some(RunStatus::Cancelled);
         changes.finished_at = Some(Some(now()));
         changes.retry = Some(None);
@@ -674,8 +666,6 @@ fn detach_environment_in(
         .and_then(|node| node["name"].as_str().map(str::to_owned));
     let next = if resume {
         "The conversation continues in a fresh environment"
-    } else if mission {
-        "The next run starts a fresh environment"
     } else {
         "The next message starts a fresh environment"
     };

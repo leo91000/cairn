@@ -287,12 +287,20 @@ pub(super) fn plan(
         RuleAction::Wait { seconds } => evaluator.value(seconds, &items),
         _ => conversation_input(action, &evaluator, &items),
     };
+    let starts_agent = matches!(action, RuleAction::StartAgent { .. });
+    let input_limit = if starts_agent {
+        validation::MAX_START_AGENT_INPUT
+    } else {
+        evaluate::MAX_BYTES
+    };
     match input {
-        Ok(input)
-            if serde_json::to_vec(&input)
-                .map_or(true, |bytes| bytes.len() > evaluate::MAX_BYTES) =>
-        {
-            Plan::Fail(format!("{}: the action input exceeds 256 KiB.", node.id()))
+        Ok(input) if serde_json::to_vec(&input).map_or(true, |bytes| bytes.len() > input_limit) => {
+            let limit = if starts_agent {
+                "the encoded brief limit"
+            } else {
+                "256 KiB"
+            };
+            Plan::Fail(format!("{}: the action input exceeds {limit}.", node.id()))
         }
         Ok(input) => Plan::Act(Box::new(Acting {
             node: node.clone(),

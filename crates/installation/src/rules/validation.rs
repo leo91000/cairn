@@ -20,6 +20,12 @@ pub(crate) const MAX_CONDITION_DEPTH: usize = 6;
 pub(crate) const MAX_LITERAL: usize = 16_384;
 /// Fits the apps' request limit, so a saved rule can always be saved again.
 pub(crate) const MAX_DEFINITION: usize = 120_000;
+pub(crate) const MAX_PROMPT_CHARS: usize = 50_000;
+// An escaped JSON character can occupy six bytes. Keep room for the action's
+// key and author while preserving the full size of a legacy mission brief.
+pub(crate) const MAX_START_AGENT_INPUT: usize = MAX_PROMPT_CHARS * 6 + 4096;
+const MAX_CLOCK_DEFINITION: usize = 320_000;
+pub(crate) const MAX_RULE_WRITE_BYTES: usize = 340_000;
 pub(crate) const MAX_WAIT_SECONDS: u32 = 7 * 86_400;
 pub(crate) const MAX_TRIGGERINGS_PER_HOUR: u32 = 600;
 pub(crate) const MAX_CONVERSATIONS_PER_HOUR: u32 = 100;
@@ -123,10 +129,18 @@ impl Checker {
         if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
             self.problem("/name", "Enter a name of 1 to 100 characters.");
         }
-        if serde_json::to_vec(definition).map_or(true, |bytes| bytes.len() > MAX_DEFINITION) {
+        let definition_limit = if matches!(definition.trigger, HookRuleTrigger::Clock { .. }) {
+            MAX_CLOCK_DEFINITION
+        } else {
+            MAX_DEFINITION
+        };
+        if serde_json::to_vec(definition).map_or(true, |bytes| bytes.len() > definition_limit) {
             self.problem(
                 "",
-                "A rule has at most 120 KB: shorten its texts or split it.",
+                &format!(
+                    "A rule has at most {} KB: shorten its texts or split it.",
+                    definition_limit / 1000
+                ),
             );
         }
         if definition.description.chars().count() > 2000 {
@@ -759,7 +773,17 @@ impl Checker {
                 author,
                 ..
             } => {
-                self.value(prompt, &format!("{path}/prompt"), scope);
+                let prompt_path = format!("{path}/prompt");
+                if let RuleValue::Literal {
+                    value: Value::String(brief),
+                } = prompt
+                {
+                    if brief.chars().count() > MAX_PROMPT_CHARS {
+                        self.problem(&prompt_path, "The brief has at most 50,000 characters.");
+                    }
+                } else {
+                    self.value(prompt, &prompt_path, scope);
+                }
                 if let Some(key) = key {
                     self.key(key, &format!("{path}/key"), scope);
                 }

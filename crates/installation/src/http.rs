@@ -455,6 +455,10 @@ impl Input {
             2_000_000
         } else if path == "/api/plugins/packages" && parts.method == "POST" {
             cairn_plugin_api::MAX_FRAME_BYTES
+        } else if (parts.method == "POST" && path == "/api/hook-rules")
+            || (parts.method == "PUT" && path.starts_with("/api/hook-rules/"))
+        {
+            crate::rules::validation::MAX_RULE_WRITE_BYTES
         } else if skill_batch
             || path == "/api/skills/stage"
             || path.ends_with("/avatar/upload")

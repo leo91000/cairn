@@ -323,12 +323,13 @@ constructor(
         localSnoozes[chatId] = until
         viewModelScope.launch {
             try {
-                val result =
+                val saved =
                     target.snoozeChat(
                         SetConversationSnoozeInput(action = action(), chatId = chatId)
                     )
                 if (generation != readsGeneration || snoozeRequests[chatId] !== request)
                     return@launch
+                if (chatId in localSnoozes) localSnoozes[chatId] = saved.snoozedUntil
                 if (until == null) localReads.remove("chat:$chatId")
             } catch (e: Exception) {
                 if (e is CancellationException) throw e

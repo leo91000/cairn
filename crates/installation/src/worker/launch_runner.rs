@@ -130,7 +130,11 @@ impl Execution<'_> {
     ) -> Result<Value> {
         let s = self.s;
         let adapter = self.provider.adapter();
-        let chat_execution = self.run["chatExecution"].is_object();
+        if !self.run["chatExecution"].is_object() {
+            return Err(Error::conflict(
+                "This conversation has no saved input to run.",
+            ));
+        }
         private_dir(&self.directory.join("chat-input")).await?;
         if self.run["environmentExpiredAt"].is_number() {
             let run_id = self.id.clone();
@@ -160,12 +164,6 @@ impl Execution<'_> {
         )?;
         chat["runId"] = self.id.clone().into();
         chat["attemptId"] = self.attempt_id.clone().into();
-        if !chat_execution {
-            // Scheduled work uses the same authenticated protocol as
-            // chats, while retaining its own task brief and session.
-            let resume_prompt = resume.map(|_| launch.prompt.as_str());
-            chat["execution"] = run_output::scheduled_turn(self.run, resume_prompt);
-        }
         adapter
             .configure_plan(s, &mut chat, self.account.as_ref())
             .await?;
