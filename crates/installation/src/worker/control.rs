@@ -20,6 +20,8 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
+const CLEANUP_RESERVATION_PREFIX: &str = "workspace-cleanup-reservation:";
+
 impl Worker {
     pub async fn cancel(&self, s: &Service, id: &str) -> Result<()> {
         self.cancel_live(s, id, crate::authorization::Authorization::default())
@@ -279,18 +281,7 @@ impl Worker {
                 proof.authorize(db)?;
                 let current = required(db.run_record(&run_id)?, "Run not found")?;
                 require_cleanup_ready(db, &current)?;
-                // Reserve the workspace against new input before removing files.
-                // Keep the path until every removal succeeds so cleanup can retry.
-                db.change_run(
-                    &run_id,
-                    crate::runs::RunChanges {
-                        workspace_cleaned_at: Some(Some(
-                            current.state.workspace_cleaned_at.unwrap_or_else(now),
-                        )),
-                        resume_available: Some(false),
-                        ..Default::default()
-                    },
-                )?;
+                reserve_workspace_cleanup(db, &current.state)?;
                 Ok((
                     current.state.workspace_cleaned_at,
                     current.state.resume_available,
@@ -299,7 +290,7 @@ impl Worker {
             .await?;
         let mut removed = false;
         for workspace in &managed {
-            let removal = remove_workspace(&run, workspace, &root, &env, &authorize).await;
+            let removal = remove_workspace(s, &run, workspace, &root, &env, &authorize).await;
             match removal {
                 Ok(deleted) => removed |= deleted,
                 Err(WorktreeRemovalError::Refused(error)) if !removed => {
@@ -307,6 +298,7 @@ impl Worker {
                     let run_id = id.to_owned();
                     s.store
                         .transaction(move |db| {
+                            db.delete(&format!("{CLEANUP_RESERVATION_PREFIX}{run_id}"))?;
                             db.change_run(
                                 &run_id,
                                 crate::runs::RunChanges {
@@ -336,12 +328,66 @@ impl Worker {
         s.store
             .transaction(move |db| {
                 authorize.authorize(db)?;
+                db.delete(&format!("{CLEANUP_RESERVATION_PREFIX}{id}"))?;
                 db.change_run(&id, patch)?;
                 db.audit("run.workspace.cleaned", &json!({ "id": id }))
             })
             .await?;
         Ok(json!({ "cleaned": true }))
     }
+
+    pub(crate) async fn recover_workspace_cleanup_reservations(&self, s: &Service) -> Result<()> {
+        s.store
+            .transaction(|db| {
+                let prefix = format!("{CLEANUP_RESERVATION_PREFIX}*");
+                let reservations =
+                    db.json_rows("SELECT data FROM kv WHERE key GLOB ?", [prefix])?;
+                for reservation in reservations {
+                    let run = text(&reservation, "runId");
+                    if let Some(state) = db.run_state(run)?
+                        && state.workspace_cleaned_at == reservation["reservedAt"].as_i64()
+                    {
+                        db.change_run(
+                            run,
+                            crate::runs::RunChanges {
+                                workspace_cleaned_at: Some(None),
+                                resume_available: reservation["resumeAvailable"].as_bool(),
+                                ..Default::default()
+                            },
+                        )?;
+                    }
+                    db.delete(&format!("{CLEANUP_RESERVATION_PREFIX}{run}"))?;
+                }
+                Ok(())
+            })
+            .await
+    }
+}
+
+fn reserve_workspace_cleanup(db: &Db<'_>, state: &cairn_contracts::RunState) -> Result<()> {
+    // The claim excludes new input without clearing the path. Startup can safely
+    // undo a first claim until a destructive command has been admitted.
+    let reserved_at = state.workspace_cleaned_at.unwrap_or_else(now);
+    if state.workspace_cleaned_at.is_none() {
+        db.set(
+            &format!("{CLEANUP_RESERVATION_PREFIX}{}", state.id),
+            &json!({
+                "runId": state.id,
+                "reservedAt": reserved_at,
+                "resumeAvailable": state.resume_available,
+            }),
+            None,
+        )?;
+    }
+    db.change_run(
+        &state.id,
+        crate::runs::RunChanges {
+            workspace_cleaned_at: Some(Some(reserved_at)),
+            resume_available: Some(false),
+            ..Default::default()
+        },
+    )?;
+    Ok(())
 }
 
 fn require_cleanup_ready(db: &Db<'_>, run: &crate::runs::RunRecord) -> Result<()> {
@@ -867,6 +913,7 @@ enum WorktreeRemovalError {
 }
 
 async fn remove_workspace(
+    s: &Service,
     run: &Value,
     workspace: &Value,
     root: &PathBuf,
@@ -888,6 +935,16 @@ async fn remove_workspace(
     let project = cleanup_project_path(run, workspace).map_err(WorktreeRemovalError::Refused)?;
     authorize
         .recheck()
+        .await
+        .map_err(WorktreeRemovalError::Refused)?;
+    let proof = authorize.clone();
+    let key = format!("{CLEANUP_RESERVATION_PREFIX}{}", text(run, "id"));
+    s.store
+        .transaction(move |db| {
+            proof.authorize(db)?;
+            // Once Git can modify the directory, startup preserves the exclusion.
+            db.delete(&key)
+        })
         .await
         .map_err(WorktreeRemovalError::Refused)?;
     let output = git(
@@ -2230,6 +2287,26 @@ mod tests {
             )
             .await
             .unwrap();
+        let reserved_run = f.run.clone();
+        f.s.store
+            .transaction(move |db| {
+                let run = db.run_state(&reserved_run)?.unwrap();
+                reserve_workspace_cleanup(db, &run)
+            })
+            .await
+            .unwrap();
+        let reserved = f.s.store.run(&f.run).await.unwrap();
+        assert!(crate::chats::require_workspace_not_cleaned(&reserved).is_err());
+
+        // A restart before authorizing the first Git removal leaves both paths intact.
+        let restarted = Service::new(f.s.config.clone()).await.unwrap();
+        let recovered = restarted.store.run(&f.run).await.unwrap();
+        assert!(first.exists() && second.exists());
+        assert!(recovered["workspaceCleanedAt"].is_null());
+        assert_eq!(recovered["resumeAvailable"], true);
+        crate::chats::require_workspace_not_cleaned(&recovered).unwrap();
+        restarted.shutdown.cancel();
+
         let claimed_run = f.run.clone();
         let revoke_before_removal = crate::authorization::Authorization::new(&f.s, move |db| {
             let state = db.run_state(&claimed_run)?.unwrap();

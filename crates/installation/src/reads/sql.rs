@@ -51,17 +51,19 @@ impl Db<'_> {
         Ok(())
     }
 
-    pub fn clear_snooze_through(
+    pub fn acknowledge_snooze(
         &self,
         account: &str,
         chat_id: &str,
         finished_at: i64,
+        observed_until: Option<i64>,
     ) -> Result<()> {
         self.0
             .prepare_cached(
-                "DELETE FROM account_snoozes WHERE account_id=? AND chat_id=? AND finished_at<=?",
+                "DELETE FROM account_snoozes WHERE account_id=?1 AND chat_id=?2
+                 AND finished_at<=?3 AND (snoozed_until<=?3 OR snoozed_until=?4)",
             )?
-            .execute(params![account, chat_id, finished_at])?;
+            .execute(params![account, chat_id, finished_at, observed_until])?;
         Ok(())
     }
 

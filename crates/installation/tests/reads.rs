@@ -477,7 +477,7 @@ async fn conversations_can_be_snoozed_restored_and_cleared_by_mark_read() {
     assert!(reminder["readAt"].as_i64().unwrap() < until);
     assert_eq!(reminder["unread"], true);
 
-    // Mark read clears any active snooze ("écarter devient marquer lu").
+    // An already-observed read can arrive after another device snoozed that activity.
     app.snooze(
         &app.owner,
         chat_id,
@@ -488,6 +488,35 @@ async fn conversations_can_be_snoozed_restored_and_cleared_by_mark_read() {
         .read(&app.owner, &[chat_read(chat_id, &json!(finished_at))])
         .await;
     assert_eq!(status, StatusCode::OK);
+    let owner_list = app.get(&app.owner, "/api/chats").await;
+    let owner_item = find(&owner_list, "id", chat_id);
+    assert_eq!(owner_item["snoozedUntil"], until);
+    assert_eq!(owner_item["unread"], false);
+
+    // A delayed dismissal of the old deadline cannot clear a rescheduled reminder.
+    let rescheduled = until + 60_000;
+    let (status, _) = app
+        .snooze(
+            &app.owner,
+            chat_id,
+            json!({ "kind": "snooze", "finishedAt": finished_at, "until": rescheduled }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut dismiss = chat_read(chat_id, &json!(finished_at));
+    dismiss["snoozedUntil"] = json!(until);
+    assert_eq!(
+        app.read(&app.owner, &[dismiss.clone()]).await.0,
+        StatusCode::OK
+    );
+    let owner_list = app.get(&app.owner, "/api/chats").await;
+    assert_eq!(
+        find(&owner_list, "id", chat_id)["snoozedUntil"],
+        rescheduled
+    );
+
+    dismiss["snoozedUntil"] = json!(rescheduled);
+    assert_eq!(app.read(&app.owner, &[dismiss]).await.0, StatusCode::OK);
     let owner_list = app.get(&app.owner, "/api/chats").await;
     let owner_item = find(&owner_list, "id", chat_id);
     assert!(owner_item["snoozedUntil"].is_null());
@@ -586,12 +615,9 @@ async fn restoring_and_expiring_a_snooze_both_remind_the_account_of_an_idle_conv
         assert_eq!(snoozed["snoozedUntil"], until);
         assert_eq!(snoozed["unread"], false);
 
-        assert_eq!(
-            app.read(&app.owner, &[chat_read(chat_id, &snoozed["readAt"])])
-                .await
-                .0,
-            StatusCode::OK,
-        );
+        let mut dismiss = chat_read(chat_id, &snoozed["readAt"]);
+        dismiss["snoozedUntil"] = snoozed["snoozedUntil"].clone();
+        assert_eq!(app.read(&app.owner, &[dismiss]).await.0, StatusCode::OK);
         let listed = app.get(&app.owner, "/api/chats").await;
         let cleared = find(&listed, "id", chat_id);
         assert_eq!(cleared["unread"], false);

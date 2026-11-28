@@ -317,15 +317,19 @@ constructor(
         }
     }
 
-    private fun readMark(key: String, at: Long) =
-        ReadMark(target = ReadTarget.A(chatId = key.removePrefix("chat:")), finishedAt = at)
+    private fun readMark(key: String, at: Long, snoozedUntil: Long?) =
+        ReadMark(
+            target = ReadTarget.A(chatId = key.removePrefix("chat:")),
+            finishedAt = at,
+            snoozedUntil = snoozedUntil,
+        )
 
     /** Marks the observed conversation activity as read on every device. */
-    fun markRead(items: List<Pair<String, Long>>, clearSnooze: Boolean = false) {
+    fun markRead(items: List<Pair<String, Long>>, snoozedUntil: Long? = null) {
         val target = connection ?: return
         if (!state.value.session.authenticated || state.value.signingOut) return
         val unread =
-            if (clearSnooze) items
+            if (snoozedUntil != null) items
             else items.filter { (key, at) -> (localReads[key] ?: Long.MIN_VALUE) < at }
         if (unread.isEmpty()) return
         val generation = readsGeneration
@@ -335,7 +339,9 @@ constructor(
                 val previous = batch.map { (key, _) -> key to localReads[key] }
                 batch.forEach { (key, at) -> localReads[key] = maxOf(localReads[key] ?: 0, at) }
                 try {
-                    target.markRead(MarkReadInput(batch.map { (key, at) -> readMark(key, at) }))
+                    target.markRead(
+                        MarkReadInput(batch.map { (key, at) -> readMark(key, at, snoozedUntil) })
+                    )
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                     if (generation != readsGeneration || connection !== target) return@launch

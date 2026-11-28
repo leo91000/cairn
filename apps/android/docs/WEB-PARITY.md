@@ -13,7 +13,9 @@ serveur l’autorise et ouvre l’historique de la règle.
 Le Fil montre l’origine des conversations programmées, les résultats bloqués
 et les questions. **Reporter jusqu’à**, **Rétablir** et **Marquer comme lu**
 s’appliquent au compte connecté. À l’échéance, le rappel remonte dans le Fil,
-y compris pour une conversation en pause ou déléguée. Les écrans de missions
+y compris pour une conversation en pause ou déléguée. **Marquer comme lu** sur
+une ligne reportée utilise l’échéance affichée. La lecture automatique en
+ouvrant la conversation conserve un rappel à venir. Les écrans de missions
 ont été retirés. Le journal permet de consulter une exécution et d’ouvrir sa
 conversation.
 

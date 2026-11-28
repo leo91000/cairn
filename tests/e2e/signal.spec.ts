@@ -451,6 +451,12 @@ test('snoozing a blocked conversation clears attention until it is restored', as
   await page.getByRole('menuitem', { name: 'Snooze until…' }).click()
   await page.getByRole('button', { name: 'Snooze', exact: true }).click()
   await expect(row).toHaveAttribute('data-fil-kind', 'snoozed')
+  const snoozed = (await workspace.api('/api/chats')).find((entry: any) => entry.id === chat.id)
+  await workspace.api('/api/reads', 'POST', {
+    items: [{ target: { kind: 'chat', chatId: chat.id }, finishedAt: snoozed.readAt }],
+  })
+  const unread = (await workspace.api('/api/chats')).find((entry: any) => entry.id === chat.id)
+  expect(unread.snoozedUntil).toBe(snoozed.snoozedUntil)
   await row.getByRole('button', { name: /^More actions/ }).click()
   await page.getByRole('menuitem', { name: 'Mark as read' }).click()
   await expect(row).not.toHaveAttribute('data-fil-kind', 'snoozed')

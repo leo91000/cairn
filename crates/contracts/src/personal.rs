@@ -22,6 +22,11 @@ pub struct ReadMark {
     #[schemars(range(min = 1, max = 9007199254740991_i64))]
     #[ts(type = "number")]
     pub finished_at: i64,
+    /// The observed deadline when explicitly marking a snoozed conversation as read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 9007199254740991_i64))]
+    #[ts(optional, type = "number")]
+    pub snoozed_until: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -104,10 +109,12 @@ mod tests {
     fn mark(value: &Value) -> bool {
         serde_json::from_value::<MarkReadInput>(value.clone()).is_ok_and(|input| {
             (1..=200).contains(&input.items.len())
-                && input
-                    .items
-                    .iter()
-                    .all(|item| (1..=MAX).contains(&item.finished_at))
+                && input.items.iter().all(|item| {
+                    (1..=MAX).contains(&item.finished_at)
+                        && item
+                            .snoozed_until
+                            .is_none_or(|until| (1..=MAX).contains(&until))
+                })
         })
     }
 

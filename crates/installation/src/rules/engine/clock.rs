@@ -199,6 +199,10 @@ fn insert_triggering(
     db.insert_rule_triggering(rule_id, version, event_id, &recorded, at)
 }
 
+pub(crate) fn scheduled_event_id(rule: &str, scheduled_for: i64) -> String {
+    format!("clock:{rule}:{scheduled_for}")
+}
+
 fn advance_schedule(
     db: &Db<'_>,
     mut schedule: ScheduleRow,
@@ -230,7 +234,7 @@ pub(crate) fn record_migrated_failure(
     failed_at: i64,
     message: &str,
 ) -> Result<()> {
-    let event_id = format!("clock:{rule}:{scheduled_for}");
+    let event_id = scheduled_event_id(rule, scheduled_for);
     let event = clock_event(
         &event_id,
         Some(scheduled_for),
@@ -314,7 +318,7 @@ async fn admit_due(s: &Service, due: Vec<(String, i64)>) -> Result<()> {
                         )?;
                         return Ok(());
                     }
-                    let event_id = format!("clock:{rule_id}:{scheduled}");
+                    let event_id = scheduled_event_id(&rule_id, scheduled);
                     // Starting the migrated conversation adds one step. Preserve the
                     // original mission run's depth, including runs already at the limit.
                     let depth = schedule.legacy_chain_depth.saturating_sub(1);

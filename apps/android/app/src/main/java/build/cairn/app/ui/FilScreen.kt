@@ -512,7 +512,10 @@ fun FilScreen(
             ) {
                 FilRowActions(
                     item,
-                    { vm.markRead(listOf(item.read), clearSnooze = item.kind == FeedKind.SNOOZED) },
+                    {
+                        val deadline = item.wakeAt.takeIf { item.kind == FeedKind.SNOOZED }
+                        vm.markRead(listOf(item.read), snoozedUntil = deadline)
+                    },
                     snooze = { snoozing = item },
                     restore = { item.chatId?.let(vm::restoreSnooze) },
                 )

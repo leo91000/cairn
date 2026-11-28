@@ -960,7 +960,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         "INSERT INTO missions(id,agent_id,name,prompt,cron,timezone,enabled,archived,next_run,author_id,author_access_id,author_removed,revision,created_at,updated_at,native_authority_nodes, \
          worktree,skills_inherited,native_principals,native_provenance_unknown) \
          VALUES(?1,?2,'Daily standup','Summarize updates','0 9 * * *','Europe/Paris',1,0,?3,'owner-acct','acc-1',0,'r1',?4,?4,'[\"local\"]',1,1,'[]',0)",
-        params![active_mission_id, MAIN_AGENT_ID, t0 + 60_000, t0],
+        params![active_mission_id, MAIN_AGENT_ID, t0, t0],
     )
     .unwrap();
     conn.execute(
@@ -971,7 +971,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     conn.execute(
         "UPDATE missions SET failure_message='The selected node was unavailable',
            failure_scheduled_for=?2,failure_at=?3 WHERE id=?1",
-        params![active_mission_id, t0, t0 + 1_000],
+        params![active_mission_id, t0 - 60_000, t0 - 59_000],
     )
     .unwrap();
     conn.execute(
@@ -1053,9 +1053,9 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .unwrap();
     }
     conn.execute(
-        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,snapshot,boundary,\
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,snapshot,boundary,dedupe,\
            recovery_pending,resume_available,resume_count) \
-         VALUES(?1,?2,'succeeded','schedule',?3,?3,?4,?5,?6,0,0,0)",
+         VALUES(?1,?2,'succeeded','schedule',?3,?3,?4,?5,?6,?7,0,0,0)",
         params![
             blocked_run_id,
             active_mission_id,
@@ -1069,6 +1069,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
                 "environmentExpiredAt": t0 + 6_000,
                 "environmentRetirementId": "old-workspace",
             }).to_string(),
+            format!("{active_mission_id}:{t0}"),
         ],
     )
     .unwrap();
@@ -1507,8 +1508,17 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(next_run, Some(t0 + 60_000));
+    assert_eq!(next_run, Some(t0));
     assert_eq!(legacy_depth, 8);
+    assert!(
+        migrated
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM hook_rule_receipts WHERE rule_id=?1 AND event_id=?2)",
+                params![active_mission_id, format!("clock:{active_mission_id}:{t0}")],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+    );
     let limits: (u32, u32) = migrated
         .query_row(
             "SELECT json_extract(definition,'$.limits.triggeringsPerHour'),
@@ -1529,12 +1539,12 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .unwrap();
     assert_eq!(failure.0, "failed");
     assert_eq!(failure.1, "The selected node was unavailable");
-    assert_eq!(failure.2, t0 + 1_000);
+    assert_eq!(failure.2, t0 - 59_000);
     assert_eq!(
         chrono::DateTime::parse_from_rfc3339(&failure.3)
             .unwrap()
             .timestamp_millis(),
-        t0
+        t0 - 60_000
     );
 
     // Disabled/archived -> disabled_at set; removed author -> membership_ended_at set;
@@ -1886,11 +1896,24 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     // An overdue migrated schedule must neither act without Beacon's
     // membership confirmation nor keep the engine waiting on an unavailable Beacon.
     let contacted = Arc::new(tokio::sync::Notify::new());
+    let confirm = Arc::new(tokio::sync::Notify::new());
     let policy_route = axum::routing::get({
         let contacted = contacted.clone();
-        move || async move {
-            contacted.notify_one();
-            std::future::pending::<StatusCode>().await
+        let confirm = confirm.clone();
+        move || {
+            let contacted = contacted.clone();
+            let confirm = confirm.clone();
+            async move {
+                contacted.notify_one();
+                confirm.notified().await;
+                axum::Json(cairn_protocol::TaskAuthorPolicy {
+                    owner: cairn_protocol::TaskAuthorGrant {
+                        account_id: "owner-acct".into(),
+                        access_id: "acc-1".into(),
+                    },
+                    members: vec![],
+                })
+            }
         }
     });
     let (origin, stalled_beacon) = common::serve_locally(
@@ -1930,6 +1953,29 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .await
         .unwrap();
     assert_eq!(schedule, next_run.unwrap());
+    confirm.notify_one();
+    let next_slot = common::eventually(
+        admission_bound,
+        std::time::Duration::from_millis(10),
+        async || {
+            let rule = active_mission_id.clone();
+            service.store.read(move |db| {
+                let next: i64 = db.0.query_row(
+                    "SELECT next_run FROM hook_rule_schedules WHERE rule_id=?1",
+                    [&rule],
+                    |row| row.get(0),
+                )?;
+                let duplicate: bool = db.0.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM hook_rule_triggerings WHERE rule_id=?1 AND event_id=?2)",
+                    params![rule, format!("clock:{rule}:{t0}")],
+                    |row| row.get(0),
+                )?;
+                Ok((next > t0).then_some((next, duplicate)))
+            }).await.unwrap()
+        },
+    ).await;
+    assert!(next_slot.0 > now());
+    assert!(!next_slot.1, "a v38 admission already delivered this slot");
     stalled_beacon.abort();
     let detail = service.chat_detail(&waiting_chat_id).await.unwrap();
     assert_eq!(detail["run"]["chatExecution"]["messageId"], "legacy-turn");

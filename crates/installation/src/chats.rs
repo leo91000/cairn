@@ -434,10 +434,8 @@ fn compaction_blocker(
             "Continue or resolve the last turn before compacting.".into(),
         ));
     }
-    if !run["workspaceCleanedAt"].is_null() {
-        return Ok(Some(
-            "This workspace has been cleaned up. Start a new chat.".into(),
-        ));
+    if let Err(error) = require_workspace_not_cleaned(run) {
+        return Ok(Some(error.message));
     }
     let (fresh_session, held_expired) = RunCheckpoint::compaction_flags_in(db, text(run, "id"))?;
     if held_expired {
@@ -805,9 +803,12 @@ fn require_sendable(
 
 pub(crate) fn require_workspace_not_cleaned(run: &Value) -> Result<()> {
     if !run["workspaceCleanedAt"].is_null() {
-        return Err(Error::conflict(
-            "This workspace has been cleaned up. Start a new chat.",
-        ));
+        let message = if run["workspace"].is_string() {
+            "Workspace cleanup is in progress or incomplete. Finish cleanup before continuing."
+        } else {
+            "This workspace has been cleaned up. Start a new chat."
+        };
+        return Err(Error::conflict(message));
     }
     Ok(())
 }

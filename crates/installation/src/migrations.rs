@@ -486,6 +486,17 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                     message,
                 )?;
             }
+            if let Some(scheduled_for) = next_run {
+                // v38 queued the run before advancing its schedule. If the process
+                // stopped between those writes, carry over that slot's admission.
+                let event = crate::rules::engine::clock::scheduled_event_id(&row.id, scheduled_for);
+                let legacy_dedupe = format!("{}:{scheduled_for}", mission.id);
+                tx.execute(
+                    "INSERT OR IGNORE INTO hook_rule_receipts(rule_id,event_id)
+                     SELECT ?1,?2 WHERE EXISTS (SELECT 1 FROM runs WHERE dedupe=?3)",
+                    params![row.id, event, legacy_dedupe],
+                )?;
+            }
         }
     }
 

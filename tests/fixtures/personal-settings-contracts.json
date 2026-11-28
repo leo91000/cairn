@@ -3,7 +3,8 @@
     {
       "items": [
         { "target": { "kind": "chat", "chatId": "25d7ac0e-c91e-4a7e-b1e1-ab177dc6e02d" }, "finishedAt": 1761800000000 },
-        { "target": { "kind": "chat", "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 9007199254740991 }
+        { "target": { "kind": "chat", "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 9007199254740991 },
+        { "target": { "kind": "chat", "chatId": "25d7ac0e-c91e-4a7e-b1e1-ab177dc6e02d" }, "finishedAt": 1761800000000, "snoozedUntil": 1761886400000 }
       ]
     }
   ],
@@ -14,7 +15,8 @@
     { "items": [{ "target": { "kind": "chat", "chatId": "not-a-uuid" }, "finishedAt": 1 }] },
     { "items": [{ "target": { "kind": "chat", "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" } }] },
     { "items": [{ "target": { "kind": "chat", "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 0 }] },
-    { "items": [{ "target": { "kind": "chat", "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 9007199254740992 }] }
+    { "items": [{ "target": { "kind": "chat", "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 9007199254740992 }] },
+    { "items": [{ "target": { "kind": "chat", "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 1761800000000, "snoozedUntil": 0 }] }
   ],
   "snoozes": [
     { "chatId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "snooze", "finishedAt": 1761800000000, "until": 1761886400000 } },

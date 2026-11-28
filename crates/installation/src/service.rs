@@ -95,6 +95,10 @@ impl Service {
             vault,
             shutdown: CancellationToken::new(),
         });
+        service
+            .worker
+            .recover_workspace_cleanup_reservations(&service)
+            .await?;
         crate::chats::questions::retire_native(&service).await?;
         service.bootstrap_main_agent().await?;
         service.avatars.recover(&service).await?;

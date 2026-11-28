@@ -105,7 +105,8 @@ démarrée par une règle.
   ligne par jour. Dès qu’une personne y écrit, elle suit les règles des autres
   conversations.
 - La mise de côté devient « reporter jusqu’à » et s’applique à toute conversation ;
-  « écarter » devient « marquer lu ».
+  « écarter » devient « marquer lu ». Un accusé de lecture ordinaire conserve un
+  rappel à venir. La commande « marquer lu » sur un rappel vise l’échéance affichée.
 
 ### Migration
 

@@ -253,7 +253,8 @@ pub(crate) fn preview(summary: &str) -> String {
 }
 
 /// Records the completion the account actually saw, so opening an older run or a delayed
-/// request cannot consume newer work. Marking read also clears any snooze on that conversation.
+/// request cannot consume newer work. A read acknowledges a due reminder or the active
+/// snooze whose deadline the caller explicitly observed.
 pub(crate) async fn mark(
     s: &Service,
     account: &str,
@@ -270,6 +271,12 @@ pub(crate) async fn mark(
     {
         return Err(Error::bad("Include the finish time of the work you read."));
     }
+    if input.items.iter().any(|item| {
+        item.snoozed_until
+            .is_some_and(|until| until <= 0 || until > read_at + MAX_SNOOZE_MS)
+    }) {
+        return Err(Error::bad("Include the observed reminder deadline."));
+    }
     let read = input.items.len() as u32;
     let account = account.to_owned();
     s.store
@@ -279,7 +286,7 @@ pub(crate) async fn mark(
                 let ReadTarget::Chat { chat_id } = &item.target;
                 let id = chat_id.to_string();
                 db.mark_read(&account, &id, item.finished_at)?;
-                db.clear_snooze_through(&account, &id, item.finished_at)?;
+                db.acknowledge_snooze(&account, &id, item.finished_at, item.snoozed_until)?;
             }
             Ok(())
         })

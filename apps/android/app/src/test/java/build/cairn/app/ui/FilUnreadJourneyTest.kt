@@ -360,11 +360,26 @@ class FilUnreadJourneyTest {
                 compose.runOnIdle { vm.markRead(listOf(first to (now - 1000))) }
                 waitFor { reads.size == 3 }
                 compose.runOnIdle { assertEquals(now - 1000, vm.localReads[first]) }
+                val deadline = now + 60_000
                 compose.runOnIdle {
-                    vm.markRead(listOf(first to (now - 1000)), clearSnooze = true)
+                    vm.markRead(listOf(first to (now - 1000)), snoozedUntil = deadline)
                 }
                 waitFor { reads.size == 4 }
-                assertEquals(reads[2], reads[3])
+                val ordinary =
+                    wireJson
+                        .parseToJsonElement(reads[2])
+                        .jsonObject["items"]!!
+                        .jsonArray[0]
+                        .jsonObject
+                val explicit =
+                    wireJson
+                        .parseToJsonElement(reads[3])
+                        .jsonObject["items"]!!
+                        .jsonArray[0]
+                        .jsonObject
+                assertEquals(null, ordinary["snoozedUntil"])
+                assertEquals(deadline.toString(), explicit["snoozedUntil"].toString())
+                assertEquals(ordinary, explicit - "snoozedUntil")
             } finally {
                 vm.api.closeStreams()
             }
