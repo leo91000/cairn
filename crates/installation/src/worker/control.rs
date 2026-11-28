@@ -778,7 +778,18 @@ async fn ensure_clean(workspace: &Value, root: &PathBuf, env: &Environment) -> R
         return Ok(());
     }
     let target = target.to_string_lossy().into_owned();
-    let output = git(&["-C", &target, "status", "--porcelain", "--ignored"], env).await?;
+    let output = git(
+        &[
+            "-C",
+            &target,
+            "status",
+            "--porcelain",
+            "--ignored",
+            "--ignore-submodules=none",
+        ],
+        env,
+    )
+    .await?;
     if !output.success || !output.stdout.trim().is_empty() {
         return Err(Error::conflict(
             "This worktree contains changes or untracked files. Commit or move them before cleanup.",
@@ -846,6 +857,24 @@ async fn ensure_removable_worktree(
         .any(|field| field.split_ascii_whitespace().next() == Some("locked"))
     {
         return Err(Error::conflict("Unlock this worktree before cleaning up."));
+    }
+    // Git also refuses removal after deinit if the worktree retains submodule metadata.
+    let modules = git(&["-C", target, "rev-parse", "--git-path", "modules"], env).await?;
+    if !modules.success || modules.stdout.trim_end().is_empty() {
+        return Err(Error::conflict(
+            "Git could not verify the worktree's submodule directory.",
+        ));
+    }
+    let modules = Path::new(target).join(modules.stdout.trim_end());
+    match tokio::fs::metadata(modules).await {
+        Ok(metadata) if metadata.is_dir() => {
+            return Err(Error::conflict(
+                "This worktree retains submodule data. Preserve its files before cleaning up.",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     let submodules = git(&["-C", target, "submodule", "status"], env).await?;
     if !submodules.success {
@@ -1547,8 +1576,19 @@ mod tests {
         let initialized = ensure_removable_worktree(&run, &workspace, &env)
             .await
             .unwrap_err();
-        assert!(initialized.message.contains("initialized submodules"));
+        assert!(initialized.message.contains("submodule"));
         assert!(Path::new(target).join("nested/.git").is_file());
+        assert!(
+            git(&["-C", target, "submodule", "deinit", "--all"], &env)
+                .await
+                .unwrap()
+                .success
+        );
+        assert!(!Path::new(target).join("nested/.git").exists());
+        let retained = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(retained.message.contains("retains submodule data"));
     }
 
     #[tokio::test]
