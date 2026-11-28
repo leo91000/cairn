@@ -263,6 +263,14 @@ impl Service {
                     continue;
                 }
             }
+            if let Some(run_id) = chat.run_id.clone()
+                && self
+                    .store
+                    .read(move |db| RunCheckpoint::awaiting_native_retirement_in(db, &run_id))
+                    .await?
+            {
+                continue;
+            }
             // A scheduled wait continues the current task before queued follow-ups.
             let (waiting_chat, waiting_run) = (chat.clone(), run.clone());
             let waiting = self

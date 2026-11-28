@@ -311,7 +311,6 @@ async fn fence_attempt_authorized(
             && run["trigger"] == "chat"
             && run["status"] == RunStatus::Succeeded
             && run["recoveryPending"] == true
-            && run["cancelRequestedAt"].is_null()
             && checkpoint
                 .as_ref()
                 .and_then(RunCheckpoint::prepared)
@@ -382,7 +381,6 @@ async fn fence_attempt_authorized(
                                     && db.run_state(&id)?.is_some_and(|state| {
                                         state.status == RunStatus::Succeeded
                                             && state.recovery_pending
-                                            && state.cancel_requested_at.is_none()
                                     }));
                             if eligible {
                                 saved.pending_native_cleanup = Some(pending);
@@ -557,7 +555,6 @@ pub(crate) async fn observe_pending_native_cleanup(
     }
     let attempt = &pending.attempt;
     let url = format!("{url}/runs/{attempt}");
-    let authorize = crate::authorization::Authorization::default();
     let observe = async {
         let credential = secret(&s.config.data_dir, "runner-secret").await?;
         let status = s
@@ -574,20 +571,7 @@ pub(crate) async fn observe_pending_native_cleanup(
                 && status["reusable"] == true
                 && (pending.awaiting_retirement() || status["flushed"] == true));
         }
-        if !matches!(status.status().as_u16(), 400 | 404) {
-            return Ok(false);
-        }
-        let Some(_legacy) = s.worker.try_legacy_cleanup_probe() else {
-            return Ok(false);
-        };
-        let result = crate::runner::observe_cleanup_retirement(&s.http, &url, &credential).await?;
-        if !result.physical_finalized || result.native_cleanup.is_none() {
-            return Ok(false);
-        }
-        if !(pending.needs_observation() || pending.awaiting_retirement()) {
-            return Ok(false);
-        }
-        confirm_native_retirement(s, &url, attempt, &credential, &authorize).await
+        Ok::<_, Error>(false)
     };
     // Keep the slot through the bounded manager-side request. Its timeout
     // includes the node relay's budget, reducing overlapping retries.
@@ -649,8 +633,10 @@ async fn fence_runner(
     let mut cleanup = None;
     let confirmed = match response {
         Ok(response) if response.status().is_success() => {
+            let mut status_protocol = None;
             if let Ok(value) = response.json::<Value>().await {
                 cleanup = crate::runner::client_cleanup_result(&value, attempt);
+                status_protocol = value["NativeCleanup"]["cleanupStatusProtocol"].as_u64();
                 if cleanup.is_none() {
                     cleanup = crate::runner::plain_finalization_failure(&value);
                 }
@@ -660,7 +646,9 @@ async fn fence_runner(
                 .and_then(|result| result.native_cleanup.as_ref())
                 && settled_status == Some(RunStatus::Succeeded)
             {
-                if may_defer {
+                if may_defer
+                    && status_protocol == Some(crate::runner::NATIVE_CLEANUP_STATUS_PROTOCOL)
+                {
                     return Ok(FencedCleanup::Deferred(PendingNativeCleanup {
                         attempt: attempt.to_owned(),
                         state: DeferredCleanupState::Observing,
@@ -741,9 +729,6 @@ async fn confirm_native_retirement(
         .http
         .delete(url)
         .bearer_auth(credential)
-        .timeout(
-            crate::nodes::NATIVE_STOP_RELAY_TIMEOUT + crate::nodes::EXECUTION_RELAY_HEAD_TIMEOUT,
-        )
         .send()
         .await
         .map_err(Error::internal)?;

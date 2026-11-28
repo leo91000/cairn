@@ -525,6 +525,14 @@ pub(super) async fn observe_native_cleanup(s: &Arc<Service>) -> Result<()> {
                 let Some(state) = db.run_state(&run_id)? else {
                     continue;
                 };
+                if pending.awaiting_retirement() && state.status != RunStatus::Queued {
+                    let Some(chat) = db.conversation_for_run(&run_id)? else {
+                        continue;
+                    };
+                    if !db.has_pending_messages(&chat.id)? {
+                        continue;
+                    }
+                }
                 let key = CleanupObservation {
                     run_id,
                     attempt: pending.attempt.clone(),
@@ -533,9 +541,7 @@ pub(super) async fn observe_native_cleanup(s: &Arc<Service>) -> Result<()> {
                     && (state.cancel_requested_at.is_some() || !pending.needs_observation())
                 {
                     completed.push((key, saved));
-                } else if pending.needs_observation()
-                    || pending.awaiting_retirement() && saved.turn_pending == Some(true)
-                {
+                } else if pending.needs_observation() || pending.awaiting_retirement() {
                     ready.push((key, saved));
                 }
             }
@@ -565,49 +571,51 @@ pub(super) async fn observe_native_cleanup(s: &Arc<Service>) -> Result<()> {
         });
     }
     for (key, expected) in completed {
-        let preparation = s.worker.run_preparation_lock(&key.run_id).await;
-        let Ok(preparation) = preparation.try_lock_owned() else {
-            continue;
-        };
-        let service = s.clone();
-        s.worker.spawn_recovery(async move {
-            let _preparation = preparation;
-            tokio::select! {
-                () = service.shutdown.cancelled() => {},
-                result = settle_native_cleanup(&service, &key.run_id, expected) => {
-                    if let Err(error) = result {
-                        tracing::warn!(run_id = key.run_id, message = %error.message, "Native cleanup settlement failed");
-                    }
-                }
-            }
-        });
+        if let Err(error) = settle_native_cleanup(s, key.run_id.clone(), expected).await {
+            tracing::warn!(run_id = key.run_id, message = %error.message, "Native cleanup settlement failed");
+        }
     }
     Ok(())
 }
 
-/// Reuse credential and outcome settlement after the recorded workload fence.
-async fn settle_native_cleanup(s: &Service, run_id: &str, expected: RunCheckpoint) -> Result<()> {
-    let id = run_id.to_owned();
-    let run = s
+/// Publish the outcome and revoke access without waiting for account I/O.
+/// Ordinary launch recovery clears old provider homes before they are reused.
+async fn settle_native_cleanup(s: &Service, id: String, expected: RunCheckpoint) -> Result<()> {
+    use crate::recovery::DeferredCleanupState;
+
+    let settled = s
         .store
-        .read(move |db| {
-            let current = RunCheckpoint::load_in(db, &id)?;
-            if !recovery::same_execution(current.as_ref(), Some(&expected))
-                || current
-                    .as_ref()
-                    .and_then(RunCheckpoint::pending_native_cleanup)
-                    != expected.pending_native_cleanup()
+        .transaction(move |db| {
+            let Some(mut current) = RunCheckpoint::load_in(db, &id)? else {
+                return Ok(false);
+            };
+            if !recovery::same_execution(Some(&current), Some(&expected))
+                || current.pending_native_cleanup() != expected.pending_native_cleanup()
                 || crate::environment_expiration::pending(db, &id)?
             {
-                return Ok(None);
+                return Ok(false);
             }
-            Ok(db.run(&id)?.filter(|run| {
-                run["recoveryPending"] == true && RunStatus::of(run) == Some(RunStatus::Succeeded)
-            }))
+            if !db
+                .run_state(&id)?
+                .is_some_and(|run| run.recovery_pending && run.status == RunStatus::Succeeded)
+            {
+                return Ok(false);
+            }
+            if let Some(pending) = current.pending_native_cleanup()
+                && pending.state == DeferredCleanupState::Observing
+                && !pending.needs_observation()
+            {
+                let mut pending = pending.clone();
+                pending.state = DeferredCleanupState::Unconfirmed;
+                current.pending_native_cleanup = Some(pending);
+            }
+            db.revoke_mcp_run(&id)?;
+            db.remove_account_lease(&id)?;
+            finish_recovery(db, &id, Some(&current))?;
+            Ok(true)
         })
         .await?;
-    if let Some(run) = run {
-        recover(s, &run).await?;
+    if settled {
         s.worker.notify();
     }
     Ok(())
@@ -1090,6 +1098,12 @@ pub(crate) fn finish_deferred_cleanup_before_detach(
 ) -> Result<bool> {
     use crate::recovery::DeferredCleanupState;
 
+    if !db
+        .run_state(run_id)?
+        .is_some_and(|run| run.status == RunStatus::Succeeded && run.recovery_pending)
+    {
+        return Ok(false);
+    }
     let Some(pending) = saved
         .pending_native_cleanup()
         .filter(|p| !p.awaiting_retirement())

@@ -70,18 +70,18 @@ the workload's exit status remains unknown.
 After DELETE acknowledges a pending cleanup for an already settled successful
 chat turn, the manager records the fence and releases the execution reservation
 in one transaction. That transaction starts a five-minute settlement deadline
-before the first follow-up request.
+before the first follow-up request. The authenticated fence advertises whether
+the controller supports the read-only cleanup status. Controllers without this
+protocol keep their existing short grace and settlement behavior.
 The manager resumes bounded observations across restarts on a timer independent
 of ordinary recovery. Observations are tracked by execution attempt. Waiting
 attempts receive a slot before earlier attempts retry. The authenticated
 cleanup status identifies the attempt and reports both a clean flush and
-whether the workspace is available for reuse. A controller that lacks this
-read uses the historical WAIT and current DELETE receipts. A smaller pool
-limits those longer checks.
+whether the workspace is available for reuse.
 The recovery loop settles each run independently. A clean flush and current
 quarantine clearance establish success. A missing proof at the deadline
 publishes the original cleanup failure and keeps the original turn end. Later
-messages stay queued until the workspace is reusable, including after the
+messages stay editable in the queue until the workspace is reusable, including after the
 controller retires it through recovery of an interrupted or failed flush.
 Environment detachment settles the saved verdict
 before replacing the execution checkpoint. Without proof it publishes the

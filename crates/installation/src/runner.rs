@@ -15,6 +15,8 @@ pub(crate) use client::{
 };
 pub use client::{TerminalReason, client};
 
+pub(crate) const NATIVE_CLEANUP_STATUS_PROTOCOL: u64 = 1;
+
 use crate::{
     error::{Error, Result},
     microvm::{host, pool::Pool},

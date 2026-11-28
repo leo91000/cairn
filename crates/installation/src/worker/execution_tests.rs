@@ -121,6 +121,89 @@ async fn delete_cleanup_evidence_survives_live_checkpoint_persistence() {
 }
 
 #[tokio::test]
+async fn stop_while_native_delete_is_in_flight_keeps_the_workspace_fence() {
+    use axum::{Json, Router, routing::delete};
+    use tokio::sync::Notify;
+
+    let attempt = crate::config::id();
+    let arrived = Arc::new(Notify::new());
+    let reply = Arc::new(Notify::new());
+    let receipt = json!({
+        "StatusCode": crate::runner::CONTROLLER_FAILED,
+        "FinalizationFailed": true,
+        "NativeCleanup": {
+            "attemptId": attempt, "workloadFenced": true,
+            "cleanupStatusProtocol": crate::runner::NATIVE_CLEANUP_STATUS_PROTOCOL,
+            "message": "Native disk cleanup is still in progress."
+        }
+    });
+    let app = Router::new().route(
+        "/runs/{attempt}",
+        delete({
+            let arrived = arrived.clone();
+            let reply = reply.clone();
+            move || async move {
+                arrived.notify_one();
+                reply.notified().await;
+                Json(receipt)
+            }
+        }),
+    );
+    let (_root, service, server) = fence_service(app).await;
+    let id = crate::config::id();
+    let fixture = id.clone();
+    let saved = service
+        .store
+        .transaction(move |db| {
+            db.add_run_fixture(
+                &json!({
+                    "id": fixture, "taskId": fixture, "status": "succeeded", "trigger": "chat",
+                    "isolated": true, "recoveryPending": true, "finishedAt": 42,
+                }),
+                None,
+            )?;
+            let saved = RunCheckpoint::from_value(json!({
+                "runnerId": attempt,
+                "prepared": { "backend": "native", "isolated": true },
+                "settled": { "status": "succeeded", "finishedAt": 42 },
+            }))?;
+            saved.store_in(db, &fixture)?;
+            Ok(saved)
+        })
+        .await
+        .unwrap();
+    let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+    let run = service.store.run(&id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (fence, ()) = tokio::join!(checkpoint.fence(&service, &run), async {
+            arrived.notified().await;
+            service.worker.cancel(&service, &id).await.unwrap();
+            reply.notify_one();
+        });
+        fence.unwrap();
+    })
+    .await
+    .unwrap();
+    release(&service, &checkpoint, None, true).await.unwrap();
+
+    let stopped = service.store.run_state(&id).await.unwrap();
+    assert_eq!(stopped.status, RunStatus::Cancelled);
+    assert_eq!(stopped.finished_at, Some(42));
+    assert!(!stopped.recovery_pending);
+    let retained = RunCheckpoint::load(&service.store, &id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        retained
+            .pending_native_cleanup()
+            .unwrap()
+            .awaiting_retirement()
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
     use axum::{Json, Router, http::Request, routing::any};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -189,13 +272,18 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
         ),
     ] {
         let after_grace = retirement != Retirement::WithinGrace;
-        let pending = receipt.clone();
+        let mut pending = receipt.clone();
+        if after_grace {
+            pending["NativeCleanup"]["cleanupStatusProtocol"] =
+                crate::runner::NATIVE_CLEANUP_STATUS_PROTOCOL.into();
+        }
         let stops = Arc::new(AtomicUsize::new(0));
         let observations = Arc::new(AtomicUsize::new(0));
         let retired_after_grace = Arc::new(AtomicBool::new(false));
         let route_retired = retired_after_grace.clone();
         let route_stops = stops.clone();
         let route_observations = observations.clone();
+        let response_attempt = attempt.clone();
         let url = format!("/runs/{attempt}");
         let app = Router::new().fallback(any(move |request: Request<axum::body::Body>| {
             let mut result = pending.clone();
@@ -204,14 +292,21 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
             match request.method().as_str() {
                 "GET" => {
                     assert_eq!(request.uri().path(), format!("{url}/cleanup-status"));
-                    status = axum::http::StatusCode::NOT_FOUND;
+                    assert!(after_grace);
+                    let count = route_observations.fetch_add(1, Ordering::Relaxed);
+                    if count == 0 && retirement == Retirement::FirstProbeUnavailable {
+                        status = axum::http::StatusCode::SERVICE_UNAVAILABLE;
+                    }
+                    let reusable = route_retired.load(Ordering::Relaxed);
+                    result = json!({ "attemptId": response_attempt, "flushed": reusable, "reusable": reusable });
+                    slow_proof = retirement == Retirement::Deferred && reusable;
                 }
                 "DELETE" => {
                     assert_eq!(request.uri().path(), url);
                     let previous = route_stops.fetch_add(1, Ordering::Relaxed);
-                    if previous > 0 && (!after_grace || route_retired.load(Ordering::Relaxed)) {
+                    if previous > 0 {
+                        assert!(!after_grace);
                         result = final_stop.clone();
-                        slow_proof = retirement == Retirement::Deferred;
                     }
                 }
                 "POST" => {
@@ -221,10 +316,8 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                         Some(crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY)
                     );
                     let observed = route_observations.fetch_add(1, Ordering::Relaxed);
-                    if observed == 0 && retirement == Retirement::FirstProbeUnavailable {
-                        status = axum::http::StatusCode::SERVICE_UNAVAILABLE;
-                    }
-                    if (!after_grace && observed > 0) || route_retired.load(Ordering::Relaxed) {
+                    assert!(!after_grace);
+                    if observed > 0 {
                         result["NativeCleanup"]["retired"] = true.into();
                     }
                 }
@@ -248,7 +341,7 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                     &json!({
                         "id": fixture_id, "taskId": fixture_id, "trigger": "chat",
                         "status": "succeeded", "summary": "Completed reply", "isolated": true,
-                        "recoveryPending": after_grace, "finishedAt": 42
+                        "recoveryPending": true, "finishedAt": 42
                     }),
                     None,
                 )?;
@@ -353,11 +446,10 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
 
             if retirement == Retirement::Expired {
                 assert_eq!(before_verdict, after_verdict);
-                assert_eq!(stops.load(Ordering::Relaxed), 1);
             } else {
                 assert_eq!(before_verdict + 1, after_verdict);
-                assert_eq!(stops.load(Ordering::Relaxed), 2);
             }
+            assert_eq!(stops.load(Ordering::Relaxed), 1);
             // A restart after storing the verdict must settle from durable evidence
             // even if the controller has disconnected.
             assert!(service.store.run_state(&id).await.unwrap().recovery_pending);

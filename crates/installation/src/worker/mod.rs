@@ -45,7 +45,6 @@ pub struct Worker {
     pub active: Mutex<HashMap<String, CancellationToken>>,
     held: Mutex<std::collections::HashSet<String>>,
     deferred_cleanup_observers: Mutex<schedule::DeferredCleanupObservers>,
-    legacy_cleanup_probes: std::sync::OnceLock<tokio::sync::Semaphore>,
     pub(crate) job_redactions: Mutex<HashMap<String, crate::accounts::output_redactions::History>>,
     tick_lock: Mutex<()>,
     preparation: Arc<Mutex<()>>,
@@ -67,15 +66,6 @@ struct Admission {
 }
 
 impl Worker {
-    pub(crate) fn try_legacy_cleanup_probe(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
-        // Bound long legacy checks separately so they leave observer slots for
-        // read-only checks on controllers that support the cleanup status.
-        self.legacy_cleanup_probes
-            .get_or_init(|| tokio::sync::Semaphore::new(4))
-            .try_acquire()
-            .ok()
-    }
-
     /// Keep durable conversation recovery alive until graceful shutdown completes.
     pub(crate) fn spawn_recovery(
         &self,

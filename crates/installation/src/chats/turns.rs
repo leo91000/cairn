@@ -618,6 +618,7 @@ pub(super) fn launch_turn(
         // The expiry owner settles the last turn before a follow-up can use
         // this conversation again. Its poll may be behind the scheduler.
         if crate::environment_expiration::pending(db, run_id)?
+            || RunCheckpoint::awaiting_native_retirement_in(db, run_id)?
             || (run["status"] == RunStatus::Succeeded
                 && RunCheckpoint::held_deadline_elapsed_in(db, run_id, now())?)
         {

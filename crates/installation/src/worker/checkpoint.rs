@@ -556,12 +556,20 @@ impl RunCheckpoint {
         if let Some(attempt) = &self.finalization_failure_attempt {
             self.acknowledged_finalization_failure_attempt = Some(attempt.clone());
         }
-        let prior_cleanup = self
-            .pending_native_cleanup
-            .take()
-            .filter(crate::recovery::PendingNativeCleanup::awaiting_retirement);
+        let prior_cleanup = self.pending_native_cleanup.take().filter(|pending| {
+            pending.awaiting_retirement()
+                || pending.state == crate::recovery::DeferredCleanupState::Retired
+        });
         self.reset_finalization_observation();
         self.pending_native_cleanup = prior_cleanup;
+    }
+
+    pub(crate) fn awaiting_native_retirement_in(db: &Db<'_>, run_id: &str) -> Result<bool> {
+        Ok(db.0.prepare_cached(
+            "SELECT 1 FROM run_checkpoints WHERE run_id=?
+              AND json_extract(state,'$.pendingNativeCleanup.attempt')=json_extract(state,'$.runnerId')
+              AND json_extract(state,'$.pendingNativeCleanup.state')='awaitingRetirement'",
+        )?.exists([run_id])?)
     }
 
     /// Publish the cleanup failure once the optional proof has settled.

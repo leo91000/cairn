@@ -251,17 +251,18 @@ fn controller_timeout(method: &str, path: &str, native: bool) -> Duration {
     if native && crate::nodes::is_project_import_request(method, path) {
         return crate::nodes::PROJECT_OPEN_RELAY_TIMEOUT;
     }
-    if native && method == "DELETE" && path.starts_with("/runs/") && path.matches('/').count() == 2
-    {
-        return crate::nodes::NATIVE_STOP_RELAY_TIMEOUT;
-    }
     let seconds = if (method == "GET" && path.contains("/turn/"))
         || (method == "POST" && path.ends_with("/environment"))
     {
         60
     } else if method == "POST" && matches!(path, "/exclusive/acquire" | "/exclusive/release") {
         150
-    } else if path.starts_with("/prepare/") {
+    } else if path.starts_with("/prepare/")
+        || native
+            && method == "DELETE"
+            && path.starts_with("/runs/")
+            && path.matches('/').count() == 2
+    {
         300
     } else {
         25

@@ -331,10 +331,11 @@ impl Db<'_> {
     pub(crate) fn native_cleanup_recovery_ids(&self) -> Result<Vec<String>> {
         Ok(self.0.prepare_cached(
             "SELECT runs.id FROM runs JOIN run_checkpoints ON run_checkpoints.run_id=runs.id
-             WHERE recovery_pending=1
-               AND ((status='succeeded' AND json_type(run_checkpoints.state,'$.pendingNativeCleanup')='object')
-                 OR (status='queued' AND cancel_requested_at IS NULL
-                   AND json_extract(run_checkpoints.state,'$.pendingNativeCleanup.state')='awaitingRetirement'))
+             WHERE (status='succeeded' AND recovery_pending=1
+                      AND json_type(run_checkpoints.state,'$.pendingNativeCleanup')='object')
+                OR (json_extract(run_checkpoints.state,'$.pendingNativeCleanup.state')='awaitingRetirement'
+                      AND ((status='queued' AND recovery_pending=1 AND cancel_requested_at IS NULL)
+                           OR status IN ('failed','cancelled','interrupted')))
              ORDER BY created_at",
         )?.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
     }

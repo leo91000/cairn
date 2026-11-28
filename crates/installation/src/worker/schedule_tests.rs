@@ -249,19 +249,6 @@ async fn the_next_chat_turn_waits_for_old_native_cleanup_after_the_deadline() {
     for _ in 0..2 {
         service.chat_tick(&HashSet::new()).await.unwrap();
     }
-    let queued = service.store.run(&run).await.unwrap();
-    assert_eq!(
-        RunStatus::of(&queued),
-        Some(RunStatus::Queued),
-        "chat preparation: {:?}",
-        service
-            .store
-            .kv(&format!("chat-error:{chat}"))
-            .await
-            .unwrap(),
-    );
-    assert!(!recover_or_wait(&service, &queued).await.unwrap());
-
     observe_native_cleanup(&service).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while service
@@ -277,15 +264,15 @@ async fn the_next_chat_turn_waits_for_old_native_cleanup_after_the_deadline() {
     .await
     .unwrap();
     let blocked = service.store.run_state(&run).await.unwrap();
-    assert_eq!(blocked.status, RunStatus::Queued);
-    assert!(blocked.recovery_pending);
+    assert_eq!(blocked.status, RunStatus::Failed);
+    assert!(!blocked.recovery_pending);
     assert_eq!(probes.load(Ordering::Relaxed), 1);
     let chat_for_read = chat.clone();
     service
         .store
         .read(move |db| {
             let message = &db.messages(&chat_for_read)?[0];
-            assert_eq!(message["status"], "sending");
+            assert_eq!(message["status"], "queued");
             assert!(message["returnedTo"].is_null());
             Ok(())
         })
@@ -307,6 +294,9 @@ async fn the_next_chat_turn_waits_for_old_native_cleanup_after_the_deadline() {
     })
     .await
     .unwrap();
+    service.chat_tick(&HashSet::new()).await.unwrap();
+    let queued = service.store.run(&run).await.unwrap();
+    assert_eq!(RunStatus::of(&queued), Some(RunStatus::Queued));
     assert!(recover(&service, &queued).await.unwrap());
     assert_eq!(probes.load(Ordering::Relaxed), 2);
     let ready = service.store.run_state(&run).await.unwrap();
@@ -408,17 +398,6 @@ async fn stop_and_run_cancellation_settle_a_deferred_reply_without_returning_lat
         .await
         .unwrap();
         assert!(
-            service
-                .store
-                .run_state(&other_run)
-                .await
-                .unwrap()
-                .recovery_pending
-        );
-        drop(account_guard);
-        let other_preparation = service.worker.run_preparation_lock(&other_run).await;
-        drop(other_preparation.lock().await);
-        assert!(
             !service
                 .store
                 .run_state(&other_run)
@@ -426,6 +405,7 @@ async fn stop_and_run_cancellation_settle_a_deferred_reply_without_returning_lat
                 .unwrap()
                 .recovery_pending
         );
+        drop(account_guard);
         let stopped = service.store.run_state(&run).await.unwrap();
         assert_eq!(stopped.status, RunStatus::Cancelled);
         assert_eq!(stopped.finished_at, Some(42));

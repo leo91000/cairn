@@ -1110,20 +1110,23 @@ mod tests {
     {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
-        for (live, explicit_stop, verdict, status) in [
-            (false, false, "observing", RunStatus::Failed),
-            (false, false, "unconfirmed", RunStatus::Failed),
-            (false, false, "retired", RunStatus::Succeeded),
-            (true, false, "unconfirmed", RunStatus::Failed),
-            (true, false, "retired", RunStatus::Succeeded),
-            (true, true, "retired", RunStatus::Cancelled),
+        for (live, explicit_stop, verdict, status, published) in [
+            (false, false, "observing", RunStatus::Failed, false),
+            (false, false, "unconfirmed", RunStatus::Failed, false),
+            (false, false, "retired", RunStatus::Succeeded, false),
+            (true, false, "unconfirmed", RunStatus::Failed, false),
+            (true, false, "retired", RunStatus::Succeeded, false),
+            (true, true, "retired", RunStatus::Cancelled, false),
+            (false, false, "retired", RunStatus::Failed, true),
         ] {
             store.transaction(move |db| {
                 let (run, attempt) = (id(), id());
                 db.add_run_fixture(&json!({
-                    "id": run, "taskId": run, "trigger": "chat", "status": "succeeded",
+                    "id": run, "taskId": run, "trigger": "chat",
+                    "status": if published { RunStatus::Failed } else { RunStatus::Succeeded },
                     "summary": "Provider result", "finishedAt": 42, "isolated": true,
-                    "recoveryPending": true, "cancelRequestedAt": explicit_stop.then_some(43),
+                    "recoveryPending": !published, "cancelRequestedAt": explicit_stop.then_some(43),
+                    "error": published.then_some("Native cleanup is still pending"),
                 }), None)?;
                 db.save_checkpoint_boundary(&run, &json!({
                     "runnerId": attempt,
