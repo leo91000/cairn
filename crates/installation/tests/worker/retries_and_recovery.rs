@@ -618,9 +618,10 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
 /// A recorded turn must retain the original attempt for reconciliation on restart.
 #[tokio::test]
 async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attempt_evidence() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     for interruption in ["shutdown", "cancel", "signal", "client-error", "timeout"] {
         let cancel = interruption == "cancel";
+        let stops_manager = matches!(interruption, "shutdown" | "cancel");
         let mut fixture = Fixture::new().await;
         fixture.stop(false).await;
         let controller = Arc::new(Controller {
@@ -632,10 +633,15 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
         });
         let waits = Arc::new(AtomicUsize::new(0));
         let count = waits.clone();
+        // For the manager stop cases, expose terminal evidence only to the
+        // restarted process, even if the first process gets time to probe again.
+        let evidence_available = Arc::new(AtomicBool::new(!stops_manager));
+        let evidence = evidence_available.clone();
         let app = Router::new()
             .fallback(any(
                 move |state: State<Arc<Controller>>, request: Request| {
                     let count = count.clone();
+                    let evidence = evidence.clone();
                     async move {
                         if request.uri().path().ends_with("/wait") {
                             let observation = count.fetch_add(1, Ordering::SeqCst);
@@ -644,9 +650,9 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
                                 // durably reserved observation may read again.
                                 return Json(json!({})).into_response();
                             }
-                            if interruption != "client-error" && observation == 0 {
-                                // Only the first client read is interrupted. Persisted
-                                // controller evidence is available to subsequent reads.
+                            if observation == 0 || !evidence.load(Ordering::SeqCst) {
+                                // Keep the initial read open. A stopped manager
+                                // cannot see evidence reserved for its replacement.
                                 return std::future::pending::<Response>().await;
                             }
                             return Json(json!({ "StatusCode": 0 })).into_response();
@@ -723,8 +729,10 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
             let saved = fixture.checkpoint(run_id).await;
             kill_fixture_runner_child(&saved).await;
         }
-        if matches!(interruption, "shutdown" | "cancel") {
+        let mut waits_before_restart = 1;
+        if stops_manager {
             fixture.stop(false).await;
+            waits_before_restart = waits.load(Ordering::SeqCst);
             let stopped = fixture.service.store.run(run_id).await.unwrap();
             let checkpoint = fixture.checkpoint(run_id).await;
             assert_eq!(checkpoint["completed"], true);
@@ -736,6 +744,7 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
                 assert_eq!(stopped["status"], RunStatus::Queued, "{stopped}");
                 assert!(checkpoint["settled"].is_null(), "{checkpoint}");
             }
+            evidence_available.store(true, Ordering::SeqCst);
             fixture.start().await;
         }
         if cancel {
@@ -743,7 +752,7 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
                 .until(run_id, |run| run["status"] == "cancelled")
                 .await;
             assert_eq!(result["status"], RunStatus::Cancelled);
-            assert_eq!(waits.load(Ordering::SeqCst), 1);
+            assert_eq!(waits.load(Ordering::SeqCst), waits_before_restart);
         } else if interruption == "timeout" {
             let result = fixture.until_finished(run_id).await;
             assert_eq!(result["status"], RunStatus::Failed, "{result}");
@@ -758,7 +767,7 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
                 "{interruption}: {result}"
             );
             assert_eq!(fixture.checkpoint(run_id).await["terminalCode"], 0);
-            assert_eq!(waits.load(Ordering::SeqCst), 2);
+            assert_eq!(waits.load(Ordering::SeqCst), waits_before_restart + 1);
         }
         assert_eq!(
             controller.plans.lock().await.len(),
@@ -1494,9 +1503,10 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
 #[tokio::test]
 async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attempt_evidence_reconciliation()
  {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     for interruption in ["shutdown", "cancel", "signal", "client-error", "timeout"] {
         let cancel = interruption == "cancel";
+        let stops_manager = matches!(interruption, "shutdown" | "cancel");
         let mut fixture = Fixture::new().await;
         fixture.stop(false).await;
         let controller = Arc::new(Controller {
@@ -1508,10 +1518,15 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
         });
         let waits = Arc::new(AtomicUsize::new(0));
         let count = waits.clone();
+        // For the manager stop cases, expose terminal evidence only to the
+        // restarted process, even if the first process gets time to probe again.
+        let evidence_available = Arc::new(AtomicBool::new(!stops_manager));
+        let evidence = evidence_available.clone();
         let app = Router::new()
             .fallback(any(
                 move |state: State<Arc<Controller>>, request: Request| {
                     let count = count.clone();
+                    let evidence = evidence.clone();
                     async move {
                         if request.uri().path().ends_with("/wait") {
                             let observation = count.fetch_add(1, Ordering::SeqCst);
@@ -1520,9 +1535,9 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
                                 // durably reserved observation may read again.
                                 return Json(json!({})).into_response();
                             }
-                            if interruption != "client-error" && observation == 0 {
-                                // Only the first client read is interrupted. Persisted
-                                // controller evidence is available to subsequent reads.
+                            if observation == 0 || !evidence.load(Ordering::SeqCst) {
+                                // Keep the initial read open. A stopped manager
+                                // cannot see evidence reserved for its replacement.
                                 return std::future::pending::<Response>().await;
                             }
                             return Json(json!({ "StatusCode": 0 })).into_response();
@@ -1599,8 +1614,10 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
             let saved = fixture.checkpoint(run_id).await;
             kill_fixture_runner_child(&saved).await;
         }
-        if matches!(interruption, "shutdown" | "cancel") {
+        let mut waits_before_restart = 1;
+        if stops_manager {
             fixture.stop(false).await;
+            waits_before_restart = waits.load(Ordering::SeqCst);
             let stopped = fixture.service.store.run(run_id).await.unwrap();
             let checkpoint = fixture.checkpoint(run_id).await;
             assert_eq!(checkpoint["completed"], true);
@@ -1612,6 +1629,7 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
                 assert_eq!(stopped["status"], RunStatus::Queued, "{stopped}");
                 assert!(checkpoint["settled"].is_null(), "{checkpoint}");
             }
+            evidence_available.store(true, Ordering::SeqCst);
             fixture.start().await;
         }
         if cancel {
@@ -1619,7 +1637,7 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
                 .until(run_id, |run| run["status"] == "cancelled")
                 .await;
             assert_eq!(result["status"], RunStatus::Cancelled);
-            assert_eq!(waits.load(Ordering::SeqCst), 1);
+            assert_eq!(waits.load(Ordering::SeqCst), waits_before_restart);
         } else if interruption == "timeout" {
             let result = fixture.until_finished(run_id).await;
             assert_eq!(result["status"], RunStatus::Failed, "{result}");
@@ -1634,7 +1652,7 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
                 "{interruption}: {result}"
             );
             assert_eq!(fixture.checkpoint(run_id).await["terminalCode"], 0);
-            assert_eq!(waits.load(Ordering::SeqCst), 2);
+            assert_eq!(waits.load(Ordering::SeqCst), waits_before_restart + 1);
         }
         assert_eq!(
             controller.plans.lock().await.len(),
