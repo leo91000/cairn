@@ -2,6 +2,7 @@
 mod terminal_tests;
 
 use crate::{
+    accounts::{Accounts, Lease},
     config::now,
     error::Result,
     recovery::ProcessIdentity,
@@ -847,6 +848,7 @@ impl RunCheckpoint {
 pub struct EventChanges {
     pub run: Option<crate::runs::RunChanges>,
     pub failure: Option<(String, Option<crate::run_retry::Cause>, bool)>,
+    pub managed_quota_lease: Option<Lease>,
     pub antigravity_probe_failed: bool,
     pub completed: bool,
     pub progress_complete: bool,
@@ -1078,6 +1080,9 @@ impl Checkpoint {
         let failure = changes.failure.filter(|(_, _, provider)| {
             state.last_error().is_empty() || (*provider && !state.provider_failed())
         });
+        let managed_quota_lease = changes
+            .managed_quota_lease
+            .filter(|_| failure.as_ref().is_some_and(|(_, _, provider)| *provider));
         let mut progress = state.progress.clone();
         let progress_changed = progress.as_mut().is_some_and(|progress| {
             if !changes.progress_complete {
@@ -1164,6 +1169,21 @@ impl Checkpoint {
                 }
                 if let Some(saved) = &saved {
                     saved.store_in(db, &id)?;
+                }
+                // Commit the quota refusal before a controller wait or restart
+                // can release its lease. Match the lease again under its lock.
+                if let Some(lease) = managed_quota_lease
+                    && let Some(run) = db.run_state(&id)?
+                    && run.status == RunStatus::Running
+                    && run.session_id.is_some()
+                    && run.cancel_requested_at.is_none()
+                    && db.account_leases()?.iter().any(|current| {
+                        current.run_id == id
+                            && current.account_id == lease.account_id
+                            && current.model == lease.model
+                    })
+                {
+                    Accounts::exhausted_in(db, &lease.account_id, &lease.model)?;
                 }
                 db.event(&id, &kind, &text, Some(&payload))?;
                 Ok(saved)

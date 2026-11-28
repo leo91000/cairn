@@ -1176,6 +1176,7 @@ mod tests {
                     }),
                     completed: false,
                     failure: None,
+                    managed_quota_lease: None,
                     antigravity_probe_failed: false,
                     progress_complete: true,
                     last_message: None,

@@ -59,7 +59,10 @@ async fn check_antigravity_probe_rejection(capacity_rejection: bool) {
             .to_string(),
         ),
         &f.checkpoint,
-        true,
+        Attempt {
+            previously_launched: true,
+            ..Attempt::default()
+        },
         &[],
         &mut f.log_total,
         &mut f.activity,
@@ -172,7 +175,7 @@ impl Fixture {
             &self.service,
             &output,
             &self.checkpoint,
-            false,
+            Attempt::default(),
             &["sensitive-tool-credential".into()],
             &mut self.log_total,
             &mut self.activity,
@@ -1214,7 +1217,7 @@ async fn side_answers_are_stored_redacted() {
                 &fixture.service,
                 &Output::new(false, event.to_string()),
                 &fixture.checkpoint,
-                false,
+                Attempt::default(),
                 &["sensitive-tool-credential".into(), collision.into()],
                 &mut fixture.log_total,
                 &mut fixture.activity,
@@ -1695,7 +1698,7 @@ async fn failed_event_publication_rolls_back_the_checkpoint_and_does_not_notify(
         &fixture.service,
         &output,
         &fixture.checkpoint,
-        false,
+        Attempt::default(),
         &[],
         &mut fixture.log_total,
         &mut fixture.activity,
@@ -1773,7 +1776,7 @@ async fn display_redaction_cannot_change_engine_lifecycle_or_session_identity() 
             &fixture.service,
             &output,
             &fixture.checkpoint,
-            false,
+            Attempt::default(),
             &["completed".into(), "text".into(), "session".into()],
             &mut fixture.log_total,
             &mut fixture.activity,
@@ -1850,7 +1853,7 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
         &fixture.service,
         &Output::new(false, json!({"type":"turn.started"}).to_string()),
         &fixture.checkpoint,
-        false,
+        Attempt::default(),
         &[],
         &mut fixture.log_total,
         &mut fixture.activity,
@@ -1898,7 +1901,7 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
         &fixture.service,
         &Output::new(false, item.to_string()),
         &fixture.checkpoint,
-        false,
+        Attempt::default(),
         &["stable-private".into()],
         &mut fixture.log_total,
         &mut fixture.activity,
@@ -1923,7 +1926,7 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
         .update(|saved| saved.completed = Some(false))
         .await
         .unwrap();
-    record(&fixture.service, &Output::new(false, json!({"type":"item.updated","item":{"id":"late","type":"agent_message","text":"late snapshot"}}).to_string()), &restarted, false, &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
+    record(&fixture.service, &Output::new(false, json!({"type":"item.updated","item":{"id":"late","type":"agent_message","text":"late snapshot"}}).to_string()), &restarted, Attempt::default(), &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
     restarted.persist().await.unwrap();
     record(
         &fixture.service,
@@ -1933,7 +1936,7 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
                 .to_string(),
         ),
         &restarted,
-        false,
+        Attempt::default(),
         &[],
         &mut fixture.log_total,
         &mut fixture.activity,
@@ -1949,7 +1952,7 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
             .finalized_at
             .is_none()
     );
-    record(&fixture.service, &Output::new(false, json!({"type":"runner.finalized","attemptId":"progress-attempt","physicalFinalized":true}).to_string()), &restarted, false, &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
+    record(&fixture.service, &Output::new(false, json!({"type":"runner.finalized","attemptId":"progress-attempt","physicalFinalized":true}).to_string()), &restarted, Attempt::default(), &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
     let mut saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
         .await
         .unwrap()
@@ -1966,7 +1969,7 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
         &fixture.service,
         &Output::new(false, json!({"type":"turn.started"}).to_string()),
         &restarted,
-        false,
+        Attempt::default(),
         &[],
         &mut fixture.log_total,
         &mut fixture.activity,

@@ -723,17 +723,20 @@ impl Accounts {
         let _guard = self.lock(id).await;
         let (id, model) = (id.to_owned(), model.to_owned());
         s.store
-            .transaction(move |db| {
-                let mut account = required(db.coding_account(&id)?, "Account not found.")?;
-                account.exhausted = Some(Exhaustion {
-                    at: now(),
-                    model,
-                    usage: account.usage.clone(),
-                });
-                db.save_coding_account(&account)?;
-                db.audit("account.exhausted", &json!({ "id": id }))
-            })
+            .transaction(move |db| Self::exhausted_in(db, &id, &model))
             .await
+    }
+
+    /// Records exhaustion as part of an existing transaction under the account lock.
+    pub(crate) fn exhausted_in(db: &Db<'_>, id: &str, model: &str) -> Result<()> {
+        let mut account = required(db.coding_account(id)?, "Account not found.")?;
+        account.exhausted = Some(Exhaustion {
+            at: now(),
+            model: model.to_owned(),
+            usage: account.usage.clone(),
+        });
+        db.save_coding_account(&account)?;
+        db.audit("account.exhausted", &json!({ "id": id }))
     }
 
     pub async fn poll(&self, s: &Service, only_due: bool) -> Result<()> {

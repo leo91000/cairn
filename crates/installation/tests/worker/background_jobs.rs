@@ -16,6 +16,7 @@ struct JobsController {
     jobs: tokio::sync::Mutex<Registry>,
     turns: tokio::sync::Mutex<Vec<(Value, Vec<Value>, bool)>>,
     turn_completed: tokio::sync::Notify,
+    quota_wait_started: tokio::sync::Notify,
     activity: tokio::sync::Notify,
     disconnect_activity: Option<tokio_util::sync::CancellationToken>,
     close_started: tokio::sync::Notify,
@@ -311,6 +312,7 @@ async fn serve_jobs_controller(
     if path.ends_with("/wait") && state.root.join("fail-provider-quota").exists() {
         // The provider turn has a receipt, while its environment is still
         // alive. A full execution wait can only finish after manager cleanup.
+        state.quota_wait_started.notify_one();
         while !state.deleted.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
@@ -429,6 +431,7 @@ async fn jobs_fixture(
         )),
         turns: tokio::sync::Mutex::new(Vec::new()),
         turn_completed: tokio::sync::Notify::new(),
+        quota_wait_started: tokio::sync::Notify::new(),
         activity: tokio::sync::Notify::new(),
         disconnect_activity: matches!(
             deadline,
@@ -474,6 +477,15 @@ async fn jobs_fixture(
 
 #[tokio::test]
 async fn managed_turn_quota_failure_exhausts_the_account_without_replaying() {
+    verify_managed_turn_quota_failure(false).await;
+}
+
+#[tokio::test]
+async fn managed_turn_quota_exhaustion_survives_manager_restart() {
+    verify_managed_turn_quota_failure(true).await;
+}
+
+async fn verify_managed_turn_quota_failure(restart: bool) {
     let (mut fixture, state, server) = jobs_fixture(None).await;
     common::reconfigure(&mut fixture.service, |config| {
         config.antigravity_bin = common::fixture("antigravity.mjs");
@@ -526,6 +538,15 @@ async fn managed_turn_quota_failure_exhausts_the_account_without_replaying() {
     tokio::fs::write(state.root.join("finish-provider"), "")
         .await
         .unwrap();
+
+    if restart {
+        tokio::time::timeout(Duration::from_secs(15), state.quota_wait_started.notified())
+            .await
+            .unwrap();
+        assert_eq!(fixture.checkpoint(&run).await["lastError"], QUOTA_FAILURE);
+        fixture.stop(true).await;
+        fixture.start().await;
+    }
 
     let failed = fixture.until_finished(&run).await;
     assert_eq!(failed["status"], RunStatus::Failed);
