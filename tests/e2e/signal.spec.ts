@@ -275,7 +275,9 @@ test('exclusive suspension stays live and suppresses working indicators until re
     await expect(headerStatus(page, 'Suspended for exclusive work')).toBeVisible()
     await expect(page.locator('.chat-header .avatar-orbit').filter({ visible: true })).toHaveCount(0)
     workspace.service.store.updateRun(runId, { suspendedByExclusive: null })
-    await expect(live.getByText('Working', { exact: true })).toBeVisible()
+    expect(workspace.service.store.run(runId)?.suspendedByExclusive ?? null).toBeNull()
+    // This fixture writes from a separate process. The stream's fallback refresh is 15 seconds.
+    await expect(live.getByText('Working', { exact: true })).toBeVisible({ timeout: 20000 })
     await expect(page.locator('.agent-working')).toHaveCount(1)
   }
   finally {
