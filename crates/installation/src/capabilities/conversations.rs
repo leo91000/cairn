@@ -78,12 +78,12 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "get_chat_coding_agent_options",
         scope: "read",
-        description: "Read coding agents currently available to recover this conversation's quota-blocked turn.",
+        description: "Read coding agents currently available to recover this conversation after a quota block or an Antigravity model capacity, rate limit or request refusal.",
     },
     ChatOperation {
         name: "switch_chat_coding_agent",
         scope: "run",
-        description: "Recover the same quota-blocked turn on an available coding agent, retaining its workspace, history and current authorization.",
+        description: "Recover the same turn after a quota block or an Antigravity model capacity, rate limit or request refusal, retaining its workspace, history and current authorization.",
     },
     ChatOperation {
         name: "list_chats",
@@ -103,7 +103,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "send_chat_message",
         scope: "run",
-        description: "Send a message to a conversation. Supply a fresh UUID message.id; reuse it with identical content for safe retries, unless the message was cancelled or returned: send it again with a new id. Queue waits for the current turn; steer joins it. Starts agent work with its configured permissions. After a failed or stopped turn that holds nothing, a new message starts the next turn; after a stop, send the message first, then call set_chat_paused(false). If the turn still holds a message (one the agent may have received, including steering or an answer claimed after Stop, an answer, or a rule's or agent's message from before it ended), the conversation is paused and set_chat_paused(false) replays that turn first, then sends what was written since. Ordinary messages a person wrote that a failed or stopped turn never delivered are cancelled and returned to them (returnedTo); others stay queued behind a pause.",
+        description: "Send a message to a conversation. Supply a fresh UUID message.id; reuse it with identical content for safe retries, unless the message was cancelled or returned: send it again with a new id. Queue waits for the current turn; steer joins it. Starts agent work with its configured permissions. After a failed or stopped turn that holds nothing, a new message starts the next turn; after a stop, send the message first, then call set_chat_paused(false). If the turn still holds a message (one the agent may have received, including steering or an answer claimed after Stop, an answer, or a rule's or agent's message from before it ended), the conversation is paused and set_chat_paused(false) replays that turn first, then sends what was written since. If Antigravity asks for a new message, unpausing continues the queue without replaying the refused turn. Ordinary messages a person wrote that a failed or stopped turn never delivered are cancelled and returned to them (returnedTo); others stay queued behind a pause.",
     },
     ChatOperation {
         name: "edit_chat_message",
@@ -123,7 +123,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "set_chat_paused",
         scope: "run",
-        description: "Pause or resume the follow-up queue. Pausing lets the current turn finish; resuming permits queued agent work. Resuming a stopped or failed turn replays it, unless its message was returned to its author, or a message was written since it ended while the turn holds nothing (no message from before it ended, and no steering or answer it claimed after Stop): that message is sent instead. Use stop_chat to interrupt the current turn.",
+        description: "Pause or resume the follow-up queue. Pausing lets the current turn finish; resuming permits queued agent work. Resuming a stopped or failed turn replays it, unless its message was returned to its author, or a message was written since it ended while the turn holds nothing (no message from before it ended, and no steering or answer it claimed after Stop): that message is sent instead. When Antigravity asks for a new message, unpausing continues the queue without replaying the refused turn. Use stop_chat to interrupt the current turn.",
     },
     ChatOperation {
         name: "stop_chat",
@@ -143,7 +143,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "resume_chat",
         scope: "run",
-        description: "Resume a failed or stopped chat turn using its saved session, subject to existing recovery rules. An optional selection changes only this turn's model, reasoning and speed for the same coding agent; runId and turnId are required and guard against stale selections. An empty model resolves to the current catalog default unless preserveModel is true, which requires a blank saved model and keeps it blank. For Codex, an empty selection speed inherits the saved request and standard explicitly selects Standard. A turn whose message was returned to its author (turnReturned) cannot be resumed; that message continues the conversation instead. Use set_chat_paused(false) to resume queued follow-ups.",
+        description: "Resume a failed or stopped chat turn using its saved session, subject to existing recovery rules. An optional selection changes only this turn's model, reasoning and speed for the same coding agent; runId and turnId are required and guard against stale selections. An empty model resolves to the current catalog default unless preserveModel is true, which requires a blank saved model and keeps it blank. For Codex, an empty selection speed inherits the saved request and standard explicitly selects Standard. A turn whose message was returned to its author (turnReturned) cannot be resumed; that message continues the conversation instead. When Antigravity asks for a new message, send one to continue the preserved conversation. Use set_chat_paused(false) to resume queued follow-ups.",
     },
     ChatOperation {
         name: "restart_chat_session",

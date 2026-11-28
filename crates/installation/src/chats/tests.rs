@@ -840,6 +840,152 @@ async fn an_answer_claimed_after_stop_replays_the_stopped_turn() {
 }
 
 #[tokio::test]
+async fn antigravity_follow_up_refusal_keeps_the_queue_available_without_replay() {
+    use crate::conversation_writers::{EntryWriter, record_message};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            let run = db.add_run_fixture(
+                &json!({
+                    "id": "run", "taskId": "chat", "status": "failed",
+                    "startedAt": 1, "finishedAt": 900,
+                    "chatExecution": {"messageId":"initial","text":"Initial","attachments":[]},
+                    "snapshot": {"agent":{"provider":"antigravity"}},
+                }),
+                None,
+            )?;
+            db.save_checkpoint_boundary("run", &json!({
+                "launched": true,
+                "launchedTurn": "initial",
+                "antigravityFreshInputFor": "initial",
+            }))?;
+            db.save_conversation_boundary(&json!({"id":"chat","runId":"run","agentId":"agent"}))?;
+            db.put_message(&json!({
+                "id": "initial", "chatId": "chat", "text": "Initial", "status": "sending", "createdAt": 50,
+            }))?;
+            db.put_message(&json!({
+                "id": "steer", "chatId": "chat", "text": "Steer", "mode": "steer", "status": "sending", "createdAt": 100,
+            }))?;
+            record_message(db, "chat", "steer", &EntryWriter::Person("alice".into()))?;
+            db.put_message(&json!({
+                "id": "rule", "chatId": "chat", "text": "Queued rule", "status": "queued", "createdAt": 150,
+            }))?;
+            db.put_message(&json!({
+                "id": "claimed", "chatId": "chat", "text": "Claimed rule steer",
+                "mode": "steer", "status": "sending", "createdAt": 200,
+            }))?;
+            db.save_question(&serde_json::from_value(json!({
+                "id": "question", "chatId": "chat", "runId": "run",
+                "status": "answering", "blocking": true, "messageId": "answer",
+                "fields": [{"id": "field", "title": "Test question"}],
+            }))?)?;
+            db.put_message(&json!({
+                "id": "answer", "chatId": "chat", "questionId": "question",
+                "text": "Claimed answer", "mode": "steer", "status": "sending", "createdAt": 250,
+            }))?;
+
+            settle_turn(db, "chat", &run)?;
+            assert_eq!(find_message(db, "chat", "initial")?.unwrap().status, MessageStatus::Cancelled);
+            assert_eq!(find_message(db, "chat", "steer")?.unwrap().status, MessageStatus::Cancelled);
+            assert_eq!(find_message(db, "chat", "claimed")?.unwrap().status, MessageStatus::Cancelled);
+            assert_eq!(find_message(db, "chat", "answer")?.unwrap().status, MessageStatus::Cancelled);
+            let question = find_question(db, "chat", "question")?.unwrap();
+            assert_eq!(question.status, QuestionStatus::Cancelled);
+            assert!(!question.blocking);
+            assert!(db.kv(&returned_key("steer"))?.is_some());
+            assert!(conversation(db, "chat")?.paused);
+            assert!(skips_replay(db, "chat", &run)?);
+            pause_in(db, "chat", false)?;
+            assert!(!conversation(db, "chat")?.paused);
+            assert_eq!(find_message(db, "chat", "rule")?.unwrap().status, MessageStatus::Queued);
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_unknown_paid_retry_cannot_switch_engines_while_waiting_for_an_account() {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            let run = db.add_run_fixture(
+                &json!({
+                    "id": "run", "taskId": "chat", "status": "queued",
+                    "accountWaitReason": "Waiting for a Antigravity account with available usage.",
+                    "chatExecution": {"messageId":"input","text":"Continue","attachments":[]},
+                    "snapshot": {"agent":{"provider":"antigravity"}},
+                }),
+                None,
+            )?;
+            assert!(super::coding_agent::provider_blocked(db, &run)?);
+            db.save_checkpoint_boundary(
+                "run",
+                &json!({
+                    "launched": true,
+                    "launchedTurn": "input",
+                    "antigravityPaidTurn": "input",
+                }),
+            )?;
+            assert!(!super::coding_agent::provider_blocked(db, &run)?);
+            let chat = json!({"id":"chat","runId":"run","agentId":"agent"});
+            let mut switching = run.clone();
+            switching["snapshot"]["agent"]["provider"] = "codex".into();
+            let execution = serde_json::from_value(run["chatExecution"].clone())?;
+            let error = continue_run(db, &chat, &run, &switching, execution).unwrap_err();
+            assert_eq!(error.message, crate::antigravity::FRESH_INPUT_MESSAGE);
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_new_message_can_start_when_antigravity_has_no_verified_session() {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            let run = db.add_run_fixture(
+                &json!({
+                    "id": "run", "taskId": "chat", "status": "failed",
+                    "startedAt": 1, "finishedAt": 900,
+                    "chatExecution": {"messageId":"initial","text":"Initial","attachments":[]},
+                    "snapshot": {"agent":{"provider":"antigravity"}},
+                }),
+                None,
+            )?;
+            db.save_checkpoint_boundary("run", &json!({
+                "launched": true,
+                "launchedTurn": "initial",
+                "runnerId": "previous-environment",
+                "antigravityFreshInputFor": "initial",
+            }))?;
+            let chat = json!({"id":"chat","runId":"run","agentId":"agent"});
+            db.save_conversation_boundary(&chat)?;
+            let execution = serde_json::from_value(json!({
+                "messageId": "new-input", "text": "Continue with the preserved files.", "attachments": [],
+            }))?;
+            continue_run(db, &chat, &run, &run, execution)?;
+            let current = db.run("run")?.unwrap();
+            assert_eq!(current["chatExecution"]["messageId"], "new-input");
+            assert!(current["chatExecution"]["context"].is_string());
+            assert!(current["sessionId"].is_null());
+            assert_eq!(current["recoveryPending"], true);
+            let saved = RunCheckpoint::load_in(db, "run")?.unwrap();
+            assert!(!saved.launched());
+            assert_eq!(saved.runner_id(), Some("previous-environment"));
+            assert_eq!(saved.workspace_initialized, Some(true));
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn later_turns_and_steering_return_only_what_never_left() {
     use crate::conversation_writers::{EntryWriter, record_message};
     use crate::native::policy::Origin;

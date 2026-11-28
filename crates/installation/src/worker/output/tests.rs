@@ -84,6 +84,75 @@ async fn check_antigravity_probe_rejection(capacity_rejection: bool) {
     assert_eq!(run["chatExecution"]["recovery"], !capacity_rejection);
 }
 
+#[tokio::test]
+async fn only_a_canonical_rejection_of_the_current_paid_attempt_clears_the_fence() {
+    for (canonical, attempt_id, known) in [
+        (true, "current", true),
+        (false, "current", false),
+        (true, "older", false),
+    ] {
+        let mut f = Fixture::new().await;
+        f.service
+            .store
+            .change_run(
+                &f.id,
+                crate::runs::RunChanges {
+                    session_id: Some(Some("saved-session".into())),
+                    resume_available: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        f.checkpoint
+            .update(|saved| {
+                saved.runner_id = Some(Some("current".into()));
+                saved.launched_turn = Some("retry-turn".into());
+                saved.antigravity_paid_turn = Some("retry-turn".into());
+                saved.pending_paid_admission = Some(super::super::checkpoint::PaidAdmission {
+                    attempt: attempt_id.into(),
+                    controller: false,
+                    capacity_refused: false,
+                    provider_cause: Some(crate::run_retry::Cause {
+                        kind: crate::run_retry::FailureKind::Server,
+                        message: "The Antigravity model is temporarily unavailable.".into(),
+                        startup: false,
+                    }),
+                });
+            })
+            .await
+            .unwrap();
+        record(
+            &f.service,
+            &Output::new(
+                false,
+                json!({
+                    "type": "runner.start_rejected",
+                    "message": "The controller refused admission.",
+                    "capacityRejection": canonical,
+                })
+                .to_string(),
+            ),
+            &f.checkpoint,
+            Attempt {
+                previously_launched: true,
+                antigravity_adapter: true,
+            },
+            &[],
+            &mut f.log_total,
+            &mut f.activity,
+        )
+        .await
+        .unwrap();
+        let saved = f.checkpoint.snapshot().await;
+        assert_eq!(saved.antigravity_replay_refused(Some("retry-turn")), !known);
+        assert_eq!(
+            f.service.store.run(&f.id).await.unwrap()["resumeAvailable"],
+            known
+        );
+    }
+}
+
 struct Fixture {
     _root: TempDir,
     service: Arc<Service>,
@@ -1683,6 +1752,91 @@ async fn context_usage_survives_log_budget_and_keeps_the_latest_snapshot_on_the_
 }
 
 #[tokio::test]
+async fn antigravity_recovery_honors_the_provider_delay() {
+    let mut f = Fixture::new().await;
+    let service = &f.service;
+    for (code, allowed) in [
+        ("antigravity_request_refused", false),
+        ("antigravity_model_capacity", true),
+    ] {
+        f.checkpoint
+            .update(|saved| {
+                saved.provider_failed = None;
+                saved.last_error = None;
+            })
+            .await
+            .unwrap();
+        let at = crate::config::now();
+        let event = Output::new(
+            false,
+            json!({
+                "type": "turn.failed",
+                "error": {
+                    "code": code,
+                    "message": "Provider temporarily unavailable",
+                    "retryable": true,
+                    "automaticRecovery": true,
+                    "retryAfterMs": 42_000,
+                },
+            })
+            .to_string(),
+        );
+        assert!(
+            !record(
+                service,
+                &event,
+                &f.checkpoint,
+                Attempt {
+                    antigravity_adapter: true,
+                    ..Attempt::default()
+                },
+                &[],
+                &mut f.log_total,
+                &mut f.activity,
+            )
+            .await
+            .unwrap()
+        );
+        let durable = RunCheckpoint::load(&service.store, &f.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            durable.retry_cause.as_ref().is_some_and(Option::is_some),
+            allowed
+        );
+        if let Some(cause) = durable.retry_cause.clone().flatten() {
+            let id = f.id.clone();
+            service
+                .store
+                .transaction(move |db| {
+                    let run = db.run_state(&id)?.unwrap();
+                    let mut durable = durable;
+                    assert!(super::super::retry::schedule_in(
+                        db,
+                        &id,
+                        &mut durable,
+                        &run,
+                        cause,
+                    )?);
+                    assert!(
+                        db.run_state(&id)?
+                            .unwrap()
+                            .retry
+                            .unwrap()
+                            .next_attempt_at
+                            .unwrap()
+                            >= at + 42_000
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() {
     use crate::accounts::usage::Usage;
 
@@ -1720,10 +1874,18 @@ async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() 
 
     let _refresh = s.accounts.lock(&account_id).await;
     let mut stale = s.accounts.account(s, &account_id).await.unwrap();
-    let event = Output::new(
-        false,
-        json!({"type":"turn.failed","error":{"code":"usage_limit_reached","message":"Quota reached"}}).to_string(),
-    );
+    let frame = json!({
+        "type": "turn.failed",
+        "error": {
+            "code": "antigravity_request_refused",
+            "message": "Antigravity refused the request (429). Send a new message to continue.",
+            "accountQuotaExhausted": true,
+            "automaticRecovery": false,
+            "requiresFreshInput": true,
+            "refusalId": "841aa0bc-0c03-4d5a-9ca0-75d3372c4931",
+        }
+    });
+    let event = Output::new(false, frame.to_string());
     let exhausted = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         record(
@@ -1731,7 +1893,7 @@ async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() 
             &event,
             &f.checkpoint,
             Attempt {
-                managed_antigravity: true,
+                antigravity_adapter: true,
                 ..Attempt::default()
             },
             &[],
@@ -1742,8 +1904,12 @@ async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() 
     .await
     .expect("the quota frame waited for the account lock")
     .unwrap();
-    assert!(exhausted);
+    assert!(
+        !exhausted,
+        "quota must not cause account rotation after a steer"
+    );
     assert!(f.checkpoint.snapshot().await.provider_failed());
+    assert_eq!(s.store.run(&f.id).await.unwrap()["resumeAvailable"], false);
     stale.usage = Some(Usage::from_value(&json!({
         "allowed": true, "windows": [{ "id": "primary", "usedPercent": 100 }],
     })));
@@ -1756,6 +1922,30 @@ async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() 
         exhaustion.usage.unwrap().remaining("fixture-model"),
         Some(1.)
     );
+    // Reprocessing the same terminal frame must not extend the cooldown.
+    f.checkpoint
+        .update(|saved| {
+            saved.provider_failed = None;
+            saved.last_error = None;
+        })
+        .await
+        .unwrap();
+    record(
+        s,
+        &event,
+        &f.checkpoint,
+        Attempt {
+            antigravity_adapter: true,
+            ..Attempt::default()
+        },
+        &[],
+        &mut f.log_total,
+        &mut f.activity,
+    )
+    .await
+    .unwrap();
+    let account = s.accounts.account(s, &account_id).await.unwrap();
+    assert_eq!(account.exhausted.unwrap().at, exhaustion.at);
     let mut next = s.accounts.lease(s, &f.id).await.unwrap().unwrap();
     next.run_id = crate::config::id();
     let admission = s
@@ -1764,6 +1954,189 @@ async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() 
         .await
         .unwrap_err();
     assert!(admission.is_conflict());
+}
+
+#[tokio::test]
+async fn a_paid_antigravity_outcome_requires_evidence_from_the_active_turn() {
+    for (event, still_unresolved, can_resume) in [
+        (
+            json!({ "type": "thread.started", "thread_id": "saved-session" }),
+            true,
+            false,
+        ),
+        (
+            json!({ "type": "turn.failed", "error": { "message": "Connection was lost." }}),
+            true,
+            false,
+        ),
+        (
+            json!({ "type": "turn.failed", "error": {
+                "code": "antigravity_model_capacity",
+                "message": "The Antigravity model is temporarily unavailable.",
+                "providerOutcomeConfirmed": true,
+            }}),
+            false,
+            true,
+        ),
+        (
+            json!({ "type": "turn.failed", "error": {
+                "code": crate::antigravity::CLI_UNAVAILABLE_CODE,
+                "message": crate::antigravity::CLI_UNAVAILABLE,
+            }}),
+            false,
+            true,
+        ),
+        (
+            json!({ "type": "turn.failed", "error": {
+                "code": crate::antigravity::PREFLIGHT_FAILED_CODE,
+                "message": "Unable to start the Antigravity CLI.",
+            }}),
+            false,
+            true,
+        ),
+        (json!({ "type": "turn.completed" }), false, false),
+    ] {
+        let mut f = Fixture::new().await;
+        f.service
+            .store
+            .change_run(
+                &f.id,
+                crate::runs::RunChanges {
+                    session_id: Some(Some("saved-session".into())),
+                    resume_available: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        f.checkpoint
+            .update(|saved| {
+                saved.launched_turn = Some("paid-turn".into());
+                saved.antigravity_paid_turn = Some("paid-turn".into());
+            })
+            .await
+            .unwrap();
+        record(
+            &f.service,
+            &Output::new(false, event.to_string()),
+            &f.checkpoint,
+            Attempt {
+                antigravity_adapter: true,
+                ..Attempt::default()
+            },
+            &[],
+            &mut f.log_total,
+            &mut f.activity,
+        )
+        .await
+        .unwrap();
+        let saved = f.checkpoint.snapshot().await;
+        assert_eq!(
+            saved.antigravity_replay_refused(Some("paid-turn")),
+            still_unresolved
+        );
+        assert!(!saved.antigravity_replay_refused(Some("another-turn")));
+        let run = f.service.store.run(&f.id).await.unwrap();
+        assert_eq!(run["sessionId"], "saved-session");
+        assert_eq!(run["resumeAvailable"], can_resume);
+    }
+}
+
+#[tokio::test]
+async fn a_missing_antigravity_session_is_cleared_before_fresh_input() {
+    let mut f = Fixture::new().await;
+    f.service
+        .store
+        .change_run(
+            &f.id,
+            crate::runs::RunChanges {
+                session_id: Some(Some("old-session".into())),
+                resume_available: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    f.checkpoint
+        .update(|saved| {
+            saved.launched_turn = Some("old-input".into());
+            saved.antigravity_paid_turn = Some("old-input".into());
+        })
+        .await
+        .unwrap();
+    record(
+        &f.service,
+        &Output::new(
+            false,
+            json!({
+                "type": "turn.failed",
+                "error": {
+                    "code": crate::antigravity::SESSION_UNAVAILABLE_CODE,
+                    "message": "The saved Antigravity conversation is unavailable.",
+                },
+            })
+            .to_string(),
+        ),
+        &f.checkpoint,
+        Attempt {
+            previously_launched: true,
+            antigravity_adapter: true,
+        },
+        &[],
+        &mut f.log_total,
+        &mut f.activity,
+    )
+    .await
+    .unwrap();
+    let run = f.service.store.run(&f.id).await.unwrap();
+    let saved = f.checkpoint.snapshot().await;
+    assert!(run["sessionId"].is_null());
+    assert_eq!(run["resumeAvailable"], false);
+    assert!(saved.antigravity_paid_turn.is_none());
+    assert!(saved.antigravity_replay_refused(Some("old-input")));
+}
+
+#[tokio::test]
+async fn interrupted_antigravity_retry_durably_requires_a_new_message() {
+    let mut f = Fixture::new().await;
+    f.checkpoint
+        .update(|saved| {
+            saved.launched_turn = Some("old-message".into());
+        })
+        .await
+        .unwrap();
+    let failure = Output::new(false, json!({
+        "type": "turn.failed",
+        "error": {
+            "code": "antigravity_retry_unconfirmed",
+            "message": "Antigravity was interrupted during an automatic retry. Send a new message to continue.",
+            "requiresFreshInput": true,
+        },
+    }).to_string());
+    record(
+        &f.service,
+        &failure,
+        &f.checkpoint,
+        Attempt {
+            antigravity_adapter: true,
+            ..Attempt::default()
+        },
+        &[],
+        &mut f.log_total,
+        &mut f.activity,
+    )
+    .await
+    .unwrap();
+    let saved = RunCheckpoint::load(&f.service.store, &f.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.antigravity_replay_refused(Some("old-message")));
+    assert!(!saved.antigravity_replay_refused(Some("new-message")));
+    assert_eq!(
+        f.service.store.run(&f.id).await.unwrap()["resumeAvailable"],
+        false
+    );
 }
 
 #[tokio::test]
@@ -1904,7 +2277,9 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
     fixture
         .service
         .store
-        .update_run_boundary(&fixture.id, json!({"missionTurnId":"progress-turn"}))
+        .update_run_boundary(&fixture.id, json!({
+            "chatExecution": { "messageId": "progress-turn", "text": "Review work", "attachments": [] }
+        }))
         .await
         .unwrap();
     fixture

@@ -136,9 +136,24 @@ Le relevé indique les groupes de modèles, le quota restant et l'heure de
 réinitialisation quand elle est connue. La CLI peut signaler un horaire fictif
 pour les fenêtres encore inutilisées. Le relevé omet ces horaires et marque les
 fenêtres dans le champ informatif `antigravityQuota`. Ce champ garde les groupes
-distincts de l'usage qui gouverne l'admission. Une erreur 429 utilise
-l'épuisement partagé et le compte redevient
-éligible après cinq minutes.
+distincts de l'usage qui gouverne l'admission. Une erreur de quota confirmée
+déclenche l'épuisement partagé. Le compte redevient éligible après le délai
+d'admission existant de cinq minutes. Le tour conserve le reset communiqué par
+le fournisseur lorsqu'il est disponible. La reprise du tour après un refus de
+quota demande une action explicite. Une violation structurée du quota quotidien
+Gemini API constitue aussi un refus de quota confirmé.
+
+Pour un refus temporaire de capacité ou une limite de débit, Cairn conserve les
+champs de diagnostic validés d'`AGY_ERROR` et suit la reprise bornée d'un tour
+confirmé en échec. Une relance automatique attend au moins le délai fournisseur
+et la fin de l'exécution précédente. Seul un refus confirmé avant une réponse
+ou un appel d'outil permet une reprise automatique. Un tour où un message de
+suivi a été transmis au moteur natif demande un nouveau message. Le manager consomme
+l'autorisation de relance avant de démarrer le processus. Si le résultat de
+cette relance ou la session ne peut pas être confirmé, un nouveau message est
+nécessaire pour continuer avec les fichiers conservés.
+Les refus 429 sans motif précis peuvent être repris manuellement si la session
+a été enregistrée, ou transférés vers un autre moteur.
 
 **Catalogue.** `agy models` liste des identifiants qui incluent le niveau
 (`gemini-4-neon-high`). Cairn les regroupe en un modèle et ses niveaux de

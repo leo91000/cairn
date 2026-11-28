@@ -1,6 +1,6 @@
 use super::{
     Admission,
-    checkpoint::{Checkpoint, RetainedCompletion, RunCheckpoint},
+    checkpoint::{Checkpoint, RetainedCompletion, RunCheckpoint, antigravity_execution_id},
     held::HELD_DEADLINE_CODE,
     output,
 };
@@ -358,7 +358,7 @@ impl Execution<'_> {
         self.cancel.is_cancelled() || self.s.shutdown.is_cancelled()
     }
 
-    async fn mark_running(&mut self) -> Result<()> {
+    async fn mark_running(&self) -> Result<()> {
         let s = self.s;
         let account_name = match self.account.as_ref() {
             Some(account) => {
@@ -387,7 +387,9 @@ impl Execution<'_> {
             ..Default::default()
         };
         if let Some(mut retry) = s.store.run_state(&self.id).await?.retry {
-            retry.next_attempt_at = None;
+            if self.provider != Provider::Antigravity || retry.cause.startup {
+                retry.next_attempt_at = None;
+            }
             patch.retry = Some(Some(retry));
         }
         let id = self.id.clone();
@@ -720,6 +722,45 @@ impl Execution<'_> {
         .await
         {
             Ok(session) => session,
+            Err(error)
+                if error.is_conflict()
+                    && self.provider == Provider::Antigravity
+                    && self.run["sessionId"].is_null() =>
+            {
+                // Without a manager-confirmed session, a workload's receipt
+                // cannot determine whether the previous turn performed work.
+                let message = "The Antigravity session could not be verified. Send a new message to continue.";
+                let id = self.id.clone();
+                self.checkpoint
+                    .update_and_publish(
+                        |saved| {
+                            saved
+                                .antigravity_fresh_input_for
+                                .clone_from(&saved.launched_turn);
+                        },
+                        move |db| {
+                            db.event(
+                                &id,
+                                &EventKind::TurnFailed,
+                                message,
+                                Some(&json!({
+                                    "type": "turn.failed",
+                                    "error": {
+                                        "code": "antigravity_session_unconfirmed",
+                                        "message": message,
+                                        "requiresFreshInput": true,
+                                    },
+                                })),
+                            )
+                        },
+                    )
+                    .await?;
+                return Err(Error::coded(
+                    409,
+                    "antigravity_session_unconfirmed",
+                    message,
+                ));
+            }
             Err(error) => {
                 // Local session discovery happens before any new turn is submitted.
                 // Preserve its specific transient failure instead of the previous cause.
@@ -871,6 +912,7 @@ impl Execution<'_> {
                 None
             };
             let chat = self.chat_plan(workspace, resume, &mut launch).await?;
+            let paid_retry = chat["antigravityRetryAuthorized"] == true;
             workspace.authorization.recheck().await?;
             if workspace.isolated() {
                 if self.retained {
@@ -881,10 +923,11 @@ impl Execution<'_> {
                         .await?;
                 }
             }
-            let mut exit = Box::pin(self.supervise(workspace, launch, log_total)).await?;
+            let mut exit =
+                Box::pin(self.supervise(workspace, launch, log_total, paid_retry)).await?;
             let receipt =
                 if workspace.env.contains_key("CAIRN_PROVIDER_TURN") && exit.code == Some(0) {
-                    let receipt = super::held::turn_receipt(s, self.run, &self.turn).await?;
+                    let receipt = super::held::turn_receipt(s, &self.id, &self.turn).await?;
                     if receipt.code != 0 {
                         return Err(Error::unavailable(
                             "Provider turn failed despite successful client exit.",

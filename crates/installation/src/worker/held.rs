@@ -646,11 +646,11 @@ pub(crate) fn tool() -> serde_json::Value {
 
 pub(crate) async fn turn_receipt(
     s: &crate::service::Service,
-    run: &serde_json::Value,
+    run_id: &str,
     turn: &str,
 ) -> crate::error::Result<crate::background_jobs::controller::TurnReceipt> {
     use crate::error::Error;
-    let saved = RunCheckpoint::load(&s.store, text(run, "id"))
+    let saved = RunCheckpoint::load(&s.store, run_id)
         .await?
         .ok_or_else(|| Error::conflict("No environment checkpoint."))?;
     let attempt = saved

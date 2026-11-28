@@ -36,7 +36,24 @@ internal data class ChatQuota(
     val spend: Boolean,
     val reset: String?,
     val automatic: Boolean,
+    val refusalTitle: String? = null,
+    val canResumeRefusal: Boolean = false,
+    val requiresFollowUp: Boolean = false,
 )
+
+private const val FRESH_INPUT = " Send a new message to continue."
+
+private fun antigravityRefusalTitle(message: String?): String? =
+    when (message) {
+        "The Antigravity model is temporarily unavailable." ->
+            "Modèle Antigravity temporairement indisponible"
+        "Antigravity is temporarily rate limiting requests." ->
+            "Limite de débit Antigravity atteinte"
+        "Antigravity refused the request (429).",
+        "Antigravity refused the request (429). Try again or choose another coding agent." ->
+            "Antigravity a refusé la requête (429)"
+        else -> null
+    }
 
 /** A live account wait that recovers automatically, without reconnecting an account. */
 internal fun isQuotaWait(status: String, reason: String?, accountRequired: String?): Boolean =
@@ -72,15 +89,30 @@ internal fun chatQuota(run: Run?, cards: List<TimelineCard>): ChatQuota? {
             Regex("^Waiting for a .+ account with available usage\\.", RegexOption.IGNORE_CASE)
                 .containsMatchIn(run.accountWaitReason.orEmpty())
     val waiting = exhausted || admission
+    val provider = run.snapshot?.agent?.provider ?: run.provider ?: "codex"
+    val requiresFollowUp = provider == "antigravity" && run.error?.endsWith(FRESH_INPUT) == true
+    val expiredRefusal =
+        run.error ==
+            "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved." &&
+            run.retry?.nextAttemptAt == null &&
+            antigravityRefusalTitle(run.retry?.cause?.message) != null
+    val refusalTitle =
+        when {
+            run.status != "failed" || provider != "antigravity" -> null
+            expiredRefusal -> "Reprise automatique Antigravity terminée"
+            else -> antigravityRefusalTitle(run.error?.removeSuffix(FRESH_INPUT))
+        }
     val savedQuota =
         run.status == "failed" &&
             (isQuotaMessage(run.error) ||
                 (failureMessage.isNotEmpty() && failureMessage == run.error))
-    if (!waiting && !savedQuota) return null
+    if (!waiting && !savedQuota && refusalTitle == null) return null
     // Admission has no current agent failure; saved failures have an authoritative error.
-    val message = if (savedQuota) run.error.orEmpty() else if (exhausted) failureMessage else ""
+    val message =
+        if (savedQuota || refusalTitle != null) run.error.orEmpty()
+        else if (exhausted) failureMessage else ""
     return ChatQuota(
-        providerLabel(run.snapshot?.agent?.provider ?: run.provider ?: "codex"),
+        providerLabel(provider),
         message,
         message.contains("spend limit", ignoreCase = true),
         Regex("\\bresets\\b(.*)$", RegexOption.IGNORE_CASE)
@@ -93,6 +125,9 @@ internal fun chatQuota(run: Run?, cards: List<TimelineCard>): ChatQuota? {
             ?: limitReset(failureReset).takeIf { it.isNotEmpty() && message == failureMessage },
         // Pausing the follow-up queue does not pause an execution's capacity wait.
         waiting,
+        refusalTitle,
+        refusalTitle != null && run.resumeAvailable,
+        requiresFollowUp,
     )
 }
 
@@ -142,21 +177,32 @@ internal fun ChatQuotaCard(
                     Text(
                         when {
                             switching != null -> "Passage à $switching…"
+                            quota.refusalTitle != null -> quota.refusalTitle
                             quota.spend -> "Limite de dépense ${quota.provider} atteinte"
                             else -> "Quota ${quota.provider} atteint"
                         },
                         style = MaterialTheme.typography.titleSmall,
                     )
-                    Text(
+                    val guidance =
                         when {
                             switching != null -> "La conversation et les fichiers sont conservés."
+                            quota.requiresFollowUp -> "Envoyez un nouveau message pour continuer."
+                            quota.canResumeRefusal && choices.isNotEmpty() ->
+                                "Réessayez ou continuez avec un autre agent de code."
+                            quota.canResumeRefusal -> "Réessayez de reprendre la conversation."
+                            quota.refusalTitle != null && choices.isNotEmpty() ->
+                                "Continuez avec un autre agent de code."
+                            quota.refusalTitle != null -> null
                             quota.automatic ->
                                 "Reprise automatique dès qu’un compte est disponible."
                             else -> "Reprenez la conversation quand un compte est disponible."
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                        }
+                    if (guidance != null)
+                        Text(
+                            guidance,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     if (switching == null)
                         quota.reset?.let {
                             Text(
@@ -167,7 +213,7 @@ internal fun ChatQuotaCard(
                         }
                 }
             }
-            if (readOnly) {
+            if (readOnly || quota.requiresFollowUp) {
                 // No actions: switching or resuming directs the agent.
             } else if (switching != null) {
                 TextButton(onClick = cancelSwitch, enabled = !busy) {
@@ -192,7 +238,7 @@ internal fun ChatQuotaCard(
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
-                    if (!quota.automatic)
+                    if (!quota.automatic && (quota.refusalTitle == null || quota.canResumeRefusal))
                         TextButton(onClick = resume, enabled = !busy) {
                             Text("Reprendre la conversation")
                         }
@@ -200,7 +246,7 @@ internal fun ChatQuotaCard(
             }
             if (canManage || quota.message.isNotBlank())
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (canManage)
+                    if (canManage && quota.refusalTitle == null)
                         TextButton(onClick = openConnections, enabled = !busy) {
                             Text("Gérer les comptes")
                         }
@@ -221,7 +267,8 @@ internal fun ChatQuotaCard(
                 Text(it, color = signal.warning, style = MaterialTheme.typography.bodySmall)
             }
             if (
-                !readOnly &&
+                quota.refusalTitle == null &&
+                    !readOnly &&
                     !canManage &&
                     choices.isEmpty() &&
                     switching == null &&

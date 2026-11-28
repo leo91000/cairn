@@ -2,6 +2,9 @@
 pub use cairn_contracts::{Cause, FailureKind, MAX_ATTEMPTS, MAX_RECOVERY_MS, Retry};
 use serde_json::Value;
 
+pub const CHAT_RECOVERY_EXPIRED: &str =
+    "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved.";
+
 /// Only an adapter still before turn submission may use this classification.
 /// An uncertain turn/start or tool operation must not enter this path.
 pub fn startup_failure(error: &crate::error::Error) -> Option<Value> {

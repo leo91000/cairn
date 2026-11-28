@@ -488,6 +488,12 @@ pub(crate) fn requeue(
     }
     let checkpoint = RunCheckpoint::load_in(db, id)?;
     let status = state.status;
+    if checkpoint
+        .as_ref()
+        .is_some_and(|saved| saved.antigravity_replay_refused_for(&run))
+    {
+        return Err(Error::conflict(crate::antigravity::FRESH_INPUT_MESSAGE));
+    }
     // The wrapper can start and record a launch before Antigravity's first CLI
     // probe fails. Require evidence from that same attempt before retrying it.
     let antigravity_retry = if status == RunStatus::Failed
@@ -1227,6 +1233,40 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn manual_resume_cannot_resubmit_an_unconfirmed_antigravity_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                for turn in ["initial", "wakeup"] {
+                    let run = format!("run-{turn}");
+                    let chat = format!("chat-{turn}");
+                    db.add_run_fixture(
+                        &json!({
+                            "id": run, "taskId": chat, "trigger": "chat", "status": "failed",
+                            "sessionId": "saved-session", "resumeAvailable": true,
+                            "chatExecution": { "messageId": turn, "text": "Review work", "attachments": [] },
+                            "snapshot": { "agent": { "provider": "antigravity" } },
+                        }),
+                        None,
+                    )?;
+                    db.save_conversation_boundary(&json!({ "id": chat, "runId": run }))?;
+                    let saved = RunCheckpoint {
+                        antigravity_paid_turn: Some(turn.into()),
+                        ..Default::default()
+                    };
+                    saved.store_in(db, &run)?;
+                    let error = requeue(db, &run, None, None, None, None).unwrap_err();
+                    assert_eq!(error.message, crate::antigravity::FRESH_INPUT_MESSAGE);
+                    assert_eq!(db.run(&run)?.unwrap()["status"], "failed");
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn manual_resume_retries_only_a_confirmed_antigravity_cli_start_failure() {

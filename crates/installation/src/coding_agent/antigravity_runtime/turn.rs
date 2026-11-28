@@ -1,4 +1,5 @@
 use super::{
+    failure,
     hook::{Mode, Policy},
     side::Sides,
 };
@@ -44,6 +45,8 @@ struct Receipt {
     previously_delivered: HashSet<String>,
     operational_notices: HashSet<String>,
     complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completed_attempt: Option<String>,
     answer: String,
     items: Vec<Value>,
 }
@@ -80,10 +83,15 @@ impl Receipt {
         atomic_write(path, &serde_json::to_vec(self)?).await
     }
 
-    async fn replay(&self, plan: &Value, events: &mpsc::Sender<Value>) -> Result<()> {
+    async fn replay_deliveries(&self, events: &mpsc::Sender<Value>) -> Result<()> {
         for id in &self.delivered {
             emit(events, json!({ "type": "chat.delivered", "messageId": id })).await?;
         }
+        Ok(())
+    }
+
+    async fn replay(&self, plan: &Value, events: &mpsc::Sender<Value>) -> Result<()> {
+        self.replay_deliveries(events).await?;
         atomic_write(Path::new(text(plan, "output")), self.answer.as_bytes()).await?;
         for item in &self.items {
             emit(events, json!({ "type": "item.completed", "item": item })).await?;
@@ -162,31 +170,10 @@ pub(super) fn step_item(id: &str, step: &Value, text_so_far: &str) -> Option<Val
 }
 
 /// `agy` reports provider failures on stderr as `AGY_ERROR: {json}`.
-pub(super) fn native_error(error: Option<&Value>, message: &str) -> Error {
-    let code = error.and_then(|e| e["error_code"].as_u64());
-    let status = error.map(|e| text(e, "status")).unwrap_or_default();
-    let lower = message.to_ascii_lowercase();
-    let text = if code == Some(429)
-        || status == "RESOURCE_EXHAUSTED"
-        || lower.contains("resource_exhausted")
-    {
-        "Usage limit reached for Antigravity. Check this account's quota or connect another account."
-    } else if matches!(code, Some(401 | 403))
-        || status == "UNAUTHENTICATED"
-        || status == "PERMISSION_DENIED"
-        || lower.contains("authentication")
-    {
-        "Antigravity authentication failed. Replace this account's credentials in Connections."
-    } else if lower.contains("invalid model selection") {
-        "This Antigravity account does not offer the selected model or reasoning level. Choose another model."
-    } else {
-        "Antigravity could not complete this response. Check the model, account credentials, and available capacity."
-    };
-    Error::bad_gateway(text)
-}
-
 pub(super) fn parse_agy_error(line: &str) -> Option<Value> {
-    serde_json::from_str(line.strip_prefix("AGY_ERROR:")?.trim()).ok()
+    serde_json::from_str::<Value>(line.strip_prefix("AGY_ERROR:")?.trim())
+        .ok()
+        .filter(Value::is_object)
 }
 
 /// Launch arguments shared by turns and side questions.
@@ -558,6 +545,10 @@ struct Turn<'a> {
     /// Messages whose native turn has not produced its result yet.
     unanswered: VecDeque<String>,
     submitted: HashSet<String>,
+    /// No native work has been observed since submitting this attempt.
+    replayable: bool,
+    paid_retry: bool,
+    submission_started: bool,
     items: HashMap<i64, (String, String)>,
     started: HashSet<i64>,
     finished: HashSet<i64>,
@@ -587,6 +578,21 @@ fn expired_token(error: Option<&Value>, message: &str) -> bool {
 }
 
 impl Turn<'_> {
+    async fn initialize(&mut self, event: &Value) -> Result<()> {
+        let id = conversation_id(text(event, "conversation_id"))?;
+        if !self.conversation.is_empty() && self.conversation != id {
+            return Err(unavailable_session());
+        }
+        self.conversation = id.to_owned();
+        emit(
+            &self.events,
+            json!({ "type": "thread.started", "thread_id": id }),
+        )
+        .await?;
+        emit(&self.events, json!({ "type": "turn.started" })).await?;
+        emit(&self.events, json!({ "type": "chat.side.available" })).await
+    }
+
     async fn deliver(&mut self, id: &str) -> Result<()> {
         if self.receipt.operational_notices.contains(id) {
             return Ok(());
@@ -615,6 +621,7 @@ impl Turn<'_> {
             "message": { "content": content },
         }))?;
         line.push(b'\n');
+        self.submission_started = true;
         self.stdin
             .write_all(&line)
             .await
@@ -674,8 +681,10 @@ impl Turn<'_> {
     async fn on_step(&mut self, step: &Value) -> Result<()> {
         let index = step["step_index"].as_i64().unwrap_or(-1);
         match text(step, "step_type") {
-            "user_input" if step["state"] == "DONE" => {
-                if let Some(id) = self.unconfirmed.pop_front() {
+            "user_input" => {
+                if step["state"] == "DONE"
+                    && let Some(id) = self.unconfirmed.pop_front()
+                {
                     self.deliver(&id).await?;
                 }
                 return Ok(());
@@ -683,6 +692,7 @@ impl Turn<'_> {
             "error_message" => return Ok(()),
             _ => {}
         }
+        self.replayable = false;
         if self.finished.contains(&index) {
             return Ok(());
         }
@@ -738,16 +748,65 @@ impl Turn<'_> {
         Ok(())
     }
 
+    /// Recovery resubmits the execution input. Require a refusal before any
+    /// native work or steering, since the original action could have succeeded.
+    fn recovery(&self, confirmed: bool) -> failure::Recovery {
+        let initial = text(&self.plan["execution"], "messageId");
+        let mut extra = self
+            .receipt
+            .submissions
+            .iter()
+            .filter(|submitted| *submitted != initial)
+            .peekable();
+        if extra.peek().is_none() && confirmed && self.replayable {
+            return failure::Recovery::Automatic;
+        }
+        if (self.paid_retry && !confirmed)
+            || extra.any(|id| !self.receipt.operational_notices.contains(id))
+        {
+            return failure::Recovery::FollowUp;
+        }
+        failure::Recovery::Manual
+    }
+
+    async fn report_failure<T>(
+        &mut self,
+        native: Option<&Value>,
+        message: &str,
+        correlated: bool,
+        confirmed: bool,
+    ) -> Result<T> {
+        let mut error = failure::normalize(native, message, correlated, self.recovery(confirmed));
+        if self.paid_retry {
+            if confirmed && text(&error, "code") != "antigravity_error" {
+                error["providerOutcomeConfirmed"] = true.into();
+            } else {
+                failure::require_fresh_input(&mut error);
+            }
+        }
+        if error["code"] == "usage_limit_reached" || error["accountQuotaExhausted"] == true {
+            error["refusalId"] = crate::config::id().into();
+        }
+        failure::report(&self.events, error).await
+    }
+
     /// One native turn finished. Answers whether every submitted message is answered.
-    async fn on_result(&mut self, result: &Value, stderr_error: Option<&Value>) -> Result<bool> {
+    async fn on_result(
+        &mut self,
+        result: &Value,
+        stderr_error: Option<&Value>,
+        diagnostic_complete: bool,
+    ) -> Result<bool> {
+        let correlated = self.unanswered.len() == 1;
         let Some(id) = self.unanswered.pop_front() else {
             return Err(Error::bad_gateway(
                 "Antigravity answered a message Cairn did not send.",
             ));
         };
-        let renew = self.google
+        let token_expired = self.google
             && text(result, "status") != "SUCCESS"
-            && expired_token(stderr_error, text(result, "error"));
+            && expired_token(stderr_error.filter(|_| correlated), text(result, "error"));
+        let renew = token_expired && !self.paid_retry;
         // A turn that never reached its user step was still consumed by this result,
         // unless it failed before reaching the model: a renewed launch sends it again.
         if let Some(position) = self.unconfirmed.iter().position(|pending| *pending == id) {
@@ -769,7 +828,19 @@ impl Turn<'_> {
                 self.renew = true;
                 return Ok(false);
             }
-            _ => return Err(native_error(stderr_error, text(result, "error"))),
+            _ => {
+                return self
+                    .report_failure(
+                        stderr_error,
+                        text(result, "error"),
+                        correlated,
+                        result["status"] == "ERROR"
+                            && text(result, "response").trim().is_empty()
+                            && diagnostic_complete
+                            && !token_expired,
+                    )
+                    .await;
+            }
         }
         if !self.unanswered.is_empty() {
             return Ok(false);
@@ -793,6 +864,7 @@ impl Turn<'_> {
     async fn complete(&mut self) -> Result<()> {
         self.sides.expire().await?;
         self.receipt.complete = true;
+        self.receipt.completed_attempt = self.plan["attemptId"].as_str().map(str::to_owned);
         self.receipt.save(&self.receipt_path).await?;
         self.receipt.replay(self.plan, &self.events).await
     }
@@ -804,10 +876,25 @@ pub async fn run(
     events: mpsc::Sender<Value>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    tokio::select! {
-        result = execute(config, plan, events, cancel.clone()) => result,
+    let retry_authorized = plan["antigravityRetryAttempt"].as_u64().unwrap_or_default() > 0
+        && plan["antigravityRetryAuthorized"] == true;
+    let mut submitted = false;
+    let result = tokio::select! {
+        result = execute(config, plan, events, cancel.clone(), retry_authorized, &mut submitted) => result,
         () = cancel.cancelled() => Err(Error::bad_gateway(STOPPED)),
-    }
+    };
+    result.map_err(|mut error| {
+        if retry_authorized
+            && !submitted
+            && !matches!(
+                error.code.as_deref(),
+                Some(super::CLI_UNAVAILABLE_CODE | super::SESSION_UNAVAILABLE_CODE)
+            )
+        {
+            error.code = Some(super::PREFLIGHT_FAILED_CODE.into());
+        }
+        error
+    })
 }
 
 pub(super) async fn credentials(config: &Config) -> Result<(PathBuf, Value)> {
@@ -836,6 +923,8 @@ async fn execute(
     plan: Value,
     events: mpsc::Sender<Value>,
     cancel: CancellationToken,
+    retry_authorized: bool,
+    submitted: &mut bool,
 ) -> Result<()> {
     if plan["sandbox"] != "yolo" && plan["planning"] != true {
         return Err(Error::bad(
@@ -844,13 +933,37 @@ async fn execute(
     }
     let initial = text(&plan["execution"], "messageId");
     let receipt_path = Path::new(text(&plan, "output")).with_extension("antigravity-receipt.json");
+    let paid_retry_attempt = plan["antigravityRetryAttempt"].as_u64().unwrap_or_default();
+    let recovering = plan["execution"]["recovery"] == true || paid_retry_attempt > 0;
     let saved = Receipt::read(&receipt_path, initial).await;
-    if let Some(receipt) = saved
-        .as_ref()
-        .filter(|r| r.complete && r.delivered.contains(initial))
+    if !retry_authorized
+        && let Some(receipt) = saved.as_ref().filter(|receipt| {
+            receipt.complete
+                && receipt.delivered.contains(initial)
+                && (paid_retry_attempt == 0
+                    || plan["antigravityPreviousAttempt"]
+                        .as_str()
+                        .is_some_and(|attempt| {
+                            receipt.completed_attempt.as_deref() == Some(attempt)
+                        }))
+        })
     {
+        // This only restores the answer. The receipt cannot authorize agy.
         return receipt.replay(&plan, &events).await;
     }
+    if paid_retry_attempt > 0 && !retry_authorized {
+        // The manager consumes the scheduled admission before launching. A
+        // workload-owned receipt cannot authorize resubmitting a spent retry.
+        if let Some(receipt) = &saved {
+            receipt.replay_deliveries(&events).await?;
+        }
+        return report_uncertain_retry(&events).await;
+    }
+    let mut replayable = retry_authorized
+        || (!recovering
+            && saved
+                .as_ref()
+                .is_none_or(|receipt| receipt.submissions.is_empty()));
     let mode = if plan["planning"] == true {
         Mode::Plan
     } else {
@@ -866,7 +979,12 @@ async fn execute(
         ..Receipt::default()
     });
     let mut conversation = match plan["sessionId"].as_str().filter(|id| !id.is_empty()) {
-        Some(id) => conversation_id(id)?.to_owned(),
+        Some(id) => match conversation_id(id) {
+            Ok(id) => id.to_owned(),
+            Err(_) if retry_authorized => return Err(unavailable_session()),
+            Err(error) => return Err(error),
+        },
+        None if retry_authorized => return Err(unavailable_session()),
         None => String::new(),
     };
     let mut message = crate::chats::execution_text(&plan);
@@ -922,13 +1040,28 @@ async fn execute(
             }
         });
         let stderr = child.stderr.take().unwrap();
-        // The last provider error `agy` reported, which explains a failed result.
-        let (error_tx, mut error_rx) = mpsc::channel::<Value>(8);
+        // AGY_ERROR reports a terminal failure. Read in submission order so a
+        // queued message's failure cannot overwrite the preceding result.
+        let (error_tx, mut error_rx) = mpsc::channel::<ProviderDiagnostic>(8);
         let drain = tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
-            while let Ok(Some(line)) = read_line(&mut reader).await {
-                if let Some(error) = parse_agy_error(&line) {
-                    let _ = error_tx.try_send(error);
+            loop {
+                let line = match read_line(&mut reader).await {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(_) => {
+                        let _ = error_tx.send(Err(())).await;
+                        break;
+                    }
+                };
+                let line = line.trim_start();
+                if line.starts_with("AGY_ERROR:")
+                    && error_tx
+                        .send(parse_agy_error(line).ok_or(()))
+                        .await
+                        .is_err()
+                {
+                    break;
                 }
             }
         });
@@ -937,6 +1070,9 @@ async fn execute(
             events: events.clone(),
             stdin,
             submitted: receipt.delivered.iter().cloned().collect(),
+            replayable,
+            paid_retry: retry_authorized,
+            submission_started: false,
             receipt: std::mem::take(&mut receipt),
             receipt_path: receipt_path.clone(),
             unconfirmed: VecDeque::new(),
@@ -954,12 +1090,32 @@ async fn execute(
             group,
         };
         // Messages acknowledged before an interruption are already in the native history.
-        let outcome = match turn.submit(initial, &message, &attachments).await {
+        let submission = async {
+            if retry_authorized {
+                await_paid_init(&mut turn, &mut lines, &mut error_rx).await?;
+            }
+            turn.submit(initial, &message, &attachments).await
+        }
+        .await;
+        *submitted |= turn.submission_started;
+        let outcome = match submission {
             Ok(()) => drive(&mut turn, &mut child, &mut lines, &mut error_rx, &cancel).await,
             Err(error) => Err(error),
         };
+        let outcome = match outcome {
+            Err(error)
+                if retry_authorized
+                    && *submitted
+                    && !cancel.is_cancelled()
+                    && error.code.is_none() =>
+            {
+                report_uncertain_retry(&events).await
+            }
+            outcome => outcome,
+        };
         turn.sides.stop();
         receipt = std::mem::take(&mut turn.receipt);
+        replayable = turn.replayable;
         conversation = std::mem::take(&mut turn.conversation);
         let resend = std::mem::take(&mut turn.resend);
         let Turn {
@@ -1007,15 +1163,102 @@ async fn execute(
     unreachable!("the renewal loop returns")
 }
 
+async fn report_uncertain_retry<T>(events: &mpsc::Sender<Value>) -> Result<T> {
+    failure::report(
+        events,
+        json!({
+            "code": "antigravity_retry_unconfirmed",
+            "message": failure::RETRY_UNCONFIRMED_MESSAGE,
+            "requiresFreshInput": true,
+        }),
+    )
+    .await
+}
+
+fn unavailable_session() -> Error {
+    Error::coded(
+        409,
+        super::SESSION_UNAVAILABLE_CODE,
+        "The saved Antigravity conversation is unavailable. Send a new message to continue with the preserved files.",
+    )
+}
+
+fn session_not_found(error: &Value, session: &str) -> bool {
+    !session.is_empty()
+        && (error["status"] == "NOT_FOUND" || error["error_code"] == 404)
+        && text(error, "short_error").contains(session)
+}
+
+async fn await_paid_init(
+    turn: &mut Turn<'_>,
+    lines: &mut mpsc::Receiver<Result<String>>,
+    errors: &mut mpsc::Receiver<ProviderDiagnostic>,
+) -> Result<()> {
+    let initialization = async {
+        while let Some(line) = lines.recv().await.transpose()? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event: Value = serde_json::from_str(&line).map_err(|_| {
+                Error::bad_gateway("Antigravity returned an invalid session event.")
+            })?;
+            if event["event"] != "init" {
+                return Err(Error::bad_gateway(
+                    "Antigravity did not confirm the saved session.",
+                ));
+            }
+            return turn.initialize(&event).await;
+        }
+        let (error, _) = receive_provider_error(errors).await;
+        if let Some(error) = error {
+            if session_not_found(&error, &turn.conversation) {
+                return Err(unavailable_session());
+            }
+            let diagnostic = failure::normalize(Some(&error), "", true, failure::Recovery::Manual);
+            return Err(Error::bad_gateway(text(&diagnostic, "message")));
+        }
+        Err(Error::bad_gateway(
+            "Antigravity closed before confirming the saved session.",
+        ))
+    };
+    tokio::time::timeout(Duration::from_secs(30), initialization)
+        .await
+        .map_err(|_| Error::unavailable("Antigravity timed out confirming the saved session."))?
+}
+
+type ProviderDiagnostic = std::result::Result<Value, ()>;
+
+async fn receive_provider_error(
+    errors: &mut mpsc::Receiver<ProviderDiagnostic>,
+) -> (Option<Value>, bool) {
+    // A result may precede its separate stderr frame. A terminal frame is
+    // optional and inherited pipes can stay open, so bound the wait.
+    let mut complete = true;
+    let diagnostic = tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(diagnostic) = errors.recv().await {
+            match diagnostic {
+                Ok(error) => return Some(error),
+                Err(()) => complete = false,
+            }
+        }
+        None
+    })
+    .await;
+    match diagnostic {
+        Ok(error) => (error, complete),
+        Err(_) => (None, false),
+    }
+}
+
 async fn drive(
     turn: &mut Turn<'_>,
     child: &mut Child,
     lines: &mut mpsc::Receiver<Result<String>>,
-    errors: &mut mpsc::Receiver<Value>,
+    errors: &mut mpsc::Receiver<ProviderDiagnostic>,
     cancel: &CancellationToken,
 ) -> Result<Outcome> {
-    let mut last_error = None;
     let mut timer = tokio::time::interval(Duration::from_millis(250));
+    let mut stdout_complete = true;
     loop {
         tokio::select! {
             () = cancel.cancelled() => return Err(Error::bad_gateway(STOPPED)),
@@ -1024,33 +1267,51 @@ async fn drive(
                 turn.poll_inbox().await?;
                 turn.sides.settle().await?;
             }
-            Some(error) = errors.recv() => last_error = Some(error),
             line = lines.recv() => {
                 let Some(line) = line.transpose()? else {
-                    let status = child.wait().await?;
-                    turn.group.exited();
-                    while let Ok(error) = errors.try_recv() { last_error = Some(error); }
-                    return Err(match &last_error {
-                        Some(error) => native_error(Some(error), text(error, "short_error")),
-                        None => Error::bad_gateway(format!("Antigravity stopped unexpectedly ({status}).")),
-                    });
-                };
-                let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
-                match text(&event, "event") {
-                    "init" => {
-                        let id = conversation_id(text(&event, "conversation_id"))?.to_owned();
-                        if !turn.conversation.is_empty() && turn.conversation != id {
-                            return Err(Error::conflict("The saved Antigravity conversation is unavailable. Working files were preserved."));
+                    let mut first_error = None;
+                    let status = loop {
+                        tokio::select! {
+                            result = child.wait() => break result?,
+                            Some(diagnostic) = errors.recv() => {
+                                if let Ok(error) = diagnostic {
+                                    first_error.get_or_insert(error);
+                                }
+                            }
+                            () = cancel.cancelled() => return Err(Error::bad_gateway(STOPPED)),
                         }
-                        turn.conversation = id.clone();
-                        emit(&turn.events, json!({ "type": "thread.started", "thread_id": id })).await?;
-                        emit(&turn.events, json!({ "type": "turn.started" })).await?;
-                        emit(&turn.events, json!({ "type": "chat.side.available" })).await?;
+                    };
+                    turn.group.exited();
+                    if first_error.is_none() {
+                        first_error = receive_provider_error(errors).await.0;
                     }
+                    return match &first_error {
+                        Some(error) if session_not_found(error, &turn.conversation) => Err(unavailable_session()),
+                        Some(error) => {
+                            turn.report_failure(Some(error), "", turn.unanswered.len() <= 1, false).await
+                        }
+                        None if turn.paid_retry => report_uncertain_retry(&turn.events).await,
+                        None if matches!(turn.recovery(false), failure::Recovery::FollowUp) => {
+                            turn.report_failure(None, "", false, false).await
+                        }
+                        None => Err(Error::bad_gateway(format!("Antigravity stopped unexpectedly ({status})."))),
+                    };
+                };
+                let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                    stdout_complete &= line.trim().is_empty();
+                    continue;
+                };
+                match text(&event, "event") {
+                    "init" => turn.initialize(&event).await?,
                     "step_update" => turn.on_step(&event["step_update"]).await?,
                     "result" => {
-                        while let Ok(error) = errors.try_recv() { last_error = Some(error); }
-                        if turn.on_result(&event["result"], last_error.as_ref()).await? {
+                        let (error, diagnostic_complete) = if event["result"]["status"] == "ERROR" {
+                            receive_provider_error(errors).await
+                        } else {
+                            (None, true)
+                        };
+                        // A delayed diagnostic may prohibit replay or require a longer wait.
+                        if turn.on_result(&event["result"], error.as_ref(), stdout_complete && diagnostic_complete).await? {
                             turn.poll_inbox().await?;
                             if turn.unanswered.is_empty() {
                                 turn.complete().await?;
@@ -1060,9 +1321,8 @@ async fn drive(
                         if turn.renew {
                             return Ok(Outcome::Renew);
                         }
-                        last_error = None;
                     }
-                    _ => {}
+                    _ => stdout_complete = false,
                 }
             }
         }
@@ -1164,21 +1424,6 @@ mod tests {
             "oauth2: token expired and refresh token is not set"
         ));
         assert!(!expired_token(None, "Error 500"));
-    }
-
-    #[test]
-    fn provider_errors_map_to_exhaustion_and_authentication() {
-        let quota =
-            parse_agy_error(r#"AGY_ERROR: {"status":"RESOURCE_EXHAUSTED","error_code":429}"#);
-        let error = native_error(quota.as_ref(), "");
-        assert!(crate::run_output::exhausted_message(&error.message));
-        let auth = parse_agy_error(r#"AGY_ERROR: {"error_code":401}"#);
-        assert!(
-            native_error(auth.as_ref(), "")
-                .message
-                .contains("authentication")
-        );
-        assert!(parse_agy_error("error: other").is_none());
     }
 
     #[test]

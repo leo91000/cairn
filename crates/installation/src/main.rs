@@ -635,8 +635,19 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
                 "message": error.message
             }
         });
-        if error.code.as_deref() == Some(cairn_installation::antigravity::CLI_UNAVAILABLE_CODE) {
+        if matches!(
+            error.code.as_deref(),
+            Some(
+                cairn_installation::antigravity::CLI_UNAVAILABLE_CODE
+                    | cairn_installation::antigravity::PREFLIGHT_FAILED_CODE
+                    | cairn_installation::antigravity::SESSION_UNAVAILABLE_CODE
+            )
+        ) {
             failure["error"]["code"] = json!(error.code);
+        }
+        if error.code.as_deref() == Some(cairn_installation::antigravity::SESSION_UNAVAILABLE_CODE)
+        {
+            failure["error"]["requiresFreshInput"] = true.into();
         }
         // The output task only stops when stdout is gone; nobody would read the event.
         let _ = tx.send(failure).await;

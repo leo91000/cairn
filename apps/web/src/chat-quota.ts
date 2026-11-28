@@ -15,7 +15,18 @@ export interface ChatQuota {
   spend: boolean
   reset: string | null
   automatic: boolean
+  refusalTitle?: string
+  canResumeRefusal?: boolean
+  requiresFollowUp?: boolean
 }
+
+const antigravityRefusals = new Map([
+  ['The Antigravity model is temporarily unavailable.', 'Antigravity model temporarily unavailable'],
+  ['Antigravity is temporarily rate limiting requests.', 'Antigravity rate limit reached'],
+  ['Antigravity refused the request (429). Try again or choose another coding agent.', 'Antigravity refused the request (429)'],
+  ['Antigravity refused the request (429).', 'Antigravity refused the request (429)'],
+])
+const freshInput = ' Send a new message to continue.'
 
 /** A live account wait that recovers automatically, without reconnecting an account. */
 export function isQuotaWait(run: { status: string, accountWaitReason?: string | null, accountRequired?: string | null }) {
@@ -37,19 +48,30 @@ export function chatQuota(run: Run | null | undefined, cards: TimelineEntry[]): 
   const exhausted = active && /^Usage exhausted\./i.test(run.accountWaitReason ?? '')
   const admission = active && /^Waiting for a .+ account with available usage\./i.test(run.accountWaitReason ?? '')
   const waiting = exhausted || admission
+  const provider = run.snapshot.agent.provider ?? 'codex'
+  const requiresFollowUp = provider === 'antigravity' && run.error?.endsWith(freshInput)
+  const refusalMessage = requiresFollowUp ? run.error?.slice(0, -freshInput.length) : run.error
+  const expiredRefusal = run.error === 'Automatic recovery reached its 10-minute limit. Your conversation and files are preserved.'
+    && run.retry?.nextAttemptAt == null
+    && antigravityRefusals.has(run.retry?.cause.message ?? '')
+  const refusalTitle = run.status === 'failed' && provider === 'antigravity'
+    ? expiredRefusal ? 'Antigravity automatic recovery ended' : antigravityRefusals.get(refusalMessage ?? '')
+    : undefined
   const savedQuota = run.status === 'failed' && (isQuotaMessage(run.error) || (!!failureMessage && failureMessage === run.error))
-  if (!waiting && !savedQuota)
+  if (!waiting && !savedQuota && !refusalTitle)
     return null
   // Admission has no current agent failure; saved failures have an authoritative error.
-  const message = savedQuota ? run.error! : exhausted ? failureMessage : ''
+  const message = savedQuota || refusalTitle ? run.error! : exhausted ? failureMessage : ''
 
   return {
-    provider: providers[run.snapshot.agent.provider ?? 'codex'].label,
+    provider: providers[provider].label,
     message,
     spend: /\bspend limit\b/i.test(message),
     // Keep the announced zone and wording: a time without a date is not a deadline.
     reset: /\bresets\b(.*)$/i.exec(message)?.[1]?.trim().replace(/\.$/, '') || (message === failureMessage && limitReset(failureReset)) || null,
     // Pausing the follow-up queue does not pause an execution's capacity wait.
     automatic: waiting,
+    ...(requiresFollowUp ? { requiresFollowUp } : {}),
+    ...(refusalTitle ? { refusalTitle, canResumeRefusal: run.resumeAvailable === true } : {}),
   }
 }

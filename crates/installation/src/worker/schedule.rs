@@ -666,6 +666,34 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
     }
     let state = s.store.run_state(run_id).await?;
+    if !s.shutdown.is_cancelled()
+        && state.cancel_requested_at.is_none()
+        && let Some(saved) = checkpoint.as_ref()
+        && let Some(receipt) = super::execution::read_antigravity_refusal(
+            s,
+            run_id,
+            saved,
+            recovery_observation_limit(recovery_deadline),
+        )
+        .await
+    {
+        let id = run_id.to_owned();
+        let expected = expected_checkpoint.clone();
+        s.store
+            .transaction(move |db| {
+                let Some(mut current) = RunCheckpoint::load_in(db, &id)? else {
+                    return Ok(());
+                };
+                if recovery::same_execution(Some(&current), expected.as_ref())
+                    && current.record_antigravity_retry_receipt(&receipt)
+                {
+                    current.store_in(db, &id)?;
+                }
+                Ok(())
+            })
+            .await?;
+        checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    }
     if state.cancel_requested_at.is_none()
         && let Some(saved) = checkpoint.as_mut()
         && saved.managed()
@@ -673,6 +701,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         && saved.settled().is_none()
         && (saved.cleanup_observation_pending()
             || (saved.terminal_code.is_none()
+                && saved.confirmed_provider_failure().is_none()
                 && !matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))))
         && let Some(attempt) = saved.runner_id().map(str::to_owned)
     {
@@ -918,6 +947,18 @@ pub(super) fn finish_recovery(
         .run_record(id)?
         .ok_or_else(|| Error::not_found("Run not found"))?;
     let current = &record.state;
+    let turn = super::checkpoint::antigravity_execution_id(&record.boundary).or(Some(id));
+    if current.resume_available
+        && checkpoint.is_some_and(|saved| saved.antigravity_replay_refused(turn))
+    {
+        db.change_run(
+            id,
+            crate::runs::RunChanges {
+                resume_available: Some(false),
+                ..Default::default()
+            },
+        )?;
+    }
     let observed_control_failure = if let Some(saved) = checkpoint {
         super::held::take_observed_control_failure(db, id, saved)?
     } else {
