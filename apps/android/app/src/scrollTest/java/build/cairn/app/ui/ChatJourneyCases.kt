@@ -45,10 +45,19 @@ abstract class ChatJourneyCases {
             fun shareConversation() {
                 compose.onNodeWithContentDescription("Options de la conversation").performClick()
                 compose.onNodeWithText("Partager la conversation").performClick()
-                waitText("Créer le lien")
-                compose.onNode(hasSetTextAction() and hasText("24")).assertExists()
-                compose.onNode(hasSetTextAction() and hasText("24")).performTextReplacement("72")
-                compose.onNodeWithText("Créer le lien").performScrollTo().performClick()
+
+                val inSharingDialog = hasAnyAncestor(isDialog())
+                val expirationEditor = hasSetTextAction() and isEnabled() and inSharingDialog
+                compose.waitUntil(10000) {
+                    compose.onAllNodes(expirationEditor).fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.onNode(expirationEditor).assert(hasText("24")).performTextReplacement("72")
+
+                compose
+                    .onNode(hasText("Créer le lien") and inSharingDialog)
+                    .performScrollTo()
+                    .assertIsEnabled()
+                    .performClick()
                 waitText("https://example.test/conversations/fixture-link")
                 val shareBody =
                     calls.last { it.first == "PUT" && it.second.endsWith("/share") }.third
