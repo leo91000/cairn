@@ -43,6 +43,7 @@ pub(crate) struct ResumeSelectionContext {
 pub struct Worker {
     pub active: Mutex<HashMap<String, CancellationToken>>,
     held: Mutex<std::collections::HashSet<String>>,
+    deferred_cleanup_observers: Mutex<std::collections::HashSet<String>>,
     pub(crate) job_redactions: Mutex<HashMap<String, crate::accounts::output_redactions::History>>,
     tick_lock: Mutex<()>,
     preparation: Arc<Mutex<()>>,

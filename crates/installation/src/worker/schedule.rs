@@ -458,7 +458,7 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
 }
 
 /// A lost controller must not delay unrelated sends while completed chats fence.
-pub(super) async fn recover_completed_environments(s: &Service) -> Result<()> {
+pub(super) async fn recover_completed_environments(s: &Arc<Service>) -> Result<()> {
     for id in s.store.read(|db| db.completed_recovery_ids()).await? {
         if s.shutdown.is_cancelled() {
             break;
@@ -476,12 +476,41 @@ pub(super) async fn recover_completed_environments(s: &Service) -> Result<()> {
             continue;
         }
         let run = s.store.run(&id).await?;
-        if run["recoveryPending"] == true && RunStatus::of(&run) == Some(RunStatus::Succeeded) {
-            recover_or_wait(s, &run).await?;
-            s.worker.notify();
+        if run["recoveryPending"] != true || RunStatus::of(&run) != Some(RunStatus::Succeeded) {
+            continue;
         }
+        if run["cancelRequestedAt"].is_null()
+            && let Some(saved) = RunCheckpoint::load(&s.store, &id).await?
+            && saved
+                .pending_native_cleanup()
+                .is_some_and(crate::recovery::PendingNativeCleanup::needs_observation)
+        {
+            schedule_native_cleanup_observation(s, id, saved).await;
+            continue;
+        }
+        recover_or_wait(s, &run).await?;
+        s.worker.notify();
     }
     Ok(())
+}
+
+async fn schedule_native_cleanup_observation(s: &Arc<Service>, id: String, saved: RunCheckpoint) {
+    // Slow controller calls must not occupy the environment detachment loop
+    // or delay a different run. Keep one observer per run and bound the pool.
+    let mut active = s.worker.deferred_cleanup_observers.lock().await;
+    if active.len() >= 16 || !active.insert(id.clone()) {
+        return;
+    }
+    drop(active);
+
+    let service = s.clone();
+    s.worker.spawn_recovery(async move {
+        let result = recovery::observe_pending_native_cleanup(&service, &id, saved).await;
+        service.worker.deferred_cleanup_observers.lock().await.remove(&id);
+        if let Err(error) = result {
+            tracing::warn!(run_id = id, message = %error.message, "Native cleanup observation failed");
+        }
+    });
 }
 
 // A provider retry is paid by Retry::next, not by the controller recovery

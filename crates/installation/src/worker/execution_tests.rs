@@ -128,8 +128,25 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Retirement {
         WithinGrace,
+        InconclusiveGrace,
         Deferred,
         Expired,
+    }
+
+    async fn wait_for_observer(service: &Service) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !service
+                .worker
+                .deferred_cleanup_observers
+                .lock()
+                .await
+                .is_empty()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     let attempt = crate::config::id();
@@ -158,6 +175,11 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
         (
             json!({ "NativeCleanupRetired": { "attemptId": attempt } }),
             true,
+            Retirement::InconclusiveGrace,
+        ),
+        (
+            json!({ "NativeCleanupRetired": { "attemptId": attempt } }),
+            true,
             Retirement::Expired,
         ),
         (
@@ -177,12 +199,15 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
         let url = format!("/runs/{attempt}");
         let app = Router::new().fallback(any(move |request: Request<axum::body::Body>| {
             let mut result = pending.clone();
+            let mut status = axum::http::StatusCode::OK;
+            let mut slow_proof = false;
             match request.method().as_str() {
                 "DELETE" => {
                     assert_eq!(request.uri().path(), url);
                     let previous = route_stops.fetch_add(1, Ordering::Relaxed);
                     if previous > 0 && (!after_grace || route_retired.load(Ordering::Relaxed)) {
                         result = final_stop.clone();
+                        slow_proof = retirement == Retirement::Deferred;
                     }
                 }
                 "POST" => {
@@ -192,13 +217,21 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                         Some(crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY)
                     );
                     let observed = route_observations.fetch_add(1, Ordering::Relaxed);
+                    if observed == 0 && retirement == Retirement::InconclusiveGrace {
+                        status = axum::http::StatusCode::SERVICE_UNAVAILABLE;
+                    }
                     if (!after_grace && observed > 0) || route_retired.load(Ordering::Relaxed) {
                         result["NativeCleanup"]["retired"] = true.into();
                     }
                 }
                 method => panic!("Unexpected fixture request: {method}"),
             }
-            async move { Json(result) }
+            async move {
+                if slow_proof {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+                (status, Json(result))
+            }
         }));
         let (_root, service, server) = fence_service(app).await;
         let id = crate::config::id();
@@ -247,11 +280,16 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
         if after_grace {
             assert!(state.recovery_pending);
             assert_eq!(state.finished_at, Some(42));
-            assert!(observations.load(Ordering::Relaxed) > 2);
+            if retirement == Retirement::InconclusiveGrace {
+                assert_eq!(observations.load(Ordering::Relaxed), 1);
+            } else {
+                assert!(observations.load(Ordering::Relaxed) > 2);
+            }
             assert_eq!(stops.load(Ordering::Relaxed), 1);
             super::super::schedule::recover_completed_environments(&service)
                 .await
                 .unwrap();
+            wait_for_observer(&service).await;
             let still_pending = service.store.run_state(&id).await.unwrap();
             assert_eq!(still_pending.status, RunStatus::Succeeded);
             assert!(still_pending.recovery_pending);
@@ -291,10 +329,21 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
             }
             let before_verdict = observations.load(Ordering::Relaxed);
             retired_after_grace.store(true, Ordering::Relaxed);
-            checkpoint
-                .fence(&service, &service.store.run(&id).await.unwrap())
+            if retirement == Retirement::Expired {
+                checkpoint
+                    .fence(&service, &service.store.run(&id).await.unwrap())
+                    .await
+                    .unwrap();
+            } else {
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    super::super::schedule::recover_completed_environments(&service),
+                )
                 .await
+                .unwrap()
                 .unwrap();
+                wait_for_observer(&service).await;
+            }
             let after_verdict = observations.load(Ordering::Relaxed);
 
             if retirement == Retirement::Expired {

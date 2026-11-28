@@ -321,11 +321,17 @@ async fn fence_attempt_authorized(
             .and_then(RunCheckpoint::pending_native_cleanup);
         authorize.recheck().await?;
         let cleanup = match pending {
-            Some(pending) => FencedCleanup::Deferred(if may_defer {
-                observe_deferred_cleanup(s, &runner_url, attempt, &authorize, pending).await
-            } else {
-                pending.clone()
-            }),
+            Some(pending) => {
+                let mut deferred = pending.clone();
+                if may_defer
+                    && deferred.state == DeferredCleanupState::Observing
+                    && now() >= deferred.until
+                    && !s.shutdown.is_cancelled()
+                {
+                    deferred.state = DeferredCleanupState::Expired;
+                }
+                FencedCleanup::Deferred(deferred)
+            }
             None => {
                 fence_runner(
                     s,
@@ -339,12 +345,16 @@ async fn fence_attempt_authorized(
             }
         };
         if !matches!(cleanup, FencedCleanup::Clear) {
+            if matches!(cleanup, FencedCleanup::Deferred(_)) {
+                authorize.recheck().await?;
+            }
             let id = run_id.to_owned();
             let attempt = attempt.to_owned();
             let expected = expected.cloned();
             let observed_pending = pending.cloned();
             let cleanup_authorize = authorize.clone();
-            s.store
+            let released = s
+                .store
                 .transaction(move |db| {
                     cleanup_authorize.check_local(db)?;
                     let mut current = RunCheckpoint::load_in(db, &id)?;
@@ -354,15 +364,15 @@ async fn fence_attempt_authorized(
                         ));
                     }
                     let Some(saved) = &mut current else {
-                        return Ok(());
+                        return Ok(false);
                     };
                     if saved.runner_id() != Some(attempt.as_str())
                         || saved.pending_native_cleanup() != observed_pending.as_ref()
                     {
-                        return Ok(());
+                        return Ok(false);
                     }
                     let cleanup = match cleanup {
-                        FencedCleanup::Clear => return Ok(()),
+                        FencedCleanup::Clear => return Ok(false),
                         FencedCleanup::Failed(result) => result,
                         FencedCleanup::Deferred(pending) => {
                             let eligible = observed_pending.is_some()
@@ -375,11 +385,11 @@ async fn fence_attempt_authorized(
                                             && state.cancel_requested_at.is_none()
                                     }));
                             if eligible {
-                                if observed_pending.as_ref() == Some(&pending) {
-                                    return Ok(());
-                                }
                                 saved.pending_native_cleanup = Some(pending);
-                                return saved.store_in(db, &id);
+                                saved.process = None;
+                                saved.store_in(db, &id)?;
+                                crate::nodes::placement::release_in(db, &attempt)?;
+                                return Ok(true);
                             }
                             pending.failure()
                         }
@@ -399,9 +409,12 @@ async fn fence_attempt_authorized(
                         saved.record_controller_result(db, &id, &attempt, Some(cleanup))?;
                         saved.store_in(db, &id)?;
                     }
-                    Ok(())
+                    Ok(false)
                 })
                 .await?;
+            if released {
+                return Ok(());
+            }
         }
     }
     let id = run_id.to_owned();
@@ -497,6 +510,10 @@ pub(crate) struct PendingNativeCleanup {
 }
 
 impl PendingNativeCleanup {
+    pub(crate) fn needs_observation(&self) -> bool {
+        self.state == DeferredCleanupState::Observing && now() < self.until
+    }
+
     pub(crate) fn failure(self) -> crate::runner::ControllerResult {
         crate::runner::ControllerResult {
             code: crate::runner::CONTROLLER_FAILED,
@@ -514,44 +531,72 @@ enum FencedCleanup {
     Deferred(PendingNativeCleanup),
 }
 
-async fn observe_deferred_cleanup(
+/// Poll a durably fenced attempt without holding the run's preparation lock.
+pub(crate) async fn observe_pending_native_cleanup(
     s: &Service,
-    runner_url: &str,
-    attempt: &str,
-    authorize: &crate::authorization::Authorization,
-    pending: &PendingNativeCleanup,
-) -> PendingNativeCleanup {
-    let mut pending = pending.clone();
-    // A persisted verdict is sufficient after restart, including when the
-    // controller has disconnected between observation and publication.
+    run_id: &str,
+    expected: RunCheckpoint,
+) -> Result<()> {
+    let Some(pending) = expected.pending_native_cleanup() else {
+        return Ok(());
+    };
     if pending.state != DeferredCleanupState::Observing || s.shutdown.is_cancelled() {
-        return pending;
+        return Ok(());
     }
     let remaining = pending.until.saturating_sub(now());
     if remaining <= 0 {
-        pending.state = DeferredCleanupState::Expired;
-        return pending;
+        // The recovery scan can settle expiry without speaking to the controller.
+        return Ok(());
     }
-    let budget = Duration::from_millis(remaining.unsigned_abs().min(2_000));
+    let url = crate::nodes::transport::url_for_node(
+        s,
+        expected.node_id.as_ref().and_then(|node| node.as_deref()),
+    );
+    if url.is_empty() {
+        return Ok(());
+    }
+    let attempt = &pending.attempt;
+    let url = format!("{url}/runs/{attempt}");
+    let authorize = crate::authorization::Authorization::default();
     let observe = async {
         let credential = secret(&s.config.data_dir, "runner-secret").await?;
-        let url = format!("{runner_url}/runs/{attempt}");
         let result = crate::runner::observe_cleanup_retirement(&s.http, &url, &credential).await?;
         if !result.physical_finalized || result.native_cleanup.is_none() {
             return Ok(false);
         }
-        confirm_native_retirement(s, &url, attempt, &credential, authorize).await
+        confirm_native_retirement(s, &url, attempt, &credential, &authorize).await
     };
     let retired = tokio::select! {
-        () = s.shutdown.cancelled() => return pending,
-        result = tokio::time::timeout(budget, observe) => matches!(result, Ok(Ok(true))),
+        () = s.shutdown.cancelled() => return Ok(()),
+        result = tokio::time::timeout(Duration::from_millis(remaining.unsigned_abs()), observe) => {
+            matches!(result, Ok(Ok(true)))
+        }
     };
+    let mut verdict = pending.clone();
     if now() >= pending.until {
-        pending.state = DeferredCleanupState::Expired;
+        verdict.state = DeferredCleanupState::Expired;
     } else if retired {
-        pending.state = DeferredCleanupState::Retired;
+        verdict.state = DeferredCleanupState::Retired;
+    } else {
+        return Ok(());
     }
-    pending
+
+    let id = run_id.to_owned();
+    s.store
+        .transaction(move |db| {
+            let mut current = RunCheckpoint::load_in(db, &id)?;
+            if !same_execution(current.as_ref(), Some(&expected)) {
+                return Ok(());
+            }
+            if let Some(saved) = &mut current
+                && saved.pending_native_cleanup() == expected.pending_native_cleanup()
+            {
+                saved.pending_native_cleanup = Some(verdict);
+                saved.store_in(db, &id)?;
+            }
+            Ok(())
+        })
+        .await
 }
 
 async fn fence_runner(
@@ -592,17 +637,16 @@ async fn fence_runner(
                 .and_then(|result| result.native_cleanup.as_ref())
                 && settled_status == Some(RunStatus::Succeeded)
             {
-                match confirm_late_native_cleanup(s, &url, attempt, &credential, authorize).await {
-                    Some(true) => return Ok(FencedCleanup::Clear),
-                    None if may_defer => {
-                        return Ok(FencedCleanup::Deferred(PendingNativeCleanup {
-                            attempt: attempt.to_owned(),
-                            state: DeferredCleanupState::Observing,
-                            until: now() + NATIVE_CLEANUP_FOLLOW_UP_MS,
-                            message: message.clone(),
-                        }));
-                    }
-                    _ => {}
+                if confirm_late_native_cleanup(s, &url, attempt, &credential, authorize).await {
+                    return Ok(FencedCleanup::Clear);
+                }
+                if may_defer {
+                    return Ok(FencedCleanup::Deferred(PendingNativeCleanup {
+                        attempt: attempt.to_owned(),
+                        state: DeferredCleanupState::Observing,
+                        until: now() + NATIVE_CLEANUP_FOLLOW_UP_MS,
+                        message: message.clone(),
+                    }));
                 }
             } else if cleanup.is_none() && settled_status.is_some() {
                 // Both controllers expose explicit flush failures through the
@@ -639,7 +683,7 @@ async fn confirm_late_native_cleanup(
     attempt: &str,
     credential: &str,
     authorize: &crate::authorization::Authorization,
-) -> Option<bool> {
+) -> bool {
     let observe = async {
         loop {
             let result =
@@ -655,9 +699,9 @@ async fn confirm_late_native_cleanup(
         confirm_native_retirement(s, url, attempt, credential, authorize).await
     };
     tokio::select! {
-        () = s.shutdown.cancelled() => None,
+        () = s.shutdown.cancelled() => false,
         result = tokio::time::timeout(Duration::from_secs(7), observe) => {
-            result.ok().map(|result| matches!(result, Ok(true)))
+            matches!(result, Ok(Ok(true)))
         }
     }
 }

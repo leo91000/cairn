@@ -68,11 +68,11 @@ interrupted cleanup observation and commits its diagnostic with publication.
 The recorded execution failure continues to block automatic replay because
 the workload's exit status remains unknown.
 After DELETE has acknowledged a pending cleanup, the manager gives an already
-settled successful turn a short window to observe retirement. When that
-window expires with an acknowledged workload fence, the manager releases the
-execution reservation and durably defers settlement for up to another five
-minutes. The completed-environment recovery loop rechecks the fence across
-manager restarts. It settles the saved reply only when DELETE returns the
+settled successful turn a short window to observe retirement. If that
+observation cannot confirm retirement, the manager releases the execution
+reservation and durably defers settlement with a five-minute deadline.
+The completed-environment recovery loop schedules bounded, attempt-specific
+observations across manager restarts. Slow responses run outside that loop. It settles the saved reply only when DELETE returns the
 attempt-bound `NativeCleanupRetired` receipt, which also checks the current
 conversation quarantine. A missing proof at the deadline publishes the original
 cleanup failure. The manager stores the verdict with its fence until it commits
