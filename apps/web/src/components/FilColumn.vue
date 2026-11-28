@@ -222,7 +222,7 @@ function open(item: FilItem) {
 
 function read(item: FilItem) {
   if (item.readAt)
-    void markRead([{ key: item.key, at: item.readAt }])
+    void markRead([{ key: item.key, at: item.readAt }], item.kind === 'snoozed')
 }
 
 function readAll() {

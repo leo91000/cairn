@@ -488,6 +488,15 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         let slug = slug_for_migrated_chat(&tx, &chat_id)?;
         let updated_at = run.finished_at.or(run.started_at).unwrap_or(run.created_at);
         let rev = id();
+        let boundary: Value = serde_json::from_str(&run.boundary)?;
+        let parked = !matches!(run.status.as_str(), "queued" | "running");
+        let expired = parked && boundary["environmentState"] == "expired";
+        let expired_at = expired
+            .then(|| boundary["environmentExpiredAt"].as_i64())
+            .flatten();
+        let retirement = boundary["environmentRetirementId"]
+            .as_str()
+            .filter(|_| expired);
 
         tx.execute(
             "INSERT INTO conversations(\
@@ -495,12 +504,14 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
              paused,lifecycle,created_at,updated_at,last_activity_at,revision,\
              session_restart_requested,cancelled_by_deletion,agent_name,project_name,persisted_at,\
              native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,\
-             native_provenance_unknown,native_plugin_grants\
+             native_provenance_unknown,native_plugin_grants,environment_state,environment_expired_at,environment_error\
             ) SELECT ?1,?2,?3,?4,?5,?6,?7,?8,0,'active',?9,?10,?10,?11,0,0,?12,?13,?10,\
               json_extract(boundary,'$.nativePrincipals'),json_extract(boundary,'$.nativeAuthorityNodes'),\
               json_extract(boundary,'$.nativeParentRunId'),json_extract(boundary,'$.nativeParentAccess'),\
               coalesce(json_extract(boundary,'$.nativeProvenanceUnknown'),1),\
-              json_extract(boundary,'$.nativePluginGrants') FROM runs WHERE id=?8",
+              json_extract(boundary,'$.nativePluginGrants'),?14,?15,\
+              (SELECT json_extract(data,'$.error') FROM records WHERE kind='environment-retirements' AND id=?16)\
+              FROM runs WHERE id=?8",
             params![
                 chat_id,
                 slug,
@@ -515,6 +526,9 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 rev,
                 agent_name,
                 project_name,
+                expired.then_some("expired"),
+                expired_at,
+                retirement,
             ],
         )?;
 
@@ -554,7 +568,6 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             params![chat_id, agent_id, run.created_at, rule_id],
         )?;
 
-        let boundary: Value = serde_json::from_str(&run.boundary)?;
         let legacy_wait: Option<Option<String>> = tx
             .query_row(
                 "SELECT message_id FROM durable_wakeups WHERE mission_run_id=?",

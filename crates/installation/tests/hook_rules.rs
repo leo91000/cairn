@@ -1184,10 +1184,10 @@ async fn any_other_writer_or_unrecorded_write_closes_the_conversation_for_good()
     let f = granted().await;
     let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
 
-    // Tasks and conversations nobody recorded as a person's never qualify.
+    // An execution created without human provenance never authorizes rule writes.
     refused_because(
         &agent(&f, &f.bearer, "create_hook_rule", write.clone()).await,
-        "not a conversation",
+        "did not record that a person started",
     );
     let unrecorded =
         f.s.chat_create(json!({ "agentId": MAIN_AGENT_ID }))

@@ -360,6 +360,11 @@ class FilUnreadJourneyTest {
                 compose.runOnIdle { vm.markRead(listOf(first to (now - 1000))) }
                 waitFor { reads.size == 3 }
                 compose.runOnIdle { assertEquals(now - 1000, vm.localReads[first]) }
+                compose.runOnIdle {
+                    vm.markRead(listOf(first to (now - 1000)), clearSnooze = true)
+                }
+                waitFor { reads.size == 4 }
+                assertEquals(reads[2], reads[3])
             } finally {
                 vm.api.closeStreams()
             }

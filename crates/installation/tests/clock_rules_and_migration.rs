@@ -704,8 +704,31 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             t0,
             t0 + 5000,
             json!({ "task": { "name": "Daily standup" }, "agent": { "id": MAIN_AGENT_ID, "name": "Main" } }).to_string(),
-            json!({ "outcome": { "status": "needs_input", "reason": "Waiting on review" }, "nativeProvenanceUnknown": false }).to_string(),
+            json!({
+                "outcome": { "status": "needs_input", "reason": "Waiting on review" },
+                "nativeProvenanceUnknown": false,
+                "environmentState": "expired",
+                "environmentExpiredAt": t0 + 6_000,
+                "environmentRetirementId": "old-workspace",
+            }).to_string(),
         ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO records(kind,id,data,updated_at) VALUES('environment-retirements','old-workspace',?1,?2)",
+        params![json!({
+            "id": "old-workspace",
+            "runId": blocked_run_id,
+            "expiredAt": t0 + 6_000,
+            "nodes": [],
+            "isolated": false,
+            "workspaces": [],
+            "projects": [],
+            "fenced": true,
+            "local": true,
+            "error": "Node unavailable",
+        })
+        .to_string(), t0 + 6_000],
     )
     .unwrap();
     conn.execute(
@@ -978,6 +1001,15 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         )
         .unwrap();
     assert_eq!(linked_rule, active_mission_id);
+    let retired: (String, i64, String) = migrated.query_row(
+        "SELECT environment_state,environment_expired_at,environment_error FROM conversations WHERE id=?",
+        [&blocked_chat_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    assert_eq!(
+        retired,
+        ("expired".into(), t0 + 6_000, "Node unavailable".into())
+    );
     let run_task_id: String = migrated
         .query_row(
             "SELECT task_id FROM runs WHERE id=?1",

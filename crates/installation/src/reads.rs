@@ -297,8 +297,11 @@ pub(crate) async fn snooze(
                     .flatten()
                     .and_then(|run| run["finishedAt"].as_i64());
                 let (_, question_at) = db.pending_question_summary(&chat)?;
+                let failure_at =
+                    crate::chats::preparation_failure(db, &conversation)?.map(|failure| failure.at);
                 let activity_at = question_at
                     .max(finished_at)
+                    .max(failure_at)
                     .unwrap_or(conversation.updated_at);
                 if snooze.finished_at >= activity_at {
                     db.set_snooze(&account, &chat, Some(snooze))?;

@@ -321,10 +321,12 @@ constructor(
         ReadMark(target = ReadTarget.A(chatId = key.removePrefix("chat:")), finishedAt = at)
 
     /** Marks the observed conversation activity as read on every device. */
-    fun markRead(items: List<Pair<String, Long>>) {
+    fun markRead(items: List<Pair<String, Long>>, clearSnooze: Boolean = false) {
         val target = connection ?: return
         if (!state.value.session.authenticated || state.value.signingOut) return
-        val unread = items.filter { (key, at) -> (localReads[key] ?: Long.MIN_VALUE) < at }
+        val unread =
+            if (clearSnooze) items
+            else items.filter { (key, at) -> (localReads[key] ?: Long.MIN_VALUE) < at }
         if (unread.isEmpty()) return
         val generation = readsGeneration
         viewModelScope.launch {

@@ -11,6 +11,7 @@ pub(crate) mod side_questions;
 
 pub use crate::waits as wait_for;
 
+use cairn_contracts::ConversationLifecycle;
 pub use handoff::{PLAN_TURN, execution_text, with_invoked_skills};
 pub use questions::{Question, QuestionField, QuestionStatus};
 pub use side_questions::side_question_prefixes;
@@ -28,7 +29,7 @@ use crate::{
 pub(crate) use handoff::handoff_context;
 use questions::{find_question, questions, save_question};
 use rusqlite::OptionalExtension;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 pub use storage::{Conversation, Message, MessageAnswer};
@@ -188,13 +189,36 @@ fn conversation_view(db: &Db<'_>, chat: Conversation) -> Result<cairn_contracts:
     conversation_view_with_run(db, chat, run.as_ref())
 }
 
+#[derive(Deserialize, Serialize)]
+pub(crate) struct PreparationFailure {
+    pub(crate) message: String,
+    pub(crate) at: i64,
+}
+
+pub(crate) fn preparation_failure(
+    db: &Db<'_>,
+    chat: &Conversation,
+) -> Result<Option<PreparationFailure>> {
+    if chat.lifecycle != ConversationLifecycle::Active {
+        return Ok(None);
+    }
+    db.kv(&format!("chat-error:{}", chat.id))?
+        .map(|stored| match stored {
+            Value::String(message) => Ok(PreparationFailure {
+                message,
+                at: chat.updated_at,
+            }),
+            value => serde_json::from_value(value).map_err(Into::into),
+        })
+        .transpose()
+}
+
 fn conversation_view_with_run(
     db: &Db<'_>,
     chat: Conversation,
     run: Option<&Value>,
 ) -> Result<cairn_contracts::Chat> {
-    use cairn_contracts::{Chat, ChatRequester, ConversationLifecycle, ConversationStatus};
-    let active = chat.lifecycle == ConversationLifecycle::Active;
+    use cairn_contracts::{Chat, ChatRequester, ConversationStatus};
     let (pending_questions, question_at) = db.pending_question_summary(&chat.id)?;
     let agent_name =
         db.0.query_row(
@@ -264,13 +288,9 @@ fn conversation_view_with_run(
     )?;
     let compaction = Some(compaction_state(db, &chat, run)?);
     let coding_agent_switch = coding_agent::progress(db, &chat.id)?;
-    let error = if active {
-        db.kv(&format!("chat-error:{}", chat.id))?
-            .map(serde_json::from_value)
-            .transpose()?
-    } else {
-        None
-    };
+    let failure = preparation_failure(db, &chat)?;
+    let failure_at = failure.as_ref().map(|failure| failure.at);
+    let error = failure.map(|failure| failure.message);
     // Run-owned fields remain at A5/A10's explicit projection boundary.
     let run_field = |field: &str| run.as_ref().map_or(Value::Null, |run| run[field].clone());
     let provider = run
@@ -286,7 +306,9 @@ fn conversation_view_with_run(
             .transpose()?
             .unwrap_or(false),
         finished_at: serde_json::from_value(run_field("finishedAt"))?,
-        read_at: question_at.max(run_field("finishedAt").as_i64()),
+        read_at: question_at
+            .max(run_field("finishedAt").as_i64())
+            .max(failure_at),
         context_usage: serde_json::from_value(run_field("contextUsage"))?,
         account_wait_reason: serde_json::from_value(run_field("accountWaitReason"))?,
         account_required: serde_json::from_value(run_field("accountRequired"))?,
@@ -1241,7 +1263,14 @@ fn preparation_failed(db: &Db<'_>, prepared: &Conversation, error: Error) -> Res
     } else {
         "Unable to prepare this conversation.".into()
     };
-    db.set(&format!("chat-error:{id}"), &shown.into(), None)
+    db.set(
+        &format!("chat-error:{id}"),
+        &serde_json::to_value(PreparationFailure {
+            message: shown,
+            at: now(),
+        })?,
+        None,
+    )
 }
 
 #[cfg(test)]

@@ -698,6 +698,7 @@ pub(super) fn launch_turn(
     chat.environment_state = None;
     chat.wakeup = None;
     db.save_conversation(&chat)?;
+    db.delete(&format!("chat-error:{}", chat.id))?;
     if waking {
         let mut observed_wakeup = message["wakeup"].clone();
         if message["observation"].is_object() {

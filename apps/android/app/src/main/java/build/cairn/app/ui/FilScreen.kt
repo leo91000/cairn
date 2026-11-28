@@ -504,7 +504,7 @@ fun FilScreen(
             ) {
                 FilRowActions(
                     item,
-                    { vm.markRead(listOf(item.read)) },
+                    { vm.markRead(listOf(item.read), clearSnooze = item.kind == FeedKind.SNOOZED) },
                     snooze = { snoozing = item },
                     restore = { item.chatId?.let(vm::restoreSnooze) },
                 )

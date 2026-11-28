@@ -32,10 +32,10 @@ function mark(item: Pick<FilItem, 'key' | 'at'>): ReadMark {
 }
 
 /** Marks finished work as read for the signed-in account, on every device. */
-export async function markRead(items: Pick<FilItem, 'key' | 'at'>[]) {
+export async function markRead(items: Pick<FilItem, 'key' | 'at'>[], clearSnooze = false) {
   if (!state.authenticated || state.signingOut)
     return
-  const unread = items.filter(item => !(localReads[item.key] >= item.at))
+  const unread = clearSnooze ? items : items.filter(item => !(localReads[item.key] >= item.at))
   if (!unread.length)
     return
   const current = generation

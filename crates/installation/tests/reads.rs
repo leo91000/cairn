@@ -14,7 +14,7 @@ use cairn_installation::{
     validation::text,
 };
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 use tempfile::TempDir;
 
 struct App {
@@ -477,6 +477,50 @@ async fn conversations_can_be_snoozed_restored_and_cleared_by_mark_read() {
         .snooze(&app.owner, "not-a-chat", json!({ "kind": "restore" }))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+#[tokio::test]
+async fn preparation_failure_surfaces_after_an_acknowledged_and_snoozed_turn() {
+    let app = App::new().await;
+    let chat = app.finished_chat().await;
+    let chat_id = text(&chat, "id");
+    let listed = app.get(&app.owner, "/api/chats").await;
+    let previous = find(&listed, "id", chat_id);
+    let previous_at = &previous["readAt"];
+    let (status, mark) = app
+        .read(&app.owner, &[chat_read(chat_id, previous_at)])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{mark}");
+    let until = now() + 60_000;
+    let action = json!({ "kind": "snooze", "finishedAt": previous_at, "until": until });
+    let (status, snoozed) = app.snooze(&app.owner, chat_id, action.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{snoozed}");
+    assert_eq!(snoozed["snoozedUntil"], until);
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    // The fixture has no managed Codex home for preparing this next turn.
+    let (status, sent) = app
+        .request(
+            &app.owner,
+            "POST",
+            &format!("/api/chats/{chat_id}/messages"),
+            json!({ "id": id(), "text": "Please follow up." }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    app.service.chat_tick(&HashSet::new()).await.unwrap();
+    let listed = app.get(&app.owner, "/api/chats").await;
+    let failed = find(&listed, "id", chat_id);
+    assert_eq!(failed["runId"], previous["runId"]);
+    assert_eq!(failed["finishedAt"], previous["finishedAt"]);
+    assert!(failed["readAt"].as_i64().unwrap() > previous_at.as_i64().unwrap());
+    assert!(failed["error"].is_string(), "{failed}");
+    assert!(failed["snoozedUntil"].is_null(), "{failed}");
+    assert_eq!(failed["unread"], true, "{failed}");
+
+    let (status, delayed) = app.snooze(&app.owner, chat_id, action).await;
+    assert_eq!(status, StatusCode::OK, "{delayed}");
+    assert!(delayed["snoozedUntil"].is_null(), "{delayed}");
 }
 
 #[tokio::test]

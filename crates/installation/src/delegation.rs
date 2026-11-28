@@ -482,9 +482,9 @@ fn task_error(db: &Db<'_>, chat: &Conversation, run: Option<&Value>) -> Result<O
         return Ok(None);
     }
     if chat.paused
-        && let Some(error) = db.kv(&format!("chat-error:{}", chat.id))?
+        && let Some(error) = chats::preparation_failure(db, chat)?
     {
-        return Ok(serde_json::from_value(error)?);
+        return Ok(Some(error.message));
     }
     Ok(run.and_then(|run| run["error"].as_str()).map(str::to_owned))
 }

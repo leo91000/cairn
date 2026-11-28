@@ -354,7 +354,7 @@ async fn a_merge_during_preparation_keeps_queued_work_unpaused() {
             preparation_failed(db, &transferred, Error::bad("Current preparation failed"))?;
             assert_eq!(db.conversation_boundary("chat")?.unwrap()["paused"], true);
             assert_eq!(
-                db.kv("chat-error:chat")?.unwrap(),
+                db.kv("chat-error:chat")?.unwrap()["message"],
                 "Current preparation failed"
             );
             Ok(())
