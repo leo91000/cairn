@@ -348,6 +348,8 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
             .unwrap();
         let run = fixture.enqueue("Test interrupted controller output").await;
         let run_id = text(&run, "id").to_owned();
+        let delivery =
+            json!({ "type": "chat.delivered", "messageId": run["chatExecution"]["messageId"] });
         let wait_returned = Arc::new(AtomicBool::new(false));
         let app = Router::new()
             .fallback(any({
@@ -358,6 +360,7 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
                     let store = store.clone();
                     let id = id.clone();
                     let wait_returned = wait_returned.clone();
+                    let delivery = delivery.clone();
                     async move {
                         if request.uri().path().ends_with("/wait") {
                             wait_returned.store(true, Ordering::SeqCst);
@@ -365,7 +368,7 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
                         }
                         if request.uri().path().ends_with("/logs") {
                             let mut output = format!(
-                                "{}\n",
+                                "{}\n{delivery}\n",
                                 json!({
                                     "type": "thread.started",
                                     "thread_id": "fixture-session",
@@ -1219,6 +1222,8 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
             .unwrap();
         let run = fixture.enqueue("Test interrupted controller output").await;
         let run_id = text(&run, "id").to_owned();
+        let delivery =
+            json!({ "type": "chat.delivered", "messageId": run["chatExecution"]["messageId"] });
         let wait_returned = Arc::new(AtomicBool::new(false));
         let app = Router::new()
             .fallback(any({
@@ -1229,6 +1234,7 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
                     let store = store.clone();
                     let id = id.clone();
                     let wait_returned = wait_returned.clone();
+                    let delivery = delivery.clone();
                     async move {
                         if request.uri().path().ends_with("/wait") {
                             wait_returned.store(true, Ordering::SeqCst);
@@ -1236,7 +1242,7 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
                         }
                         if request.uri().path().ends_with("/logs") {
                             let mut output = format!(
-                                "{}\n",
+                                "{}\n{delivery}\n",
                                 json!({
                                     "type": "thread.started",
                                     "thread_id": "fixture-session",
