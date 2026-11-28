@@ -500,7 +500,7 @@ pub(crate) fn observed_from_wire(value: &Value) -> Result<WaitObservation> {
 fn input_revision(
     db: &Db<'_>,
     run: &Value,
-    chat: Option<&crate::chats::Conversation>,
+    chat: &crate::chats::Conversation,
 ) -> Result<(i64, Vec<String>)> {
     let acknowledged = db.0.query_row(
         "SELECT COALESCE(MAX(id),0) FROM events WHERE run_id=? AND type='chat.user'",
@@ -509,12 +509,7 @@ fn input_revision(
     )?;
     let submitted =
         db.0.prepare("SELECT id FROM chat_messages WHERE chat_id=? ORDER BY id")?
-            .query_map(
-                [&chat
-                    .ok_or_else(|| Error::conflict("The conversation no longer exists."))?
-                    .id],
-                |r| r.get(0),
-            )?
+            .query_map([&chat.id], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<String>>>()?;
     Ok((acknowledged, submitted))
 }
@@ -522,7 +517,7 @@ fn input_revision(
 fn registering(db: &Db<'_>, bearer: &str, request: &Request) -> Result<(Value, Owner)> {
     let run = crate::project_workspaces::authorize_in(db, bearer)?;
     let owner = Owner::for_run(db, &run)?;
-    let chat = owner.conversation.as_ref().unwrap();
+    let chat = &owner.conversation;
     if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
         return Err(Error::conflict("This conversation is no longer active."));
     }
@@ -720,7 +715,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
         .store
         .transaction(move |db| {
             let (run, owner) = registering(db, &token, &prepared)?;
-            let revision = input_revision(db, &run, owner.conversation.as_ref())?;
+            let revision = input_revision(db, &run, &owner.conversation)?;
             Ok((run, owner, revision))
         })
         .await?;
@@ -766,7 +761,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
     let token = bearer.to_owned();
     let result = s.store.transaction(move |db| {
         let (run, mut owner) = registering(db, &token, &request)?;
-        let current_revision = input_revision(db, &run, owner.conversation.as_ref())?;
+        let current_revision = input_revision(db, &run, &owner.conversation)?;
         if current_revision != revision {
             return Err(Error::conflict("User input changed while the condition was checked. Handle it before registering a wait."));
         }
@@ -814,7 +809,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
             announced["immediate"] = true.into();
             db.event(
                 text(&run, "id"),
-                &EventKind::from_adapter(owner.event("wait_ready")),
+                &EventKind::ChatWaitReady,
                 "Wait condition already completed",
                 Some(&announced),
             )?;
@@ -844,7 +839,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
         owner.save(db)?;
         db.event(
             text(&run, "id"),
-            &EventKind::from_adapter(owner.event("wait")),
+            &EventKind::ChatWait,
             &wakeup.reason,
             Some(&serde_json::to_value(&wakeup)?),
         )?;
@@ -967,7 +962,7 @@ pub(crate) fn record_members(db: &Db<'_>, owner: &mut Owner, run: &Value) -> Res
         wakeup.progress.observation = Some(observed.clone());
         db.event(
             text(run, "id"),
-            &EventKind::from_adapter(owner.event("wait_ready")),
+            &EventKind::ChatWaitReady,
             "Wait condition resolved",
             Some(&serde_json::to_value(observed)?),
         )?;
@@ -1038,21 +1033,15 @@ pub(crate) fn execution_id(run: &Value) -> &Value {
 
 #[derive(Clone)]
 pub(crate) struct Owner {
-    pub(crate) chat: bool,
-    conversation: Option<crate::chats::Conversation>,
-    owner_id: String,
-    run_id: String,
+    conversation: crate::chats::Conversation,
     pub(crate) wakeup: Option<ChatWakeup>,
 }
 
 impl Owner {
     pub(crate) fn conversation(record: crate::chats::Conversation) -> Self {
         Self {
-            chat: true,
-            owner_id: record.id.clone(),
-            run_id: record.run_id.clone().unwrap_or_default(),
             wakeup: record.wakeup.clone(),
-            conversation: Some(record),
+            conversation: record,
         }
     }
 
@@ -1064,58 +1053,28 @@ impl Owner {
     }
 
     pub(crate) fn reload(&self, db: &Db<'_>) -> Result<Option<Self>> {
-        Ok(db.conversation(&self.owner_id)?.map(Self::conversation))
+        Ok(db
+            .conversation(&self.conversation.id)?
+            .map(Self::conversation))
     }
 
     pub(crate) fn run_id(&self) -> &str {
-        &self.run_id
+        self.conversation.run_id.as_deref().unwrap_or_default()
     }
 
     pub(crate) fn touch(&mut self, time: i64) {
-        if let Some(chat) = &mut self.conversation {
-            chat.updated_at = time;
-        }
+        self.conversation.updated_at = time;
     }
 
     pub(crate) fn resumable(&self, run: &Value) -> bool {
-        if let Some(chat) = &self.conversation {
-            continuation::resumable(chat, Some(run))
-        } else {
-            run["status"] == RunStatus::Waiting
-                && self
-                    .wakeup
-                    .as_ref()
-                    .is_some_and(|w| w.message_id.as_deref() == execution_id(run).as_str())
-                && run["cancelRequestedAt"].is_null()
-                && run["recoveryPending"] != true
-                && run["workspaceCleanedAt"].is_null()
-        }
+        continuation::resumable(&self.conversation, Some(run))
     }
 
     pub(crate) fn save(&self, db: &Db<'_>) -> Result<()> {
-        if let Some(chat) = &self.conversation {
-            let mut chat = chat.clone();
-            chat.wakeup = self.wakeup.clone();
-            db.save_conversation(&chat)?;
-        } else {
-            db.change_run(
-                &self.owner_id,
-                crate::runs::RunChanges {
-                    wakeup: Some(self.wakeup.clone()),
-                    ..Default::default()
-                },
-            )?;
-        }
+        let mut chat = self.conversation.clone();
+        chat.wakeup = self.wakeup.clone();
+        db.save_conversation(&chat)?;
         Ok(())
-    }
-
-    pub(crate) fn event(&self, suffix: &str) -> &'static str {
-        match (self.chat, suffix) {
-            (true, "wait") => "chat.wait",
-            (true, _) => "chat.wait_ready",
-            (false, "wait") => "run.wait",
-            (false, _) => "run.wait_ready",
-        }
     }
 }
 

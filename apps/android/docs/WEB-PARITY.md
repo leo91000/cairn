@@ -18,8 +18,10 @@ ont été retirés. Le journal permet de consulter une exécution et d’ouvrir 
 conversation.
 
 Les deux interfaces utilisent les mêmes opérations que le MCP public et
-`cairn_installation` pour créer une règle Horloge, la déclencher, reporter une
-conversation et la marquer lue.
+`cairn_installation` pour créer et déclencher une règle Horloge. Le MCP public
+reporte et marque lue une conversation pour le compte qui a autorisé son accès.
+Ces actions personnelles requièrent une délégation de compte dans
+`cairn_installation`.
 
 ## Signal Pur login and MCP OAuth consent (2026-11-26)
 

@@ -737,6 +737,19 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     )
     .unwrap();
 
+    // A deleted rule's conversations kept its origin UUID.
+    let retained_rule_chat = id();
+    conn.execute(
+        "INSERT INTO conversations(id,slug,agent_id,title,paused,lifecycle,revision,created_at,updated_at,persisted_at,session_restart_requested,cancelled_by_deletion) \
+         VALUES(?1,'retained-rule-chat',?2,'Earlier rule conversation',0,'active','r1',?3,?3,?3,0,0)",
+        params![retained_rule_chat, MAIN_AGENT_ID, t0],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO hook_rule_conversations(chat_id,creator_account_id,agent_id,rule_id,origin,created_at) \
+         VALUES(?1,'owner-acct',?2,?3,'{}',?4)",
+        params![retained_rule_chat, MAIN_AGENT_ID, suspended_mission_id, t0],
+    ).unwrap();
+
     // Seed two legacy mission runs: one finished+blocked (for active_mission_id) and one waiting with wakeup (for oneshot_mission_id).
     // Tied creation times cross the history migration's batch boundary.
     for _ in 0..35 {
@@ -891,6 +904,24 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let converted_orphan = id();
     let converted_orphan_run = id();
     conn.execute(
+        "INSERT INTO hook_rules(id,creator_account_id,creator_owner,revision,version,created_at,updated_at) \
+         VALUES(?1,'owner-acct',1,'r1',1,?2,?2)",
+        params![deleted_mission_id, t0],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO hook_rule_versions VALUES(?1,1,?2,'owner-acct','app',NULL,'{}',?3)",
+        params![
+            deleted_mission_id,
+            schedule_rule_definition(
+                "Unrelated rule",
+                &json!({ "type": "cairn", "hook": "ended" })
+            )
+            .to_string(),
+            t0,
+        ],
+    )
+    .unwrap();
+    conn.execute(
         "INSERT INTO runs(id,task_id,status,trigger,created_at,finished_at,snapshot,boundary, \
           recovery_pending,resume_available,resume_count) \
          VALUES(?1,?2,'succeeded','chat',?3,?3,?4,?5,0,0,0)",
@@ -908,6 +939,19 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
          VALUES(?1,'renamed-chat',?2,'Renamed chat',?3,0,'active','r1',?4,?4,?4,0,0)",
         params![converted_orphan, MAIN_AGENT_ID, converted_orphan_run, t0],
     ).unwrap();
+    let unconverted_orphan_run = id();
+    conn.execute(
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,finished_at,snapshot,boundary, \
+          recovery_pending,resume_available,resume_count) \
+         VALUES(?1,?2,'succeeded','schedule',?3,?3,?4,'{}',0,0,0)",
+        params![
+            unconverted_orphan_run,
+            deleted_mission_id,
+            t0,
+            json!({ "agent": agent, "task": { "name": "Deleted mission" } }).to_string(),
+        ],
+    )
+    .unwrap();
 
     let interrupted_run = id();
     conn.execute(
@@ -1060,14 +1104,25 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         )
         .unwrap();
     assert!(removed_at.is_some());
-    let suspended_author: (String, bool) = migrated
+    let (suspended_rule_id, creator, owner): (String, String, bool) = migrated
         .query_row(
-            "SELECT creator_account_id,creator_owner FROM hook_rules WHERE id=?1",
-            [&suspended_mission_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            "SELECT r.id,r.creator_account_id,r.creator_owner FROM hook_rules r \
+             JOIN hook_rule_versions v ON v.rule_id=r.id AND v.version=r.version \
+             WHERE json_extract(v.definition,'$.name')='Suspended mission'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(suspended_author, ("member-acct".into(), false));
+    assert_eq!((creator, owner), ("member-acct".into(), false));
+    assert_ne!(suspended_rule_id, suspended_mission_id);
+    let retained_origin: String = migrated
+        .query_row(
+            "SELECT rule_id FROM hook_rule_conversations WHERE chat_id=?",
+            [&retained_rule_chat],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained_origin, suspended_mission_id);
     let oneshot_disabled: Option<i64> = migrated
         .query_row(
             "SELECT disabled_at FROM hook_rules WHERE id=?1",
@@ -1164,10 +1219,16 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         [&converted_orphan],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).unwrap();
-    assert_eq!(
-        previous_origin,
-        (deleted_mission_id, "Deleted mission".into())
-    );
+    assert_ne!(previous_origin.0, deleted_mission_id);
+    assert_eq!(previous_origin.1, "Deleted mission");
+    let new_origin: String = migrated
+        .query_row(
+            "SELECT rule_id FROM hook_rule_conversations WHERE run_id=?",
+            [&unconverted_orphan_run],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(new_origin, previous_origin.0);
     let owner_snooze: i64 = migrated
         .query_row(
             "SELECT snoozed_until FROM account_snoozes WHERE account_id='owner-acct' AND chat_id=?1",

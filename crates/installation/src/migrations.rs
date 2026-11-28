@@ -111,6 +111,28 @@ fn table_exists(tx: &Connection, name: &str) -> rusqlite::Result<bool> {
     )
 }
 
+fn available_rule_id(tx: &Connection, mission_id: &str) -> Result<String> {
+    let claimed: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hook_rules WHERE id=?1 +         UNION ALL SELECT 1 FROM hook_rule_conversations WHERE rule_id=?1)",
+        [mission_id],
+        |row| row.get(0),
+    )?;
+    Ok(if claimed { id() } else { mission_id.to_owned() })
+}
+
+fn retired_mission_rule_id(
+    tx: &Connection,
+    retired_rules: &mut HashMap<String, String>,
+    mission_id: &str,
+) -> Result<String> {
+    if let Some(rule_id) = retired_rules.get(mission_id) {
+        return Ok(rule_id.clone());
+    }
+    let rule_id = available_rule_id(tx, mission_id)?;
+    retired_rules.insert(mission_id.to_owned(), rule_id.clone());
+    Ok(rule_id)
+}
+
 fn rebuild_rule_tables(tx: &Connection) -> Result<()> {
     // Allow source='migration' in hook_rule_versions and kind='clock' in hook_rule_uses,
     // and add hook_rule_schedules.
@@ -255,11 +277,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             // engine verifies member authority with Beacon before it acts, and reconciliation
             // recognizes the confirmed owner and exact membership generation.
             let membership_ended = mission.author_removed || mission.author_id.is_none();
-            let rule_id = if db.hook_rule(&mission.id)?.is_some() {
-                id()
-            } else {
-                mission.id.clone()
-            };
+            let rule_id = available_rule_id(&tx, &mission.id)?;
             mission_meta.insert(
                 mission.id.clone(),
                 MigratedMission {
@@ -443,7 +461,13 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         }
     }
 
-    link_converted_mission_runs(&tx, &mission_meta, known_owner.as_deref())?;
+    let mut retired_rules = HashMap::new();
+    link_converted_mission_runs(
+        &tx,
+        &mission_meta,
+        &mut retired_rules,
+        known_owner.as_deref(),
+    )?;
 
     // Read full snapshots in bounded batches. Only the small read-mark and
     // dismissal mapping survives a batch.
@@ -548,7 +572,10 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 .map(|m| m.creator.clone())
                 .or_else(|| known_owner.clone())
                 .unwrap_or_else(|| "owner".to_owned());
-            let rule_id = meta.map_or(run.task_id.as_str(), |mission| mission.rule_id.as_str());
+            let rule_id = match meta {
+                Some(mission) => mission.rule_id.clone(),
+                None => retired_mission_rule_id(&tx, &mut retired_rules, &run.task_id)?,
+            };
             let origin_json = json!({
                 "hook": "clock",
                 "ruleName": rule_name,
@@ -873,6 +900,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
 fn link_converted_mission_runs(
     tx: &Connection,
     missions: &HashMap<String, MigratedMission>,
+    retired_rules: &mut HashMap<String, String>,
     known_owner: Option<&str>,
 ) -> Result<()> {
     let mut converted = tx.prepare(
@@ -890,20 +918,18 @@ fn link_converted_mission_runs(
     while let Some(row) = rows.next()? {
         let mission_id: String = row.get(4)?;
         let historical_title: String = row.get(5)?;
-        let (rule_id, rule_name, creator) = missions.get(&mission_id).map_or(
-            (
-                mission_id.as_str(),
+        let (rule_id, rule_name, creator) = match missions.get(&mission_id) {
+            Some(mission) => (
+                mission.rule_id.clone(),
+                mission.name.as_str(),
+                mission.creator.as_str(),
+            ),
+            None => (
+                retired_mission_rule_id(tx, retired_rules, &mission_id)?,
                 historical_title.as_str(),
                 known_owner.unwrap_or("owner"),
             ),
-            |mission| {
-                (
-                    mission.rule_id.as_str(),
-                    mission.name.as_str(),
-                    mission.creator.as_str(),
-                )
-            },
-        );
+        };
         let chat_id: String = row.get(0)?;
         let agent_id: String = row.get(1)?;
         let created_at: i64 = row.get(2)?;

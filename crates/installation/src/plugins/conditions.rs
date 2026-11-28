@@ -646,7 +646,7 @@ fn record(
         } else if let Some(result) = result {
             db.event(
                 text(&run, "id"),
-                &EventKind::from_adapter(owner.event("wait_ready")),
+                &EventKind::ChatWaitReady,
                 "Wait condition resolved",
                 Some(&serde_json::to_value(result)?),
             )?;

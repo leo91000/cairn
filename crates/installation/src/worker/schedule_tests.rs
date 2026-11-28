@@ -2362,7 +2362,7 @@ async fn a_new_turn_cannot_reuse_the_previous_attempts_healthy_exit() {
 }
 
 #[tokio::test]
-async fn waiting_mission_restart_releases_attempt_before_deadline_even_when_cancelled() {
+async fn conversation_wait_releases_attempt_on_restart_even_when_cancelled() {
     for (cancel, remote, queued) in [
         (false, false, false),
         (true, false, false),
@@ -2403,35 +2403,41 @@ async fn waiting_mission_restart_releases_attempt_before_deadline_even_when_canc
         } else {
             crate::nodes::LOCAL_NODE_ID
         };
-        original
-            .store
-            .transaction(move |db| db.remove_conversation(&chat_id))
-            .await
-            .unwrap();
         drop(original);
         let service = Service::new(config).await.unwrap();
         let wakeup = json!({
-            "id": "wake", "messageId": null, "reason": "Waiting", "seconds": 3600,
-            "createdAt": now(), "wakeAt": now() + 3_600_000,
+            "id": "wake",
+            "messageId": null,
+            "reason": "Waiting",
+            "seconds": 3600,
+            "createdAt": now(),
+            "wakeAt": now() + 3_600_000,
         });
         service
             .store
             .change_run(
                 &run_id,
                 crate::runs::RunChanges {
+                    task_id: Some(chat_id.clone()),
                     status: Some(if queued {
                         RunStatus::Queued
                     } else {
-                        RunStatus::Waiting
+                        RunStatus::Succeeded
                     }),
                     recovery_pending: Some(queued),
-                    trigger: Some(("manual").to_owned()),
+                    trigger: Some("chat".to_owned()),
                     session_id: Some(Some("saved".into())),
-                    wakeup: Some(Some(serde_json::from_value(wakeup.clone()).unwrap())),
                     boundary: Some(json!({"isolated": true})),
                     ..Default::default()
                 },
             )
+            .await
+            .unwrap();
+        let mut chat = service.store.conversation_boundary(&chat_id).await.unwrap();
+        chat["wakeup"] = wakeup.clone();
+        service
+            .store
+            .save_conversation_boundary(chat)
             .await
             .unwrap();
         let checkpoint = RunCheckpoint::from_value(json!({
@@ -2488,13 +2494,18 @@ async fn waiting_mission_restart_releases_attempt_before_deadline_even_when_canc
         assert_eq!(current["recoveryPending"], false);
         assert_eq!(
             current["status"],
-            if cancel { "cancelled" } else { "waiting" }
+            if cancel && queued {
+                "cancelled"
+            } else {
+                "succeeded"
+            }
         );
+        let chat = service.chat_detail(&chat_id).await.unwrap();
         if cancel {
-            assert!(current["wakeup"].is_null());
+            assert!(chat["wakeup"].is_null());
         } else {
-            assert_eq!(current["wakeup"], wakeup);
-            assert!(current["missionTurnId"].is_null());
+            assert_eq!(chat["wakeup"]["id"], wakeup["id"]);
+            assert_eq!(chat["wakeup"]["wakeAt"], wakeup["wakeAt"]);
         }
         assert!(service.worker.active.lock().await.is_empty());
         server.abort();
