@@ -464,7 +464,15 @@ fn read_page(
     } else {
         Value::Null
     };
-    let run = scoped_run(db, scope, &chat)?;
+    let mut run = scoped_run(db, scope, &chat)?;
+    // Older single-project runs store their worktree in the workspace field.
+    if !scope.chat
+        && run["snapshot"]["task"]["worktree"] == true
+        && !run["workspaces"].is_array()
+        && let Some(worktree) = crate::worker::control::legacy_worktree(&run)
+    {
+        run["workspaces"] = Value::Array(vec![worktree]);
+    }
     let run_id = text(&run, "id");
     let (first, max) = event_bounds(db, run_id)?;
     // Events are append-only and IDs are AUTOINCREMENT. The retained first

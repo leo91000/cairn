@@ -264,6 +264,10 @@ test('owner shares an installation and member works without management controls'
       startedAt: runCreatedAt - 1000,
       finishedAt: runCreatedAt,
       workspace: '/fixture/private-worktree',
+      workspaces: [
+        { projectId: randomUUID(), path: '/fixture/private-worktree/first', kind: 'worktree' },
+        { projectId: randomUUID(), path: '/fixture/private-worktree/second', kind: 'worktree' },
+      ],
       snapshot: {
         agent: { id: privateAgent.id },
         task: {
@@ -288,6 +292,20 @@ test('owner shares an installation and member works without management controls'
     await expect(member.getByRole('heading', { name: 'Original instructions', exact: true })).toBeVisible()
     await expect(member.getByRole('button', { name: 'Clean up worktree', exact: true })).toHaveCount(0)
     await page.goto(`${installationUrl}runs/${cleanupRunId}`)
+    await page.getByRole('button', { name: 'Run details', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toBeVisible()
+    seed!.store.updateRun(cleanupRunId, {
+      workspaces: [{ projectId: randomUUID(), path: '/fixture/direct', kind: 'direct' }],
+    })
+    await page.reload()
+    await page.getByRole('button', { name: 'Run details', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Original instructions', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toHaveCount(0)
+    seed!.store.updateRun(cleanupRunId, {
+      workspaces: null,
+      snapshot: { project: { id: randomUUID(), name: 'Older project' } },
+    })
+    await page.reload()
     await page.getByRole('button', { name: 'Run details', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toBeVisible()
     await member.goto(`${installationUrl}rules?rule=${task.id}`)

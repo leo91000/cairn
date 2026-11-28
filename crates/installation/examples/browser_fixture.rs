@@ -85,7 +85,9 @@ async fn main() -> Result<()> {
                     serde_json::to_value(project)?
                 }
                 "queueChat" => {
-                    let chat = service.chat_create(arg(0)).await?;
+                    let mut chat = service.chat_create(arg(0)).await?;
+                    chat["title"] = arg(1);
+                    let chat = service.store.save_conversation_boundary(chat).await?;
                     let chat_id = text(&chat, "id");
                     service
                         .chat_send(
@@ -96,9 +98,7 @@ async fn main() -> Result<()> {
                             }),
                         )
                         .await?;
-                    let mut record = service.conversation_boundary(chat_id).await?;
-                    record["title"] = arg(1);
-                    service.store.save_conversation_boundary(record).await?
+                    service.conversation_boundary(chat_id).await?
                 }
                 "skill" => service.skills.save(string(0), string(1), None).await?,
                 _ => service.chat_detail(string(0)).await?,

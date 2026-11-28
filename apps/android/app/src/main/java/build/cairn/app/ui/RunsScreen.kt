@@ -465,7 +465,8 @@ fun RunScreen(
                                     canCleanUpWorktree &&
                                     current.workspace != null &&
                                     !current.isolated &&
-                                    current.snapshot?.project != null
+                                    current.snapshot?.task?.worktree == true &&
+                                    current.workspaces.any { it.kind != "direct" }
                             ) {
                                 OutlinedButton(
                                     onClick = {

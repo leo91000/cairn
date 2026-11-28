@@ -644,7 +644,14 @@ abstract class NodePlacementCases {
     @Test fun suspendedRunTimelineAndResultDescribeThePause() = suspendedTimeline(false)
 
     @Test
-    fun aDelegatedRunCanBeReadThroughItsRequesterButItsWorktreeCannotBeCleanedWithoutAgentAccess() {
+    fun aDelegatedRunCanBeReadThroughItsRequesterButItsWorktreeCannotBeCleanedWithoutAgentAccess() =
+        delegatedRunWorktreeCleanup(hasAgentAccess = false)
+
+    @Test
+    fun aMemberWithAgentAccessCanCleanManagedWorktreesInAMultiProjectRun() =
+        delegatedRunWorktreeCleanup(hasAgentAccess = true)
+
+    private fun delegatedRunWorktreeCleanup(hasAgentAccess: Boolean) {
         val requesterAgentId = MAIN_AGENT_ID
         val privateAgentId = "00000000-0000-4000-8000-000000000096"
         val requestingChat =
@@ -694,6 +701,11 @@ abstract class NodePlacementCases {
                 startedAt = 1,
                 finishedAt = 2,
                 workspace = "/workspace/private",
+                workspaces =
+                    listOf(
+                        RunWorkspace("worktree", "/workspace/private/first", "first-project"),
+                        RunWorkspace("worktree", "/workspace/private/second", "second-project"),
+                    ),
                 snapshot =
                     Snapshot(
                         task =
@@ -734,7 +746,9 @@ abstract class NodePlacementCases {
                                 path == "/api/installations/fixture/api/usable-agents" ->
                                     wireJson.encodeToString(
                                         build.cairn.contracts.UsableAgentsOutput(
-                                            listOf(requesterAgentId)
+                                            if (hasAgentAccess)
+                                                listOf(requesterAgentId, privateAgentId)
+                                            else listOf(requesterAgentId)
                                         )
                                     )
                                 path == "/api/installations/fixture/api/overview" -> "{}"
@@ -783,7 +797,8 @@ abstract class NodePlacementCases {
                 compose.onNodeWithContentDescription("Options de l’exécution").performClick()
                 compose.onNodeWithText("Détails de l’exécution").performClick()
                 compose.onNodeWithText("Espace de travail").assertExists()
-                compose.onNodeWithText("Nettoyer le worktree").assertDoesNotExist()
+                val cleanup = compose.onNodeWithText("Nettoyer le worktree")
+                if (hasAgentAccess) cleanup.assertExists() else cleanup.assertDoesNotExist()
             } finally {
                 vm.api.closeStreams()
             }

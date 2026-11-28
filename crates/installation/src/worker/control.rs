@@ -645,20 +645,25 @@ fn antigravity_retry_input(
 
 /// Worktrees and clones the run created; direct workspaces belong to the user.
 fn managed_workspaces(run: &Value) -> Vec<Value> {
-    let workspaces = run["workspaces"].as_array().cloned().unwrap_or_else(|| {
-        if !run["workspace"].is_string() || !run["snapshot"]["project"].is_object() {
-            return Vec::new();
-        }
-        vec![json!({
-            "projectId": run["snapshot"]["project"]["id"],
-            "path": run["workspace"],
-            "kind": "worktree",
-        })]
-    });
+    let workspaces = run["workspaces"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| legacy_worktree(run).into_iter().collect());
     workspaces
         .into_iter()
         .filter(|workspace| workspace["kind"] != "direct")
         .collect()
+}
+
+pub(crate) fn legacy_worktree(run: &Value) -> Option<Value> {
+    if !run["workspace"].is_string() || !run["snapshot"]["project"].is_object() {
+        return None;
+    }
+    Some(json!({
+        "projectId": run["snapshot"]["project"]["id"],
+        "path": run["workspace"],
+        "kind": "worktree",
+    }))
 }
 
 async fn ensure_clean(workspace: &Value, root: &PathBuf, env: &Environment) -> Result<()> {

@@ -24,7 +24,8 @@ const emit = defineEmits<{ cleanup: [] }>()
       Starting commit <code :title="entry.revision || undefined">{{ entry.revision?.slice(0, 12) }}</code>
     </p>
     <UiButton
-      v-if="canCleanUpWorktree && !active && run.workspace && !run.isolated"
+      v-if="canCleanUpWorktree && !active && run.workspace && !run.isolated
+        && run.snapshot.task.worktree && run.workspaces?.some(entry => entry.kind !== 'direct')"
       size="small"
       @click="emit('cleanup')"
     >
