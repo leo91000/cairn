@@ -97,6 +97,50 @@ class ConversationPresentationTest {
     }
 
     @Test
+    fun `Antigravity 429 refusals have their own recovery title`() {
+        val run =
+            Run(
+                id = "run",
+                taskId = "",
+                status = "failed",
+                provider = "antigravity",
+                error =
+                    "Antigravity refused the request (429). Try again or choose another coding agent.",
+            )
+        val refusal = chatQuota(run, emptyList())!!
+        assertEquals("Antigravity a refusé la requête (429)", refusal.refusalTitle)
+        assertFalse(refusal.automatic)
+        assertFalse(refusal.canResumeRefusal)
+        assertNull(refusal.reset)
+        assertNull(chatQuota(run.copy(provider = "codex"), emptyList()))
+        assertTrue(chatQuota(run.copy(resumeAvailable = true), emptyList())!!.canResumeRefusal)
+        val status = conversationState(Chat(id = "chat", run = run), "Agent", null)
+        assertEquals("Échec", status.status)
+        assertTrue(status.failed)
+    }
+
+    @Test
+    fun `Antigravity quota after a steer requires a new message`() {
+        val followUp = "Usage limit reached for Antigravity. Send a new message to continue."
+        val run =
+            Run(
+                id = "run",
+                taskId = "",
+                status = "failed",
+                provider = "antigravity",
+                error = followUp,
+            )
+        val quota = chatQuota(run, listOf(failureCard(1, followUp, quota = true)))!!
+        assertEquals("Antigravity", quota.provider)
+        assertTrue(quota.requiresFollowUp)
+        assertFalse(quota.automatic)
+        assertEquals(
+            ConversationState("Échec", working = false, failed = true),
+            conversationState(Chat(id = "chat", run = run), "Agent", null),
+        )
+    }
+
+    @Test
     fun `a failed run's banner is hidden once its reason shows as a failure notice`() {
         val capacity = "Selected model is at capacity. Please try a different model."
         val failure = failureCard(1, capacity)

@@ -76,10 +76,19 @@ pub(super) fn schedule_in(
     run: &cairn_contracts::RunState,
     cause: crate::run_retry::Cause,
 ) -> Result<bool> {
-    let Some(retry) = Retry::next(run.retry.as_ref(), cause, now()) else {
+    let at = now();
+    let Some(mut retry) = Retry::next(run.retry.as_ref(), cause, at) else {
         return Ok(false);
     };
-    let delay_ms = retry.next_attempt_at.unwrap().saturating_sub(now());
+    if let Some(not_before) = current.provider_retry_not_before
+        && let Some(next) = &mut retry.next_attempt_at
+    {
+        *next = (*next).max(not_before);
+        if retry.deadline_at.is_some_and(|deadline| *next >= deadline) {
+            return Ok(false);
+        }
+    }
+    let delay_ms = retry.next_attempt_at.unwrap().saturating_sub(at);
     let seconds = (delay_ms + 999) / 1000;
     let reason = format!(
         "Temporary agent error. Retrying in {seconds} seconds (attempt {}/{}).",
@@ -119,9 +128,10 @@ pub(super) async fn expire(s: &Service, id: &str) -> Result<bool> {
 /// Admission calls this again after asynchronous preparation. Both callers have
 /// fenced the previous execution before entering the transaction.
 pub(super) fn expire_in(db: &Db<'_>, id: &str) -> Result<bool> {
-    let run = db
-        .run_state(id)?
+    let record = db
+        .run_record(id)?
         .ok_or_else(|| Error::not_found("Run not found"))?;
+    let run = record.state;
     if run.status != RunStatus::Queued
         || run.cancel_requested_at.is_some()
         || !Retry::expired(run.retry.as_ref(), now())
@@ -133,8 +143,13 @@ pub(super) fn expire_in(db: &Db<'_>, id: &str) -> Result<bool> {
         Err(error) if error.is_conflict() => return Ok(false),
         Err(error) => return Err(error),
     }
-    let message = if run.trigger == "chat" {
-        "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved."
+    let turn = super::checkpoint::antigravity_execution_id(&record.boundary).or(Some(id));
+    let needs_input = super::checkpoint::RunCheckpoint::load_in(db, id)?
+        .is_some_and(|saved| saved.antigravity_replay_refused(turn));
+    let message = if needs_input {
+        crate::antigravity::RETRY_UNCONFIRMED_MESSAGE
+    } else if run.trigger == "chat" {
+        crate::run_retry::CHAT_RECOVERY_EXPIRED
     } else {
         "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved; resume when ready."
     };
@@ -152,6 +167,7 @@ pub(super) fn expire_in(db: &Db<'_>, id: &str) -> Result<bool> {
             account_wait_reason: Some(None),
             recovery_pending: Some(false),
             retry: Some(retry),
+            resume_available: needs_input.then_some(false),
             ..Default::default()
         },
     )?;

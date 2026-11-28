@@ -1,6 +1,12 @@
 //! Google's Antigravity CLI (`agy`) through its headless stream-json mode, as of 1.5.14.
 //! Native state follows `HOME`, so `agy` alone runs with the run's private state as
 //! HOME; shell commands it starts get the shell's HOME back through `BASH_ENV`.
+mod failure;
+
+pub(crate) use failure::{
+    FRESH_INPUT_MESSAGE, RETRY_UNCONFIRMED_MESSAGE, recoverable_refusal, retry_cause,
+};
+
 pub mod hook;
 mod side;
 
@@ -210,6 +216,11 @@ pub(crate) const CLI_UNAVAILABLE: &str = "The Antigravity CLI is not installed o
 /// Identifies a version probe failure before the adapter can submit input.
 pub const CLI_UNAVAILABLE_CODE: &str = "cairn_antigravity_cli_unavailable";
 
+/// The paid adapter stopped before attempting to write any input to agy.
+pub const PREFLIGHT_FAILED_CODE: &str = "cairn_antigravity_preflight_failed";
+
+pub const SESSION_UNAVAILABLE_CODE: &str = "cairn_antigravity_session_unavailable";
+
 pub(crate) async fn check_version(config: &Config, env: &Environment) -> Result<()> {
     let output = bounded_output(
         command(&config.antigravity_bin, &["--version".into()], env, None),
@@ -219,9 +230,11 @@ pub(crate) async fn check_version(config: &Config, env: &Environment) -> Result<
     .await
     .map_err(|_| Error::coded(503, CLI_UNAVAILABLE_CODE, CLI_UNAVAILABLE))?;
     if !output.success || !supported_version(&output.stdout) {
-        return Err(Error::unavailable(format!(
-            "This Antigravity CLI release is not supported. Install {MINIMUM} or later."
-        )));
+        return Err(Error::coded(
+            503,
+            CLI_UNAVAILABLE_CODE,
+            format!("This Antigravity CLI release is not supported. Install {MINIMUM} or later."),
+        ));
     }
     Ok(())
 }

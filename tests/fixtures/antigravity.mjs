@@ -5,7 +5,11 @@
 // Scenarios follow markers in a user message:
 //   fixture:agy-tools         list_dir, run_command and write_file calls, each through the hooks
 //   fixture:agy-slow=<ms>     the response waits <ms> after its user step
-//   fixture:agy-429           a quota failure (AGY_ERROR with RESOURCE_EXHAUSTED)
+//   fixture:agy-429           an explicit quota refusal
+//   fixture:agy-capacity-429  a retryable capacity refusal with a provider delay
+//   fixture:agy-capacity-once a capacity refusal that succeeds on same-session retry
+//   fixture:agy-stderr-429    a capacity refusal emitted only on stderr before exit
+//   fixture:agy-unknown-429   a refusal without a provider reason
 //   fixture:agy-command       a long command in its own session, its pid in $HOME/agy-command.pid
 //   fixture:agy-expired       a Google access token that expires during the turn (once per token)
 // Environment:
@@ -381,7 +385,7 @@ async function print() {
 
   write({
     event: 'init',
-    conversation_id: conversation,
+    conversation_id: existsSync(path.join(process.cwd(), 'agy-mismatched-init')) ? randomUUID() : conversation,
     init: {
       cwd: process.cwd(),
       model,
@@ -464,6 +468,17 @@ async function print() {
     })
     const result = fields => write({ event: 'result', result: { conversation_id: conversation, num_turns: turns, ...fields } })
 
+    if (content.includes('fixture:agy-no-result')) {
+      await new Promise(resolve => process.stdout.end(resolve))
+      process.exit(3)
+    }
+
+    if (content.includes('fixture:agy-transport-result')) {
+      fail({ short_error: 'Connection closed before the service responded.', error_code: 502 })
+      result({ status: 'ERROR', error: 'Connection closed before the service responded.' })
+      return
+    }
+
     if (content.includes('fixture:agy-command')) {
       // A command `agy` started, in its process group, that only a group kill stops.
       // Like agy 1.5.14, each command runs in its own session.
@@ -475,9 +490,79 @@ async function print() {
     if (slow)
       await new Promise(resolve => setTimeout(resolve, Number(slow[1])))
     if (content.includes('fixture:agy-429')) {
-      fail({ short_error: 'Resource has been exhausted (e.g. check quota).', status: 'RESOURCE_EXHAUSTED', error_code: 429 })
-      result({ status: 'ERROR', error: 'Error 429: Resource has been exhausted (e.g. check quota).' })
+      const short_error = 'Resource has been exhausted. reason:QUOTA_EXHAUSTED quotaResetTimeStamp:2030-11-28T08:35:49Z'
+      fail({ short_error, status: 'RESOURCE_EXHAUSTED', error_code: 429 })
+      result({
+        status: 'ERROR',
+        error: content.includes('fixture:agy-quota-inline') ? short_error : 'Error 429: Resource has been exhausted (e.g. check quota).',
+      })
       return
+    }
+
+    if (content.includes('fixture:agy-result-429')) {
+      result({ status: 'ERROR', error: 'Error 429: Resource has been exhausted.' })
+      return
+    }
+
+    if (content.includes('fixture:agy-capacity-429') || content.includes('fixture:agy-unknown-429')) {
+      const capacity = content.includes('fixture:agy-capacity-429')
+      const lateDiagnostic = content.includes('fixture:agy-late-diagnostic')
+      if (content.includes('fixture:agy-write-before-refusal')) {
+        await tool('write_file', {
+          Path: path.join(process.cwd(), 'agy-write-before-refusal.txt'),
+          Content: 'Completed before the refusal',
+        })
+      }
+
+      const short_error = capacity ? 'reason:MODEL_CAPACITY_EXHAUSTED retryDelay:42s' : 'Resource has been exhausted.'
+      if (content.includes('fixture:agy-malformed-native-output'))
+        process.stdout.write('incomplete native frame\n')
+      if (content.includes('fixture:agy-unknown-native-output'))
+        write({ event: 'unrecognized_native_event' })
+      if (content.includes('fixture:agy-malformed-diagnostic'))
+        process.stderr.write('AGY_ERROR: {\n')
+
+      result({
+        status: 'ERROR',
+        error: lateDiagnostic
+          ? 'Error 429, Message: Resource has been exhausted., Status: RESOURCE_EXHAUSTED, Details: [map[@type:type.googleapis.com/google.rpc.ErrorInfo reason:MODEL_CAPACITY_EXHAUSTED]]'
+          : 'Error 429: Resource has been exhausted (e.g. check quota).',
+        ...(content.includes('fixture:agy-partial-error') && { response: 'Work started before the refusal.' }),
+      })
+      if (capacity)
+        await new Promise(resolve => setTimeout(resolve, lateDiagnostic ? 1500 : 350))
+      fail({
+        short_error,
+        status: 'RESOURCE_EXHAUSTED',
+        error_code: 429,
+        retryable: true,
+        error_id: '741aa0bc-0c03-4d5a-9ca0-75d3372c4931-9',
+      })
+      return
+    }
+
+    if (content.includes('fixture:agy-capacity-once') && !db.prepare('SELECT value FROM meta WHERE key = ?').get('capacity-seen')) {
+      db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('capacity-seen', '1')
+      fail({
+        short_error: 'reason:MODEL_CAPACITY_EXHAUSTED retryDelay:8s',
+        status: 'RESOURCE_EXHAUSTED',
+        error_code: 429,
+        retryable: true,
+      })
+      result({ status: 'ERROR', error: 'Error 429: Resource has been exhausted.' })
+      return
+    }
+
+    const stderrOnly = [
+      ['fixture:agy-stderr-429', { short_error: 'reason:RATE_LIMIT_EXCEEDED retryDelay:42s', status: 'RESOURCE_EXHAUSTED', error_code: 429 }],
+      ['fixture:agy-stderr-auth', { short_error: 'authentication failed' }],
+      ['fixture:agy-stderr-model', { short_error: 'invalid model selection' }],
+    ].find(([marker]) => content.includes(marker))
+    if (stderrOnly) {
+      await new Promise(resolve => process.stdout.end(resolve))
+      await new Promise(resolve => setTimeout(resolve, 350))
+      fail(stderrOnly[1])
+      process.exit(3)
     }
 
     if (content.includes('fixture:agy-expired') && current.kind === 'google') {

@@ -898,7 +898,7 @@ async fn remote_preparation_revocation_blocks_publication_and_every_launch() {
             prompt: String::new(),
         };
         let error = execution
-            .supervise(&workspace, launch, &mut 0)
+            .supervise(&workspace, launch, &mut 0, false)
             .await
             .err()
             .unwrap();
@@ -1024,6 +1024,166 @@ fn controller_messages_follow_the_execution_backend() {
         "VM controller"
     );
     assert_eq!(controller_name(&json!({})), "VM controller");
+}
+
+#[tokio::test]
+async fn antigravity_preparation_preserves_retry_authorization_until_handoff() {
+    let root = tempfile::tempdir().unwrap();
+    let (service, run) = preparation_fixture(root.path()).await;
+    let id = text(&run, "id").to_owned();
+    let retry = crate::run_retry::Retry::next(
+        None,
+        crate::run_retry::Cause {
+            kind: crate::run_retry::FailureKind::Server,
+            message: "The Antigravity model is temporarily unavailable.".into(),
+            startup: false,
+        },
+        now() - 10_000,
+    )
+    .unwrap();
+    service
+        .store
+        .change_run(
+            &id,
+            crate::runs::RunChanges {
+                session_id: Some(Some("saved-session".into())),
+                resume_available: Some(true),
+                retry: Some(Some(retry.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut run = service.store.run(&id).await.unwrap();
+    let checkpoint = Checkpoint::new(
+        service.store.clone(),
+        id.clone(),
+        RunCheckpoint::fresh(None),
+    );
+    let cancel = CancellationToken::new();
+    let sensitive = History::default();
+    let execution = Execution {
+        s: &service,
+        id: id.clone(),
+        admission_revision: run["environmentAdmissionRevision"].clone(),
+        run: &mut run,
+        account: &mut None,
+        preparation: None,
+        cancel: &cancel,
+        checkpoint: &checkpoint,
+        sensitive: &sensitive,
+        observation: None,
+        provider: Provider::Antigravity,
+        directory: root.path().join("run"),
+        attempt_id: String::new(),
+        reservation: None,
+        retained: false,
+        turn: String::new(),
+        output_probe: None,
+    };
+    execution.mark_running().await.unwrap();
+    assert_eq!(
+        service.store.run_state(&id).await.unwrap().retry,
+        Some(retry)
+    );
+    assert!(
+        !checkpoint
+            .read(|saved| saved.antigravity_replay_refused(Some(&id)))
+            .await
+    );
+    execution.mark_paid_retry_started().await.unwrap();
+    let state = service.store.run_state(&id).await.unwrap();
+    assert!(state.retry.unwrap().next_attempt_at.is_none());
+    assert!(!state.resume_available);
+    assert!(
+        checkpoint
+            .read(|saved| saved.antigravity_replay_refused(Some(&id)))
+            .await
+    );
+    assert!(execution.mark_paid_retry_started().await.is_err());
+}
+
+#[tokio::test]
+async fn an_unrecorded_antigravity_session_durably_requires_new_input() {
+    let root = tempfile::tempdir().unwrap();
+    let (service, mut run) = preparation_fixture(root.path()).await;
+    let authority = Authority::for_run(&service, &run).await.unwrap();
+    run["snapshot"]["agent"]["provider"] = "antigravity".into();
+    run["sessionId"] = Value::Null;
+    let workspace = Workspace {
+        prepared: json!({ "cwd": root.path() }),
+        state_home: root.path().into(),
+        env: Environment::new(),
+        mcp: json!({}),
+        authorization: crate::plugins::run_credentials::Authorization::new(
+            &service,
+            authority,
+            &RunCredentials::default(),
+        ),
+    };
+    let id = text(&run, "id").to_owned();
+    let mut saved = RunCheckpoint::fresh(None);
+    saved.record_launch(Some("first-turn".into()));
+    let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+    let cancel = CancellationToken::new();
+    let sensitive = History::default();
+    let execution = Execution {
+        s: &service,
+        id,
+        admission_revision: run["environmentAdmissionRevision"].clone(),
+        run: &mut run,
+        account: &mut None,
+        preparation: None,
+        cancel: &cancel,
+        checkpoint: &checkpoint,
+        sensitive: &sensitive,
+        observation: None,
+        provider: Provider::Antigravity,
+        directory: root.path().join("run"),
+        attempt_id: String::new(),
+        reservation: None,
+        retained: false,
+        turn: String::new(),
+        output_probe: None,
+    };
+    let error = execution.resume_session(&workspace).await.unwrap_err();
+    assert_eq!(
+        error.code.as_deref(),
+        Some("antigravity_session_unconfirmed")
+    );
+    let saved = checkpoint.snapshot().await;
+    assert!(saved.antigravity_replay_refused(Some("first-turn")));
+}
+
+#[test]
+fn a_fresh_antigravity_mission_turn_is_distinct_from_recovering_it() {
+    let run = json!({ "id": "run", "missionTurnId": "wakeup" });
+    let mut saved = RunCheckpoint {
+        turn_pending: Some(true),
+        ..Default::default()
+    };
+    saved.record_launch(Some("previous-wakeup".into()));
+    let prompt = "Continue after the wait.";
+    let fresh = scheduled_execution(&run, Some(prompt), Provider::Antigravity, &saved, false);
+    assert_eq!(fresh["messageId"], "wakeup");
+    assert_eq!(fresh["text"], prompt);
+    assert_eq!(fresh["recovery"], false);
+    assert_eq!(
+        scheduled_execution(&run, Some(prompt), Provider::Codex, &saved, false)["recovery"],
+        true
+    );
+
+    saved.record_launch(launched_turn(&run, Provider::Antigravity));
+    assert_eq!(
+        scheduled_execution(&run, Some(prompt), Provider::Antigravity, &saved, false)["recovery"],
+        true
+    );
+    let wakeup_retry = scheduled_execution(&run, Some(prompt), Provider::Antigravity, &saved, true);
+    assert_eq!(wakeup_retry["text"], prompt);
+    let first = json!({ "id": "run", "snapshot": { "task": { "prompt": "Prepare a report." } } });
+    let first_retry =
+        scheduled_execution(&first, Some(prompt), Provider::Antigravity, &saved, true);
+    assert_eq!(first_retry["text"], "Task brief:\nPrepare a report.");
 }
 
 #[tokio::test]

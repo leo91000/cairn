@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import type { Provider } from '../../../../packages/contracts/accounts'
 import type { ChatQuota } from '../chat-quota'
+import { computed } from 'vue'
 import { LoaderCircle } from '../icons'
 import Icon from './Icon.vue'
 import UiButton from './UiButton.vue'
 
-defineProps<{
+const props = defineProps<{
   quota: ChatQuota
   canManage: boolean
   // Someone who cannot use the conversation's agent sees why it stopped, without its actions.
@@ -17,10 +18,22 @@ defineProps<{
   switchError?: string
 }>()
 const emit = defineEmits<{ resume: [], switch: [provider: Provider], cancelSwitch: [] }>()
+
+const guidance = computed(() => {
+  if (props.switching)
+    return 'Your conversation and files stay here.'
+  if (props.quota.requiresFollowUp)
+    return 'Send a new message to continue.'
+  if (!props.quota.refusalTitle)
+    return props.quota.automatic ? 'Work resumes automatically when an account is available.' : 'Resume the conversation when an account is available.'
+  if (props.quota.canResumeRefusal)
+    return props.choices?.length ? 'Retry the conversation or continue with another coding agent.' : 'Retry the conversation.'
+  return props.choices?.length ? 'Continue with another coding agent.' : ''
+})
 </script>
 
 <template>
-  <section class="chat-quota my-4 rounded-xl border border-line bg-surface px-4 py-3" aria-label="Coding agent quota reached" role="status">
+  <section class="chat-quota my-4 rounded-xl border border-line bg-surface px-4 py-3" :aria-label="quota.refusalTitle ?? 'Coding agent quota reached'" role="status">
     <div class="flex flex-wrap items-center gap-x-4 gap-y-3">
       <div class="flex min-w-0 flex-1 items-start gap-3">
         <Icon
@@ -32,17 +45,17 @@ const emit = defineEmits<{ resume: [], switch: [provider: Provider], cancelSwitc
         <span v-else class="mt-1.5 size-1.5 shrink-0 rounded-full bg-warning" aria-hidden="true" />
         <div class="min-w-0">
           <h2 class="m-0! text-sm font-semibold text-ink">
-            {{ switching ? `Switching to ${switching}…` : `${quota.provider} ${quota.spend ? 'spending limit' : 'quota'} reached` }}
+            {{ switching ? `Switching to ${switching}…` : quota.refusalTitle ?? `${quota.provider} ${quota.spend ? 'spending limit' : 'quota'} reached` }}
           </h2>
-          <p class="mt-1! mb-0! text-xs text-muted">
-            {{ switching ? 'Your conversation and files stay here.' : quota.automatic ? 'Work resumes automatically when an account is available.' : 'Resume the conversation when an account is available.' }}
+          <p v-if="guidance" class="mt-1! mb-0! text-xs text-muted">
+            {{ guidance }}
           </p>
           <p v-if="quota.reset && !switching" class="mt-1! mb-0! text-xs text-muted">
             Reset announced: {{ quota.reset }}
           </p>
         </div>
       </div>
-      <div v-if="!readOnly && !switching" class="flex flex-wrap items-center gap-2 phone:ml-[18px] phone:w-full">
+      <div v-if="!readOnly && !switching && !quota.requiresFollowUp" class="flex flex-wrap items-center gap-2 phone:ml-[18px] phone:w-full">
         <UiButton
           v-for="choice in choices"
           :key="choice.provider"
@@ -58,7 +71,7 @@ const emit = defineEmits<{ resume: [], switch: [provider: Provider], cancelSwitc
           Checking alternatives…
         </span>
         <UiButton
-          v-if="!quota.automatic"
+          v-if="!quota.automatic && (!quota.refusalTitle || quota.canResumeRefusal)"
           size="small"
           :disabled="busy"
           @click="emit('resume')"
@@ -67,7 +80,7 @@ const emit = defineEmits<{ resume: [], switch: [provider: Provider], cancelSwitc
         </UiButton>
       </div>
       <UiButton
-        v-else-if="!readOnly"
+        v-else-if="!readOnly && switching"
         size="small"
         :disabled="busy"
         @click="emit('cancelSwitch')"
@@ -76,7 +89,7 @@ const emit = defineEmits<{ resume: [], switch: [provider: Provider], cancelSwitc
       </UiButton>
     </div>
     <div v-if="canManage || quota.message" class="mt-1 ml-[18px] flex flex-wrap items-baseline gap-x-4 text-xs text-muted">
-      <RouterLink v-if="canManage" to="/connections" class="py-1 underline underline-offset-3 hover:text-ink phone:py-3">
+      <RouterLink v-if="canManage && !quota.refusalTitle" to="/connections" class="py-1 underline underline-offset-3 hover:text-ink phone:py-3">
         Manage accounts
       </RouterLink>
       <details v-if="quota.message" class="min-w-0 flex-1">
@@ -91,7 +104,7 @@ const emit = defineEmits<{ resume: [], switch: [provider: Provider], cancelSwitc
     <p v-if="switchError" class="mt-2! mb-0! ml-[18px] text-xs text-warning" role="alert">
       {{ switchError }}
     </p>
-    <p v-if="!readOnly && !canManage && !choices?.length && !switching && !loading && !switchError" class="mt-2! mb-0! ml-[18px] text-xs text-muted">
+    <p v-if="!quota.refusalTitle && !readOnly && !canManage && !choices?.length && !switching && !loading && !switchError" class="mt-2! mb-0! ml-[18px] text-xs text-muted">
       Ask the installation owner to check the accounts.
     </p>
   </section>

@@ -62,6 +62,10 @@ async fn service_fixture() -> (tempfile::TempDir, Arc<Service>) {
 }
 
 async fn service_with_codex(codex: &str) -> (tempfile::TempDir, Arc<Service>) {
+    service_with_runner(codex, String::new()).await
+}
+
+async fn service_with_runner(codex: &str, runner_url: String) -> (tempfile::TempDir, Arc<Service>) {
     let root = tempfile::tempdir().unwrap();
     let service = Service::new(crate::config::Config {
         data_dir: root.path().join("data"),
@@ -78,11 +82,106 @@ async fn service_with_codex(codex: &str) -> (tempfile::TempDir, Arc<Service>) {
         concurrency: 1,
         logger: false,
         worker_enabled: false,
-        runner_url: String::new(),
+        runner_url,
     })
     .await
     .unwrap();
     (root, service)
+}
+
+#[tokio::test]
+async fn shutdown_drains_an_antigravity_refusal_before_retiring_the_relay() {
+    use axum::{Json, Router, routing::get};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server =
+        tokio::spawn(async move {
+            let app = Router::new().route("/runs/runner/turn/controller-turn", get(|| async {
+            Json(json!({
+                "attemptId": "runner", "turnId": "controller-turn", "generation": "generation",
+                "code": 1, "logStart": 0, "logEnd": 120,
+            }))
+        }));
+            axum::serve(listener, app).await.unwrap();
+        });
+    let (root, service) = service_with_runner("unused", url).await;
+    let id = crate::config::id();
+    let row = json!({ "id": id, "taskId": id, "status": "running" });
+    service
+        .store
+        .transaction(move |db| db.add_run_fixture(&row, None).map(|_| ()))
+        .await
+        .unwrap();
+
+    let mut saved = RunCheckpoint::from_value(json!({
+        "prepared": { "backend": "native", "isolated": true },
+        "runnerId": "runner",
+        "antigravityControllerTurn": "controller-turn",
+        "remainingMs": null,
+    }))
+    .unwrap();
+    saved.progress = Some(crate::worker::progress::Progress::launched(
+        "execution".into(),
+        Some("runner".into()),
+        None,
+        None,
+        now(),
+    ));
+    saved.store(&service.store, &id).await.unwrap();
+    let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+    let mut run = service.store.run(&id).await.unwrap();
+    let mut account = None;
+    let cancel = CancellationToken::new();
+    let sensitive = History::default();
+    let mut execution = Execution {
+        s: &service,
+        id,
+        admission_revision: Value::Null,
+        run: &mut run,
+        account: &mut account,
+        preparation: None,
+        cancel: &cancel,
+        checkpoint: &checkpoint,
+        sensitive: &sensitive,
+        observation: None,
+        provider: Provider::Antigravity,
+        directory: root.path().into(),
+        attempt_id: "execution".into(),
+        reservation: None,
+        retained: false,
+        turn: "controller-turn".into(),
+        output_probe: None,
+    };
+    let (sender, mut events) = mpsc::channel(32);
+    service.shutdown.cancel();
+    let pending = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let frame = "{\"type\":\"turn.failed\",\"error\":{\"code\":\"antigravity_model_capacity\",\"message\":\"Provider busy\",\"automaticRecovery\":true}}\n";
+        output::read_output(frame.as_bytes(), false, sender, Vec::new()).await;
+    });
+    let mut child = Supervised::process_fixture("/bin/sleep", &["30"]);
+    let exit = execution
+        .wait(
+            &mut child,
+            &mut events,
+            &mut 0,
+            output::Attempt {
+                antigravity_adapter: true,
+                ..output::Attempt::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    pending.await.unwrap();
+    assert_eq!(exit.code, Some(STOPPED));
+    let saved = checkpoint.snapshot().await;
+    assert_eq!(
+        saved.confirmed_provider_failure().unwrap().message,
+        "Provider busy"
+    );
+    server.abort();
 }
 
 async fn rpc_flood_on_service(

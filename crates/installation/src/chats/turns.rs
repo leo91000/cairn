@@ -140,6 +140,7 @@ pub(super) fn needs_attention(chat: &Conversation, run: Option<&Value>) -> bool 
 pub(super) struct Unsent {
     pub(super) returning: Vec<(Message, String)>,
     pub(super) held: Vec<Message>,
+    cancelled: Vec<Message>,
 }
 
 /// Latest timestamp attributable to the stopped turn's input. A message at a
@@ -160,7 +161,8 @@ pub(super) fn turn_end(db: &Db<'_>, run: &Value) -> Result<i64> {
 /// starts the next turn. A turn message held behind the pause is replayed first, as a
 /// recovery, so the agent that may have it is told to check what it already did.
 pub(crate) fn skips_replay(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<bool> {
-    if turn_returned(db, text(run, "id"))? {
+    if turn_returned(db, text(run, "id"))? || RunCheckpoint::antigravity_replay_refused_in(db, run)?
+    {
         return Ok(true);
     }
     let turn = run["chatExecution"]["messageId"].as_str();
@@ -214,6 +216,7 @@ pub(super) fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> 
     let turn = execution["messageId"].as_str();
     let ended_at = turn_end(db, run)?;
     let mut unsent = Unsent::default();
+    let replay_refused = RunCheckpoint::antigravity_replay_refused_in(db, run)?;
     let mut received = None;
     for message in db.conversation_messages(chat_id)? {
         let pending = matches!(
@@ -243,13 +246,14 @@ pub(super) fn unsent(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Unsent> 
         } else {
             false
         };
-        let author = if message.question_id.is_some() || uncertain {
+        let author = if message.question_id.is_some() || (uncertain && !replay_refused) {
             None
         } else {
             crate::conversation_writers::person(db, chat_id, &message.id)?
         };
         match author {
             Some(author) => unsent.returning.push((message, author)),
+            None if replay_refused && (own || uncertain) => unsent.cancelled.push(message),
             None => unsent.held.push(message),
         }
     }
@@ -298,6 +302,19 @@ pub(super) fn settle_turn(db: &Db<'_>, chat_id: &str, ended: &Value) -> Result<(
     }
     if held && !conversation(db, chat_id)?.paused {
         pause_in(db, chat_id, true)?;
+    }
+    for mut message in unsent.cancelled {
+        message.status = MessageStatus::Cancelled;
+        db.save_message(&message)?;
+        if let Some(question_id) = message.question_id.as_deref()
+            && let Some(mut question) = find_question(db, chat_id, question_id)?
+            && question.status == QuestionStatus::Answering
+            && question.message_id.as_deref() == Some(message.id.as_str())
+        {
+            question.status = QuestionStatus::Cancelled;
+            question.blocking = false;
+            save_question(db, &question)?;
+        }
     }
     for (mut message, author) in unsent.returning {
         // This turn cannot be replayed once its message went back to its author.
@@ -432,6 +449,9 @@ pub(super) fn continue_run(
         }
         None => return Err(Error::conflict("Run checkpoint not found")),
     };
+    if checkpoint.antigravity_replay_refused(Some(&execution.message_id)) {
+        return Err(Error::conflict(crate::antigravity::FRESH_INPUT_MESSAGE));
+    }
     let provider = Provider::of_run(snapshot)?;
     let expired = chat.environment_state == Some(EnvironmentState::Expired)
         || run["environmentState"] == "expired";
@@ -442,13 +462,22 @@ pub(super) fn continue_run(
     let unfinished_handoff = run["status"] != RunStatus::Succeeded
         && run["chatExecution"]["context"].is_string()
         && !run["sessionId"].is_string();
+    let new_input_without_antigravity_session = provider == Provider::Antigravity
+        && run["sessionId"].is_null()
+        && run["chatExecution"]["messageId"]
+            .as_str()
+            .is_some_and(|previous| {
+                previous != execution.message_id
+                    && checkpoint.antigravity_replay_refused(Some(previous))
+            });
     let restart_requested = expired
         || fresh_environment_without_session
         || unfinished_handoff
+        || new_input_without_antigravity_session
         || chat.session_restart_requested
         || checkpoint.fresh_session == Some(true);
     if provider != Provider::of_run(run)? || restart_requested {
-        if !expired && run["sessionId"].is_string() {
+        if !expired && (run["sessionId"].is_string() || new_input_without_antigravity_session) {
             checkpoint.workspace_initialized = Some(true);
         }
         // The next provider cannot resolve requests from the session being replaced.

@@ -1,4 +1,5 @@
 import type { CodingAgentAccounts } from '../../packages/contracts/generated/typescript/CodingAgentAccounts'
+import { randomUUID } from 'node:crypto'
 import {
   createAgent,
   expect,
@@ -123,6 +124,39 @@ test('Antigravity connects a Gemini API key, selects a model and runs a conversa
   await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run?.summary, { timeout: 30000 }).toContain('Now add the project status.')
   await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run.status, { timeout: 30000 }).toBe('succeeded')
   expect((await workspace.api(`/api/chats/${slug}`)).run.sessionId).toBe(previous.run.sessionId)
+
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('fixture:agy-capacity-once Verify delayed recovery.')
+  const sentAt = Date.now()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run?.retry?.cause.kind).toBe('server')
+  expect((await workspace.api(`/api/chats/${slug}`)).run.retry.nextAttemptAt).toBeGreaterThanOrEqual(sentAt + 8_000)
+  await expect(page.getByText(/Temporary error.*automatic retry/i).first()).toBeVisible()
+  await expect.poll(async () => {
+    const { run } = await workspace.api(`/api/chats/${slug}`)
+    return [run?.status, run?.summary?.includes('Verify delayed recovery.')]
+  }, { timeout: 30000 }).toEqual(['succeeded', true])
+  expect((await workspace.api(`/api/chats/${slug}`)).run.sessionId).toBe(previous.run.sessionId)
+
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('fixture:agy-unknown-429 Verify an ambiguous refusal.')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  const refusal = page.getByRole('status', { name: 'Antigravity refused the request (429)' })
+  await expect(refusal.getByRole('button', { name: 'Resume conversation' })).toBeVisible()
+  await expect(page.getByRole('status', { name: 'Coding agent quota reached' })).toHaveCount(0)
+  await expect(page.getByText('Waiting for quota', { exact: true })).toHaveCount(0)
+  expect((await workspace.api(`/api/chats/${slug}`)).run.retry?.nextAttemptAt ?? null).toBeNull()
+
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('fixture:agy-slow=4000 fixture:agy-429 fixture:agy-quota-inline')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run.status).toBe('running')
+  await workspace.api(`/api/chats/${previous.id}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'Add a brief follow-up.',
+    mode: 'steer',
+  })
+  const quota = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(quota.getByText('Send a new message to continue.', { exact: true })).toBeVisible({ timeout: 15000 })
+  await expect(page.getByText('Waiting for quota', { exact: true })).toHaveCount(0)
+  await expect(quota.getByRole('button', { name: 'Resume conversation' })).toHaveCount(0)
   expect(errors).toEqual([])
 })
 

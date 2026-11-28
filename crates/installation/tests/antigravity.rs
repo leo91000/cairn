@@ -97,6 +97,19 @@ fn plan(root: &TempDir, slug: &str, body: &str) -> Value {
     })
 }
 
+async fn fixture_paid_retry(s: &Service, root: &TempDir, body: &str) -> Value {
+    let mut seed = plan(root, "gemini-4-neon-high", "Create a conversation.");
+    seed["execution"]["messageId"] = "seed".into();
+    let (result, initial) = run(s, seed).await;
+    result.unwrap();
+    let mut retry = plan(root, "gemini-4-neon-high", body);
+    retry["sessionId"] = thread(&initial).into();
+    retry["execution"]["recovery"] = true.into();
+    retry["antigravityRetryAttempt"] = 1.into();
+    retry["antigravityRetryAuthorized"] = true.into();
+    retry
+}
+
 /// The lease's native home, where the fixture keeps its log and conversations.
 fn native_home(s: &Service) -> PathBuf {
     Provider::Antigravity.driver().home(s, RUN)
@@ -1075,6 +1088,426 @@ async fn quota_failures_report_exhaustion() {
     );
     assert!(delivered(&events, "initial"));
     assert!(!events.iter().any(|e| e["type"] == "turn.completed"));
+    let failure = events.iter().find(|e| e["type"] == "turn.failed").unwrap();
+    assert_eq!(failure["error"]["code"], "usage_limit_reached");
+    assert_eq!(failure["error"]["automaticRecovery"], false);
+    assert_eq!(
+        failure["error"]["resetsAt"],
+        chrono::DateTime::parse_from_rfc3339("2030-11-28T08:35:49Z")
+            .unwrap()
+            .timestamp_millis()
+    );
+}
+
+#[tokio::test]
+async fn capacity_and_unknown_429_refusals_keep_separate_diagnostics() {
+    for (prompt, code, delay) in [
+        (
+            "fixture:agy-capacity-429",
+            "antigravity_model_capacity",
+            Some(42_000),
+        ),
+        (
+            "fixture:agy-unknown-429",
+            "antigravity_request_refused",
+            None,
+        ),
+        (
+            "fixture:agy-stderr-429",
+            "antigravity_rate_limit",
+            Some(42_000),
+        ),
+    ] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        connect(&s, "gemini", KEY).await;
+        let (result, events) = run(&s, plan(&root, "gemini-4-neon-high", prompt)).await;
+        assert_eq!(result.unwrap_err().code.as_deref(), Some(code));
+        let failure = events.iter().find(|e| e["type"] == "turn.failed").unwrap();
+        assert_eq!(failure["error"]["code"], code);
+        assert_eq!(failure["error"]["providerCode"], 429);
+        assert_eq!(failure["error"]["providerStatus"], "RESOURCE_EXHAUSTED");
+        assert_eq!(failure["error"]["retryAfterMs"].as_i64(), delay);
+        assert_eq!(
+            failure["error"]["automaticRecovery"],
+            prompt == "fixture:agy-capacity-429"
+        );
+        if prompt != "fixture:agy-stderr-429" {
+            assert_eq!(
+                failure["error"]["providerErrorId"],
+                "741aa0bc-0c03-4d5a-9ca0-75d3372c4931-9"
+            );
+        }
+        assert!(!cairn_installation::run_output::exhausted(failure));
+        assert!(!failure.to_string().contains("short_error"));
+    }
+}
+
+#[tokio::test]
+async fn incomplete_native_evidence_prevents_automatic_replay() {
+    for (suffix, expected_delay) in [
+        ("fixture:agy-partial-error", Some(42_000)),
+        ("fixture:agy-late-diagnostic", None),
+        ("fixture:agy-malformed-native-output", Some(42_000)),
+        ("fixture:agy-unknown-native-output", Some(42_000)),
+        ("fixture:agy-malformed-diagnostic", Some(42_000)),
+    ] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        connect(&s, "gemini", KEY).await;
+        let prompt = format!("fixture:agy-capacity-429 {suffix}");
+        let (result, events) = run(&s, plan(&root, "gemini-4-neon-high", &prompt)).await;
+        let code = "antigravity_model_capacity";
+        assert_eq!(result.unwrap_err().code.as_deref(), Some(code));
+        let failure = events.iter().find(|e| e["type"] == "turn.failed").unwrap();
+        assert_eq!(failure["error"]["retryAfterMs"].as_i64(), expected_delay);
+        assert_eq!(failure["error"]["automaticRecovery"], false);
+    }
+}
+
+#[tokio::test]
+async fn an_authorized_retry_reports_when_preflight_prevents_submission() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let mut input = plan(&root, "gemini-4-neon-high", "Show a status panel.");
+    input["sandbox"] = "read-only".into();
+    input["antigravityRetryAttempt"] = 1.into();
+    input["antigravityRetryAuthorized"] = true.into();
+    let (result, events) = run(&s, input).await;
+    assert_eq!(
+        result.unwrap_err().code.as_deref(),
+        Some(antigravity::PREFLIGHT_FAILED_CODE)
+    );
+    assert!(events.is_empty());
+    assert!(records(&native_home(&s), "launch").is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_steer_does_not_authorize_replaying_the_execution_input() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let input = plan(
+        &root,
+        "gemini-4-neon-high",
+        "fixture:agy-slow=1500 Finish the initial input",
+    );
+    let mut steered = false;
+    let (result, events) = run_with(&s, input.clone(), |event| {
+        if event["type"] == "chat.delivered" && event["messageId"] == "initial" && !steered {
+            steered = true;
+            write_inbox(
+                &root,
+                &json!([{ "id": "steer", "text": "fixture:agy-capacity-429 Only this input fails." }]),
+            );
+        }
+    })
+    .await;
+    assert!(result.is_err());
+    assert!(delivered(&events, "initial") && delivered(&events, "steer"));
+    let failure = events.iter().find(|e| e["type"] == "turn.failed").unwrap();
+    assert_eq!(failure["error"]["code"], "antigravity_model_capacity");
+    assert!(text(&failure["error"], "message").contains("Send a new message to continue"));
+    assert_eq!(failure["error"]["automaticRecovery"], false);
+}
+
+#[tokio::test]
+async fn a_manager_authorized_retry_uses_the_same_native_session() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let input = plan(&root, "gemini-4-neon-high", "fixture:agy-capacity-once");
+    let (result, initial) = run(&s, input.clone()).await;
+    assert_eq!(
+        result.unwrap_err().code.as_deref(),
+        Some("antigravity_model_capacity")
+    );
+    let mut scheduled = input;
+    scheduled["sessionId"] = thread(&initial).into();
+    scheduled["execution"]["recovery"] = true.into();
+    scheduled["antigravityRetryAttempt"] = 1.into();
+    scheduled["antigravityRetryAuthorized"] = true.into();
+    let (result, events) = run(&s, scheduled).await;
+    result.unwrap();
+    assert_eq!(thread(&events), thread(&initial));
+    assert!(events.iter().any(|e| e["type"] == "turn.completed"));
+}
+
+#[tokio::test]
+async fn a_disk_notice_keeps_explicit_resume_available_after_quota_refusal() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let input = plan(
+        &root,
+        "gemini-4-neon-high",
+        "fixture:agy-slow=1500 fixture:agy-429 fixture:agy-quota-inline",
+    );
+    let (_, events) = run_with(&s, input.clone(), |event| {
+        if event["type"] == "chat.delivered" && event["messageId"] == "initial" {
+            write_inbox(
+                &root,
+                &json!([{
+                    "id": "disk-notice",
+                    "text": "There is a workspace disk warning.",
+                    "operationalNotice": true,
+                }]),
+            );
+        }
+    })
+    .await;
+    let failure = events.iter().find(|e| e["type"] == "turn.failed").unwrap();
+    assert_eq!(failure["error"]["code"], "usage_limit_reached");
+    assert_ne!(failure["error"]["requiresFreshInput"], true);
+    assert_eq!(failure["error"]["automaticRecovery"], false);
+    assert!(
+        records(&native_home(&s), "message")
+            .iter()
+            .any(|message| { text(message, "content").contains("workspace disk warning") })
+    );
+
+    let mut resumed = input;
+    resumed["execution"]["recovery"] = true.into();
+    let (_, events) = run(&s, resumed).await;
+    assert!(events.iter().any(|event| event["type"] == "turn.started"));
+}
+
+#[tokio::test]
+async fn a_queued_steer_cannot_replace_the_first_quota_diagnostic() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let input = plan(
+        &root,
+        "gemini-4-neon-high",
+        "fixture:agy-slow=1500 fixture:agy-429 fixture:agy-quota-inline",
+    );
+    let (result, events) = run_with(&s, input, |event| {
+        if event["type"] == "chat.delivered" && event["messageId"] == "initial" {
+            write_inbox(
+                &root,
+                &json!([{ "id": "steer", "text": "fixture:agy-unknown-429" }]),
+            );
+        }
+    })
+    .await;
+    assert_eq!(
+        result.unwrap_err().code.as_deref(),
+        Some("usage_limit_reached")
+    );
+    let failure = events.iter().find(|e| e["type"] == "turn.failed").unwrap();
+    assert_eq!(failure["error"]["providerReason"], "QUOTA_EXHAUSTED");
+    assert!(failure["error"]["resetsAt"].is_i64());
+    assert_eq!(failure["error"]["automaticRecovery"], false);
+    assert!(text(&failure["error"], "message").contains("Send a new message to continue"));
+}
+
+#[tokio::test]
+async fn a_queued_steers_quota_cannot_be_attributed_to_an_earlier_ambiguous_429() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let input = plan(
+        &root,
+        "gemini-4-neon-high",
+        "fixture:agy-slow=1500 fixture:agy-result-429",
+    );
+    let (result, events) = run_with(&s, input, |event| {
+        if event["type"] == "chat.delivered" && event["messageId"] == "initial" {
+            write_inbox(
+                &root,
+                &json!([{ "id": "steer", "text": "fixture:agy-429" }]),
+            );
+        }
+    })
+    .await;
+    assert_eq!(
+        result.unwrap_err().code.as_deref(),
+        Some("antigravity_request_refused")
+    );
+    let failure = events.iter().find(|e| e["type"] == "turn.failed").unwrap();
+    assert_eq!(failure["error"]["requiresFreshInput"], true);
+    assert!(failure["error"]["resetsAt"].is_null());
+    assert!(!cairn_installation::run_output::exhausted(failure));
+    assert_eq!(failure["error"]["accountQuotaExhausted"], true);
+    assert!(failure["error"]["accountQuotaResetAt"].is_i64());
+}
+
+#[tokio::test]
+async fn an_attempt_without_a_confirmed_safe_refusal_stays_ineligible_for_retry() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let input = plan(&root, "gemini-4-neon-high", "fixture:agy-stderr-model");
+    assert!(run(&s, input.clone()).await.0.is_err());
+    let receipt: Value = serde_json::from_slice(
+        &std::fs::read(root.path().join("result.antigravity-receipt.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["submissions"], json!(["initial"]));
+    let mut recovered = input;
+    recovered["execution"]["recovery"] = true.into();
+    recovered["execution"]["text"] = "fixture:agy-capacity-429".into();
+    let (_, events) = run(&s, recovered).await;
+    let failure = events.iter().find(|e| e["type"] == "turn.failed").unwrap();
+    assert_eq!(failure["error"]["code"], "antigravity_model_capacity");
+    assert_eq!(failure["error"]["automaticRecovery"], false);
+}
+
+#[tokio::test]
+async fn a_recovery_without_a_receipt_cannot_authorize_automatic_retry() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let mut recovering = plan(&root, "gemini-4-neon-high", "fixture:agy-capacity-429");
+    recovering["execution"]["recovery"] = true.into();
+    let (_, events) = run(&s, recovering).await;
+    let failure = events
+        .iter()
+        .find(|event| event["type"] == "turn.failed")
+        .unwrap();
+    assert_eq!(failure["error"]["code"], "antigravity_model_capacity");
+    assert_eq!(failure["error"]["automaticRecovery"], false);
+}
+
+#[tokio::test]
+async fn an_interrupted_paid_retry_cannot_replay_from_a_workload_receipt() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let mut input = plan(&root, "gemini-4-neon-high", "Show a status panel.");
+    // A local completion receipt cannot authorize replay of a spent retry.
+    input["attemptId"] = "completed-attempt".into();
+    let (result, initial) = run(&s, input.clone()).await;
+    result.unwrap();
+    assert!(delivered(&initial, "initial"));
+    input["sessionId"] = thread(&initial).into();
+    input["antigravityRetryAttempt"] = 1.into();
+    input["execution"]["recovery"] = true.into();
+    input["antigravityPreviousAttempt"] = "completed-attempt".into();
+    let (result, restarted) = run(&s, input.clone()).await;
+    result.unwrap();
+    assert!(restarted.iter().all(|e| e["type"] != "turn.started"));
+    assert!(restarted.iter().any(|e| e["type"] == "turn.completed"));
+    input["antigravityPreviousAttempt"] = "different-attempt".into();
+    for has_receipt in [true, false] {
+        let (result, restarted) = run(&s, input.clone()).await;
+        assert_eq!(
+            result.unwrap_err().code.as_deref(),
+            Some("antigravity_retry_unconfirmed")
+        );
+        assert!(
+            restarted
+                .iter()
+                .all(|e| e["type"] != "turn.started" && e["type"] != "turn.completed")
+        );
+        assert_eq!(delivered(&restarted, "initial"), has_receipt);
+        let failure = restarted
+            .iter()
+            .find(|e| e["type"] == "turn.failed")
+            .unwrap();
+        assert_eq!(failure["error"]["requiresFreshInput"], true);
+        if has_receipt {
+            std::fs::remove_file(root.path().join("result.antigravity-receipt.json")).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_paid_retry_with_an_unknown_outcome_requires_a_new_message() {
+    for (prompt, code) in [
+        ("fixture:agy-no-result", "antigravity_retry_unconfirmed"),
+        ("fixture:agy-stderr-429", "antigravity_rate_limit"),
+        ("fixture:agy-transport-result", "antigravity_error"),
+    ] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        connect(&s, "gemini", KEY).await;
+        let input = fixture_paid_retry(&s, &root, prompt).await;
+        let (result, events) = run(&s, input).await;
+        assert_eq!(result.unwrap_err().code.as_deref(), Some(code));
+        assert!(delivered(&events, "initial"));
+        let failure = events.iter().find(|e| e["type"] == "turn.failed").unwrap();
+        assert_eq!(failure["error"]["requiresFreshInput"], true);
+        assert_ne!(failure["error"]["automaticRecovery"], true);
+        assert_ne!(failure["error"]["providerOutcomeConfirmed"], true);
+    }
+}
+
+#[tokio::test]
+async fn paid_retry_verifies_native_session_before_submitting() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let input = fixture_paid_retry(&s, &root, "This prompt must never be sent.").await;
+    let home = native_home(&s);
+    for unavailable in [Value::Null, cairn_installation::config::id().into()] {
+        let mut retry = input.clone();
+        retry["sessionId"] = unavailable;
+        let (result, events) = run(&s, retry).await;
+        assert_eq!(
+            result.unwrap_err().code.as_deref(),
+            Some(antigravity::SESSION_UNAVAILABLE_CODE)
+        );
+        assert!(events.is_empty());
+        assert_eq!(records(&home, "message").len(), 1);
+    }
+    std::fs::write(root.path().join("agy-mismatched-init"), "").unwrap();
+    let (result, events) = run(&s, input).await;
+    assert_eq!(
+        result.unwrap_err().code.as_deref(),
+        Some(antigravity::SESSION_UNAVAILABLE_CODE)
+    );
+    assert!(events.is_empty());
+    assert_eq!(records(&home, "message").len(), 1);
+}
+
+#[tokio::test]
+async fn a_refusal_after_a_native_write_does_not_authorize_automatic_replay() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    let input = plan(
+        &root,
+        "gemini-4-neon-high",
+        "fixture:agy-capacity-429 fixture:agy-write-before-refusal",
+    );
+    let (result, events) = run(&s, input.clone()).await;
+    assert!(result.is_err());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("agy-write-before-refusal.txt")).unwrap(),
+        "Completed before the refusal"
+    );
+    let refusal = |events: Vec<Value>| {
+        events
+            .into_iter()
+            .find(|event| event["type"] == "turn.failed")
+            .unwrap()
+    };
+    assert_eq!(refusal(events)["error"]["automaticRecovery"], false);
+
+    // A recovered process retains evidence of past work even if it now fails
+    // before doing any further work on the same input.
+    let mut recovered = input;
+    recovered["execution"]["recovery"] = true.into();
+    recovered["execution"]["text"] = "fixture:agy-capacity-429".into();
+    let (_, events) = run(&s, recovered).await;
+    assert_eq!(refusal(events)["error"]["automaticRecovery"], false);
+}
+
+#[tokio::test]
+async fn stderr_only_authentication_and_model_failures_keep_their_guidance() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s, "gemini", KEY).await;
+    for (prompt, code) in [
+        ("fixture:agy-stderr-auth", "antigravity_authentication"),
+        ("fixture:agy-stderr-model", "antigravity_model_selection"),
+    ] {
+        let (result, _) = run(&s, plan(&root, "gemini-4-neon-high", prompt)).await;
+        assert_eq!(result.unwrap_err().code.as_deref(), Some(code));
+    }
 }
 
 #[tokio::test]
@@ -1491,6 +1924,21 @@ async fn expired_google_tokens_are_renewed_by_the_manager_and_the_turn_relaunche
 }
 
 #[tokio::test]
+async fn google_token_expiry_does_not_resubmit_an_authorized_retry() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    sign_in_google(&s).await;
+    let input = fixture_paid_retry(&s, &root, "fixture:agy-expired Build the status panel").await;
+    let (result, events) = run(&s, input).await;
+    assert!(result.is_err());
+    let failure = events.iter().find(|e| e["type"] == "turn.failed").unwrap();
+    assert_eq!(failure["error"]["requiresFreshInput"], true);
+    assert_ne!(failure["error"]["providerOutcomeConfirmed"], true);
+    assert_eq!(records(&native_home(&s), "launch").len(), 2);
+    assert_eq!(records(&native_home(&s), "message").len(), 2);
+}
+
+#[tokio::test]
 async fn google_sign_in_refuses_a_rejected_code() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
@@ -1554,7 +2002,12 @@ async fn gemini_server(
     Arc<std::sync::Mutex<Vec<Value>>>,
     tokio::task::JoinHandle<()>,
 ) {
-    use axum::{Router, http::HeaderMap, routing::post};
+    use axum::{
+        Json, Router,
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::post,
+    };
     let requests = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
     let recorded = requests.clone();
     let marker = root.join("native-marker.txt");
@@ -1568,6 +2021,20 @@ async fn gemini_server(
                 let request: Value = serde_json::from_slice(&body).unwrap();
                 let contents = request["contents"].to_string();
                 recorded.lock().unwrap().push(request);
+                if contents.contains("NATIVE-QUOTA") {
+                    return (StatusCode::TOO_MANY_REQUESTS, Json(json!({
+                        "error": {
+                            "code": 429, "status": "RESOURCE_EXHAUSTED",
+                            "message": "Synthetic quota refusal",
+                            "details": [{
+                                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                                "domain": "generativelanguage.googleapis.com",
+                                "reason": "QUOTA_EXHAUSTED",
+                                "metadata": {"quotaResetTimeStamp": "2030-11-28T08:35:49Z"},
+                            }],
+                        },
+                    }))).into_response();
+                }
                 let responses = contents.matches("functionResponse").count();
                 let part = if contents.contains("ASK-NATIVE") && responses == 0 {
                     json!({ "functionCall": { "name": "ask_question", "args": {
@@ -1594,6 +2061,7 @@ async fn gemini_server(
                     [("content-type", "text/event-stream")],
                     format!("data: {chunk}\r\n\r\ndata: {last}\r\n\r\n"),
                 )
+                .into_response()
             }
         }),
     );
@@ -1669,6 +2137,8 @@ async fn native_cli_runs_and_resumes_a_conversation() {
     input["sessionId"] = conversation.clone().into();
     input["execution"]["messageId"] = "follow-up".into();
     input["execution"]["text"] = "Continue in the same conversation. Do not call tools.".into();
+    input["antigravityRetryAttempt"] = 1.into();
+    input["antigravityRetryAuthorized"] = true.into();
     input["output"] = root
         .path()
         .join("follow-up.md")
@@ -1692,6 +2162,37 @@ async fn native_cli_runs_and_resumes_a_conversation() {
         }),
         "the resumed request did not carry the first turn"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires a native Antigravity binary"]
+async fn native_cli_preserves_quota_reason_and_reset_from_a_gemini_429() {
+    let root = TempDir::new().unwrap();
+    let (url, requests, server) = gemini_server(root.path()).await;
+    let s = native_service(&root, Some(&url)).await;
+    connect(&s, "gemini", KEY).await;
+    let (model, slug) = native_model(&s).await;
+    let mut input = plan(&root, &slug, "NATIVE-QUOTA Reply with OK.");
+    input["model"] = model.into();
+    let (result, events) = run(&s, input).await;
+    server.abort();
+
+    assert!(!requests.lock().unwrap().is_empty());
+    assert_eq!(
+        result.unwrap_err().code.as_deref(),
+        Some("usage_limit_reached")
+    );
+    let failure = events.iter().find(|e| e["type"] == "turn.failed").unwrap();
+    assert_eq!(failure["error"]["providerReason"], "QUOTA_EXHAUSTED");
+    assert_eq!(
+        failure["error"]["resetsAt"].as_i64(),
+        Some(
+            chrono::DateTime::parse_from_rfc3339("2030-11-28T08:35:49Z")
+                .unwrap()
+                .timestamp_millis()
+        )
+    );
+    assert_eq!(failure["error"]["automaticRecovery"], false);
 }
 
 /// Optional native qualification of plan-turn isolation: the real release resumes a

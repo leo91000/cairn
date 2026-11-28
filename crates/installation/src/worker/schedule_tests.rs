@@ -428,6 +428,160 @@ async fn restart_provider_failure_reserves_each_retry_once_and_keeps_its_ceiling
 }
 
 #[tokio::test]
+async fn antigravity_reserves_the_same_delayed_retry_after_local_or_managed_restart() {
+    use axum::{Json, Router, routing::get};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server =
+        tokio::spawn(async move {
+            let app = Router::new().route("/runs/runner/turn/controller-turn", get(|| async {
+            Json(json!({
+                "attemptId": "runner", "turnId": "controller-turn", "generation": "generation",
+                "code": 1, "logStart": 10, "logEnd": 20,
+            }))
+        }));
+            axum::serve(listener, app).await.unwrap();
+        });
+    let (_root, service, _chat, run, _workspace) = fixture_with_runner(url).await;
+    for managed in [false, true] {
+        let not_before = now() + 42_000;
+        let runner = managed.then(|| "runner".to_owned());
+        let cause = crate::antigravity::retry_cause(&json!({
+            "code":"antigravity_model_capacity", "message":"Provider busy", "automaticRecovery":true,
+        })).unwrap();
+        let mut saved = RunCheckpoint::from_value(json!({
+            "prepared": {"backend": if managed { "native" } else { "shared" }, "isolated": managed},
+            "runnerId":runner, "providerFailureAttempt":runner,
+            "antigravityControllerTurn":managed.then_some("controller-turn"),
+            "remainingMs":null, "providerFailed":true, "lastError":"Provider busy",
+            "antigravityRetryExecution":"execution", "retryCause":cause,
+            "providerRetryNotBefore": not_before,
+        }))
+        .unwrap();
+        saved.progress = Some(super::super::progress::Progress::launched(
+            "execution".into(),
+            runner,
+            None,
+            None,
+            now(),
+        ));
+        saved.store(&service.store, &run).await.unwrap();
+        assert_eq!(saved.confirmed_provider_failure().is_some(), !managed);
+        if managed {
+            let receipt = super::super::execution::read_antigravity_refusal(
+                &service,
+                &run,
+                &saved,
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+            let wrong = crate::background_jobs::controller::TurnReceipt {
+                turn_id: "other-turn".to_owned(),
+                ..receipt.clone()
+            };
+            assert!(!saved.record_antigravity_retry_receipt(&wrong));
+            let live = super::super::checkpoint::Checkpoint::new(
+                service.store.clone(),
+                run.clone(),
+                saved.clone(),
+            );
+            service.shutdown.cancel();
+            assert!(
+                super::super::execution::confirm_antigravity_refusal(
+                    &service,
+                    &live,
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+            );
+            saved = live.snapshot().await;
+        }
+        assert_eq!(saved.confirmed_provider_failure(), Some(&cause));
+        let id = run.clone();
+        service
+            .store
+            .transaction(move |db| {
+                db.change_run(
+                    &id,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        session_id: Some(Some("session".into())),
+                        retry: Some(None),
+                        ..Default::default()
+                    },
+                )?;
+                saved.store_in(db, &id)?;
+                assert!(!finish_recovery(db, &id, Some(&saved))?);
+                let retry = db.run_state(&id)?.unwrap().retry.unwrap();
+                assert_eq!(retry.attempt, 1);
+                assert!(retry.next_attempt_at.unwrap() >= not_before);
+                assert!(finish_recovery(db, &id, Some(&saved))?);
+                assert_eq!(db.run_state(&id)?.unwrap().retry.unwrap().attempt, 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn restart_after_an_antigravity_follow_up_refusal_cannot_reopen_resume() {
+    let (_root, service, chat, run, _workspace) = fixture().await;
+    service
+        .store
+        .transaction(move |db| {
+            for (cancel, budget, status) in [
+                (None, None, RunStatus::Failed),
+                (None, Some(0), RunStatus::Failed),
+                (Some(1), None, RunStatus::Cancelled),
+            ] {
+                db.change_run(
+                    &run,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        session_id: Some(Some("session".into())),
+                        resume_available: Some(true),
+                        cancel_requested_at: Some(cancel),
+                        boundary: Some(json!({"chatExecution":{"messageId":"initial"}})),
+                        ..Default::default()
+                    },
+                )?;
+                let saved = RunCheckpoint::from_value(json!({
+                    "prepared": {"backend":"native","isolated":true},
+                    "runnerId":"antigravity-attempt",
+                    "remainingMs":budget,
+                    "terminalCode":1,
+                    "providerFailed":true,
+                    "lastError":"The provider failed.",
+                    "antigravityFreshInputFor":"initial",
+                }))?;
+                saved.store_in(db, &run)?;
+                assert!(!finish_recovery(db, &run, Some(&saved))?);
+                let current = db.run_state(&run)?.unwrap();
+                assert_eq!(current.status, status);
+                assert!(!current.resume_available);
+                assert!(
+                    crate::chats::skips_replay(db, &chat, &db.run(&run)?.unwrap())?,
+                    "unpausing the queue must not resubmit the refused turn"
+                );
+                assert_eq!(
+                    super::super::control::requeue(db, &run, None, None, None, None)
+                        .unwrap_err()
+                        .message,
+                    crate::antigravity::FRESH_INPUT_MESSAGE
+                );
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn expired_provider_retry_during_settlement_keeps_the_expiry_outcome() {
     let (_root, service, _chat, run, _workspace) = fixture().await;
     service
@@ -470,6 +624,39 @@ async fn expired_provider_retry_during_settlement_keeps_the_expiry_outcome() {
         })
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn an_unresolved_antigravity_retry_that_expires_requests_fresh_input() {
+    let (_root, service, _chat, run, _workspace) = fixture().await;
+    service.store.transaction(move |db| {
+        let run_wire = db.run(&run)?.unwrap();
+        let turn = crate::waits::execution_id(&run_wire).as_str().unwrap_or(&run);
+        let saved = RunCheckpoint {
+            antigravity_paid_turn: Some(turn.into()),
+            ..Default::default()
+        };
+        saved.store_in(db, &run)?;
+        let cause = crate::run_retry::Cause::classify(
+            &json!({"code": "server_error", "message": "The Antigravity model is temporarily unavailable."}),
+        ).unwrap();
+        let mut retry = crate::run_retry::Retry::next(
+            None, cause, now() - crate::run_retry::MAX_RECOVERY_MS - 1,
+        ).unwrap();
+        retry.next_attempt_at = None;
+        db.change_run(&run, crate::runs::RunChanges {
+            status: Some(RunStatus::Queued),
+            retry: Some(Some(retry)),
+            resume_available: Some(true),
+            ..Default::default()
+        })?;
+        assert!(super::super::retry::expire_in(db, &run)?);
+        let current = db.run_state(&run)?.unwrap();
+        assert_eq!(current.status, RunStatus::Failed);
+        assert_eq!(current.error.as_deref(), Some(crate::antigravity::RETRY_UNCONFIRMED_MESSAGE));
+        assert!(!current.resume_available);
+        Ok(())
+    }).await.unwrap();
 }
 
 #[tokio::test]
@@ -1975,6 +2162,9 @@ async fn intact_provider_failure_is_paid_after_restart_without_controller_charge
                     run: None,
                     failure: Some(("Provider busy".into(), Some(cause), true)),
                     antigravity_quota_refusal: false,
+                    antigravity_retry: None,
+                    antigravity_requires_fresh_input: false,
+                    antigravity_paid_outcome: false,
                     antigravity_probe_failed: false,
                     completed: false,
                     progress_complete: true,
