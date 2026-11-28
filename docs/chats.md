@@ -156,7 +156,7 @@ side panel (a drawer on desktop, a bottom sheet on phones and Android) where the
 appears, linked back to its reply: **Show reply** scrolls the conversation to it (or,
 for a reply outside the loaded history, reopens the panel and says so). Each reply
 shows how many side questions it has; that count reopens them, and asking there is
-about the whole reply. The icon, on the working row or in the conversation header,
+about the whole reply by default. The icon, on the working row or in the conversation header,
 reports a pending or unread answer.
 
 A side question never joins the queue, steers the turn, pauses or resumes it, or

@@ -320,7 +320,14 @@ test('links reused native item IDs to the selected reply', async ({ page, worksp
   await expect(second.getByRole('button', { name: /Show .* side question/ })).toHaveCount(0)
   await first.getByRole('button', { name: 'Show 1 side question about this reply' }).click()
   await expect(panel.getByText('Why the first reply?', { exact: true }).first()).toBeVisible()
-  await panel.getByRole('button', { name: 'Show reply' }).click()
+  // Asked from its count, a question is about the whole reply, whose start the server
+  // resolves itself: it must pick the first reply, not the one reusing its native ID.
+  await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Which reply is this?')
+  await panel.getByRole('button', { name: 'Ask', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).sideQuestions[1]?.answer).toContain('First distinct reply')
+  expect((await workspace.api(`/api/chats/${chat.id}`)).sideQuestions[1].answer).not.toContain('Second distinct reply')
+  await expect(second.getByRole('button', { name: /Show .* side question/ })).toHaveCount(0)
+  await panel.getByRole('button', { name: 'Show reply' }).first().click()
   await expect(panel).not.toBeVisible()
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
 })

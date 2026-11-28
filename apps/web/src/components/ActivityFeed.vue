@@ -620,10 +620,10 @@ defineExpose({
                   :data-reply-event-id="entry.replyEventIds?.[0]"
                   :data-reply-events="entry.replyEventIds?.join(' ')"
                 >
-                  <!-- Its actions come and go with the reply's state: they never change the line's height, so the conversation does not move. -->
+                  <!-- Its question count comes and goes with the reply's questions: it never changes the line's height, so the conversation does not move. -->
                   <p class="mb-1.5! flex items-center justify-between gap-3 text-2xs text-muted">
                     <span class="truncate">{{ agent }}<template v-if="entry.via"> · via {{ entry.via }}</template></span>
-                    <!-- On phones, each action's 44 px touch target stays clear of the other's. -->
+                    <!-- On phones, the count's 44 px touch target stays clear of the time. -->
                     <span class="flex shrink-0 items-center gap-1 phone:gap-6">
                       <button
                         v-if="chat && entry.itemId && replyCount(entry)"
