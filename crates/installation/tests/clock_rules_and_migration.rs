@@ -599,116 +599,11 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
          DROP TABLE IF EXISTS wait_conditions;
          DROP TABLE IF EXISTS durable_wakeups;
          DROP TABLE IF EXISTS hook_rule_versions;
-         DROP TABLE IF EXISTS hook_rule_uses;
-
-         CREATE TABLE hook_rule_versions(
-          rule_id TEXT NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
-          version INTEGER NOT NULL CHECK(version>=1),
-          definition TEXT NOT NULL CHECK(json_valid(definition) AND json_type(definition)='object'),
-          saved_by TEXT NOT NULL,
-          source TEXT NOT NULL CHECK(source IN ('app','publicMcp','installationAgent','duplicate','template')),
-          conversation_id TEXT,
-          native_grant TEXT NOT NULL,
-          saved_at INTEGER NOT NULL,
-          PRIMARY KEY(rule_id,version)
-         ) WITHOUT ROWID;
-
-         CREATE TABLE hook_rule_uses(
-          rule_id TEXT NOT NULL REFERENCES hook_rules(id) ON DELETE CASCADE,
-          kind TEXT NOT NULL CHECK(kind IN ('executionAgent','startedAgent','hook','tool','cairnHook')),
-          agent_id TEXT NOT NULL,
-          instance_id TEXT NOT NULL,
-          name TEXT NOT NULL,
-          PRIMARY KEY(rule_id,kind,agent_id,instance_id,name)
-         ) WITHOUT ROWID;
-
-         CREATE TABLE hook_rule_task_depths(
-          task_id TEXT PRIMARY KEY,
-          depth INTEGER NOT NULL
-         ) WITHOUT ROWID;
-
-         CREATE TABLE missions(
-          id TEXT PRIMARY KEY,
-          agent_id TEXT NOT NULL,
-          project_id TEXT,
-          name TEXT NOT NULL,
-          prompt TEXT NOT NULL,
-          cron TEXT,
-          timezone TEXT NOT NULL,
-          worktree INTEGER NOT NULL DEFAULT 1,
-          enabled INTEGER NOT NULL DEFAULT 1,
-          archived INTEGER NOT NULL DEFAULT 0,
-          next_run INTEGER,
-          author_id TEXT,
-          author_access_id TEXT,
-          author_removed INTEGER NOT NULL DEFAULT 0,
-          revision TEXT NOT NULL,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL,
-          schedule_wait_reason TEXT,
-          native_principals TEXT NOT NULL DEFAULT '[]',
-          native_authority_nodes TEXT NOT NULL DEFAULT '[]',
-          native_parent_run_id TEXT,
-          native_parent_access TEXT,
-          native_plugin_grants TEXT,
-          native_provenance_unknown INTEGER NOT NULL DEFAULT 0
-         );
-         CREATE TABLE mission_tags(mission_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(mission_id,tag)) WITHOUT ROWID;
-         CREATE TABLE mission_skills(mission_id TEXT NOT NULL, position INTEGER NOT NULL, skill_id TEXT NOT NULL, PRIMARY KEY(mission_id,position)) WITHOUT ROWID;
-
-         CREATE TABLE account_reads(
-          account_id TEXT NOT NULL,
-          kind TEXT NOT NULL CHECK(kind IN ('chat','mission')),
-          item_id TEXT NOT NULL,
-          finished_at INTEGER NOT NULL,
-          PRIMARY KEY(account_id,kind,item_id)
-         ) WITHOUT ROWID;
-
-         CREATE TABLE account_dismissals(
-          account_id TEXT NOT NULL,
-          task_id TEXT NOT NULL,
-          finished_at INTEGER NOT NULL,
-          snoozed_until INTEGER,
-          PRIMARY KEY(account_id,task_id)
-         ) WITHOUT ROWID;
-
-         CREATE TABLE durable_wakeups(
-          key INTEGER PRIMARY KEY,
-          chat_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
-          mission_run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
-          id TEXT NOT NULL,
-          message_id TEXT,
-          reason TEXT NOT NULL,
-          seconds INTEGER NOT NULL,
-          created_at INTEGER NOT NULL,
-          wake_at INTEGER NOT NULL,
-          group_mode TEXT,
-          time_kind TEXT,
-          time_seconds INTEGER,
-          time_date TEXT,
-          observation TEXT,
-          display TEXT,
-          next_check_at INTEGER,
-          last_error TEXT
-         );
-         CREATE TABLE wait_conditions(
-          wakeup_key INTEGER NOT NULL REFERENCES durable_wakeups(key) ON DELETE CASCADE,
-          position INTEGER NOT NULL,
-          kind TEXT NOT NULL,
-          target_run_id TEXT,
-          target_chat_id TEXT,
-          plugin_id TEXT,
-          condition_type TEXT,
-          project_id TEXT,
-          plugin_input TEXT,
-          observation TEXT,
-          display TEXT,
-          next_check_at INTEGER,
-          last_error TEXT,
-          PRIMARY KEY(wakeup_key,position)
-         ) WITHOUT ROWID;",
+         DROP TABLE IF EXISTS hook_rule_uses;",
     )
     .unwrap();
+    conn.execute_batch(include_str!("fixtures/v38-missions.sql"))
+        .unwrap();
 
     // Seed owner in kv so migration knows the owner accountId.
     conn.execute(
@@ -727,8 +622,9 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
 
     // Seed 5 missions covering active cron, disabled/archived, removed author, suspended rights, and one-shot.
     conn.execute(
-        "INSERT INTO missions(id,agent_id,name,prompt,cron,timezone,enabled,archived,next_run,author_id,author_access_id,author_removed,revision,created_at,updated_at,native_authority_nodes) \
-         VALUES(?1,?2,'Daily standup','Summarize updates','0 9 * * *','Europe/Paris',1,0,?3,'owner-acct','acc-1',0,'r1',?4,?4,'[\"local\"]')",
+        "INSERT INTO missions(id,agent_id,name,prompt,cron,timezone,enabled,archived,next_run,author_id,author_access_id,author_removed,revision,created_at,updated_at,native_authority_nodes, \
+         worktree,skills_inherited,native_principals,native_provenance_unknown) \
+         VALUES(?1,?2,'Daily standup','Summarize updates','0 9 * * *','Europe/Paris',1,0,?3,'owner-acct','acc-1',0,'r1',?4,?4,'[\"local\"]',1,1,'[]',0)",
         params![active_mission_id, MAIN_AGENT_ID, t0 + 60_000, t0],
     )
     .unwrap();
@@ -738,26 +634,30 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO missions(id,agent_id,name,prompt,cron,timezone,enabled,archived,author_id,author_access_id,author_removed,revision,created_at,updated_at) \
-         VALUES(?1,?2,'Paused mission','Do work','0 10 * * *','UTC',0,1,'owner-acct','acc-1',0,'r1',?3,?3)",
+        "INSERT INTO missions(id,agent_id,name,prompt,cron,timezone,enabled,archived,author_id,author_access_id,author_removed,revision,created_at,updated_at, \
+         worktree,skills_inherited,native_principals,native_authority_nodes,native_provenance_unknown) \
+         VALUES(?1,?2,'Paused mission','Do work','0 10 * * *','UTC',0,1,'owner-acct','acc-1',0,'r1',?3,?3,1,1,'[]','[]',0)",
         params![disabled_mission_id, MAIN_AGENT_ID, t0],
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO missions(id,agent_id,name,prompt,cron,timezone,enabled,archived,author_id,author_access_id,author_removed,revision,created_at,updated_at) \
-         VALUES(?1,?2,'Former member mission','Do work','0 11 * * *','UTC',1,0,'former-member','acc-2',1,'r1',?3,?3)",
+        "INSERT INTO missions(id,agent_id,name,prompt,cron,timezone,enabled,archived,author_id,author_access_id,author_removed,revision,created_at,updated_at, \
+         worktree,skills_inherited,native_principals,native_authority_nodes,native_provenance_unknown) \
+         VALUES(?1,?2,'Former member mission','Do work','0 11 * * *','UTC',1,0,'former-member','acc-2',1,'r1',?3,?3,1,1,'[]','[]',0)",
         params![removed_mission_id, MAIN_AGENT_ID, t0],
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO missions(id,agent_id,name,prompt,cron,timezone,enabled,archived,author_id,author_access_id,author_removed,revision,created_at,updated_at,schedule_wait_reason) \
-         VALUES(?1,?2,'Suspended mission','Do work','0 12 * * *','UTC',1,0,'member-acct','acc-3',0,'r1',?3,?3,'Its author no longer has access to this agent. It resumes once the owner gives access again.')",
+        "INSERT INTO missions(id,agent_id,name,prompt,cron,timezone,enabled,archived,author_id,author_access_id,author_removed,revision,created_at,updated_at,schedule_wait_reason, \
+         worktree,skills_inherited,native_principals,native_authority_nodes,native_provenance_unknown) \
+         VALUES(?1,?2,'Suspended mission','Do work','0 12 * * *','UTC',1,0,'member-acct','acc-3',0,'r1',?3,?3,'Its author no longer has access to this agent. It resumes once the owner gives access again.',1,1,'[]','[]',0)",
         params![suspended_mission_id, MAIN_AGENT_ID, t0],
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO missions(id,agent_id,name,prompt,cron,timezone,enabled,archived,author_id,author_access_id,author_removed,revision,created_at,updated_at) \
-         VALUES(?1,?2,'Manual one-shot','Run once',NULL,'UTC',1,0,'owner-acct','acc-1',0,'r1',?3,?3)",
+        "INSERT INTO missions(id,agent_id,name,prompt,cron,timezone,enabled,archived,author_id,author_access_id,author_removed,revision,created_at,updated_at, \
+         worktree,skills_inherited,native_principals,native_authority_nodes,native_provenance_unknown) \
+         VALUES(?1,?2,'Manual one-shot','Run once',NULL,'UTC',1,0,'owner-acct','acc-1',0,'r1',?3,?3,1,1,'[]','[]',0)",
         params![oneshot_mission_id, MAIN_AGENT_ID, t0],
     )
     .unwrap();
