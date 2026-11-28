@@ -8,10 +8,10 @@ use crate::rules::{
 };
 use cairn_contracts::{HookRuleDefinition, HookRuleInput, HookRuleTrigger, HookRuleTriggering};
 
-fn rfc3339(ms: i64) -> String {
+fn rfc3339(ms: i64) -> Result<String> {
     chrono::DateTime::from_timestamp_millis(ms)
-        .unwrap_or_default()
-        .to_rfc3339()
+        .map(|date| date.to_rfc3339())
+        .ok_or_else(|| Error::bad("Invalid Clock date."))
 }
 
 pub(crate) fn next_for_clock(
@@ -122,21 +122,21 @@ fn clock_event(
     timezone: &str,
     manual: bool,
     depth: u32,
-) -> Json {
-    json!({
+) -> Result<Json> {
+    Ok(json!({
         "id": event_id,
         "hook": "clock",
         "instanceId": Json::Null,
         "payload": {
-            "scheduledAt": scheduled_at.map(rfc3339),
-            "emittedAt": rfc3339(emitted_at),
+            "scheduledAt": scheduled_at.map(rfc3339).transpose()?,
+            "emittedAt": rfc3339(emitted_at)?,
             "timezone": timezone,
             "manual": manual,
         },
         "payloadFields": ["scheduledAt", "emittedAt", "timezone", "manual"],
         "receivedAt": emitted_at,
         "cairn": { "depth": depth },
-    })
+    }))
 }
 
 fn insert_triggering(
@@ -285,7 +285,7 @@ pub(super) async fn observe(s: &Service) -> Result<bool> {
                     }
                     let event_id = format!("clock:{rule_id}:{scheduled}");
                     let record =
-                        clock_event(&event_id, Some(scheduled), emitted_at, timezone, false, 0);
+                        clock_event(&event_id, Some(scheduled), emitted_at, timezone, false, 0)?;
                     let inserted = insert_triggering(
                         db,
                         &rule_id,
@@ -389,7 +389,7 @@ pub(crate) async fn run_now(
             }
             let at = now();
             let event_id = format!("clock-manual:{}", id());
-            let record = clock_event(&event_id, None, at, timezone, true, depth);
+            let record = clock_event(&event_id, None, at, timezone, true, depth)?;
             let triggering_id =
                 insert_triggering(db, &rule_id, version.version, &event_id, &record, at)?
                     .ok_or_else(|| {

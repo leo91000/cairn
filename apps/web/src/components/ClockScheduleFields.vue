@@ -15,7 +15,7 @@ if (model.value.at != null) {
     date.value = localDateTime(model.value.at, timezone.value)
   }
   catch {
-    date.value = localDateTime(model.value.at, 'UTC')
+    // An invalid stored date or timezone leaves an editable empty date field.
   }
 }
 

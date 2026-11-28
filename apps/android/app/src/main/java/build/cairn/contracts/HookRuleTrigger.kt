@@ -41,7 +41,7 @@ sealed interface HookRuleTrigger {
         val timezone: String = "Europe/Paris",
     ) : HookRuleTrigger {
         init {
-            at?.let { require(it in 1L..9007199254740991L) }
+            at?.let { require(it in 1L..253402300799999L) }
         }
     }
 }

@@ -65,21 +65,13 @@ impl Db<'_> {
         Ok(())
     }
 
-    pub fn restore_snooze(&self, account: &str, chat_id: &str) -> Result<()> {
-        let observed: Option<i64> = self
-            .0
+    pub fn restore_snooze(&self, account: &str, chat_id: &str, at: i64) -> Result<()> {
+        self.0
             .prepare_cached(
-                "DELETE FROM account_snoozes WHERE account_id=? AND chat_id=? RETURNING finished_at",
+                "UPDATE account_snoozes SET snoozed_until=max(finished_at+1,?3)
+                 WHERE account_id=? AND chat_id=? AND snoozed_until>?3",
             )?
-            .query_row(params![account, chat_id], |row| row.get(0))
-            .optional()?;
-        if let Some(observed) = observed {
-            self.0
-                .prepare_cached(
-                    "DELETE FROM account_reads WHERE account_id=? AND chat_id=? AND finished_at<=?",
-                )?
-                .execute(params![account, chat_id, observed])?;
-        }
+            .execute(params![account, chat_id, at])?;
         Ok(())
     }
 

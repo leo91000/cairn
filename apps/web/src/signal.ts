@@ -106,12 +106,13 @@ export function filOf(
     if (chat.lifecycle && chat.lifecycle !== 'active')
       continue
     const snoozedUntil = chat.snoozedUntil
-    const isSnoozed = !!snoozedUntil && snoozedUntil > now
     const readTimestamp = chat.readAt ?? chat.finishedAt ?? chat.updatedAt
+    const reminderDue = !!snoozedUntil && !!chat.unread && readTimestamp >= snoozedUntil
+    const isSnoozed = !!snoozedUntil && snoozedUntil > now && !reminderDue
     const unread = !isSnoozed
       && !!chat.unread
-      && unreadNow(`chat:${chat.id}`, chat.readAt ?? chat.finishedAt)
-      && (!chat.requestedBy || chat.pendingQuestions > 0 || chat.outcome?.status === 'blocked')
+      && unreadNow(`chat:${chat.id}`, readTimestamp)
+      && (reminderDue || !chat.requestedBy || chat.pendingQuestions > 0 || chat.outcome?.status === 'blocked')
     const blocked = chat.status === 'succeeded' && chat.outcome?.status === 'blocked' ? chat.outcome : null
     const requester = chat.requester
       ? { title: chat.requester.title || 'New conversation', to: chatPath({ id: chat.requester.chatId }), chatId: chat.requester.chatId }
@@ -160,6 +161,14 @@ export function filOf(
         forYou.push({ ...item, kind: 'review' })
       else
         recent.push({ ...item, kind: 'recent' })
+    }
+    else if (reminderDue && unread) {
+      forYou.push({
+        ...base,
+        kind: 'unread',
+        at: readTimestamp,
+        subtitle: 'Snooze ended',
+      })
     }
     else if (chat.paused) {
       recent.push({ ...base, kind: 'paused', subtitle: 'Paused' })

@@ -71,7 +71,7 @@ export interface Chat {
    */
   outcome?: import('../../contracts').TaskOutcome | null
   /**
-   * When the calling account snoozed this conversation until, in epoch milliseconds.
+   * The calling account's snooze deadline, in epoch milliseconds, until it is acknowledged.
    */
   snoozedUntil?: number | null
   provider?: AgentProvider | null

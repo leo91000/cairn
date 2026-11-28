@@ -94,8 +94,8 @@ impl Reads {
         self.marks.get(id).copied().unwrap_or(0).max(self.since)
     }
 
-    fn unread(&self, id: &str, finished_at: Option<i64>, blocked: bool) -> bool {
-        let mark = if blocked {
+    fn unread(&self, id: &str, finished_at: Option<i64>, needs_acknowledgement: bool) -> bool {
+        let mark = if needs_acknowledgement {
             self.marks.get(id).copied().unwrap_or(0)
         } else {
             self.read_at_mark(id)
@@ -104,7 +104,7 @@ impl Reads {
     }
 
     /// Marks conversations the account has not acknowledged since their latest relevant
-    /// activity, and attaches active snooze deadlines.
+    /// activity, and attaches snooze deadlines until their reminder is acknowledged.
     ///
     /// A plugin's conversations answer in their own channel, so their replies wait on
     /// nobody here. A rule-started conversation without human participation only asks
@@ -131,15 +131,15 @@ impl Reads {
             let matching_snooze = self.snoozes.get(&id).copied().filter(|snooze| {
                 activity_at.is_some_and(|observed| observed <= snooze.finished_at)
             });
+            chat["snoozedUntil"] =
+                matching_snooze.map_or(Value::Null, |snooze| snooze.until.into());
 
             if let Some(snooze) = matching_snooze
                 && snooze.until > at
             {
-                chat["snoozedUntil"] = snooze.until.into();
                 chat["unread"] = false.into();
                 continue;
             }
-            chat["snoozedUntil"] = Value::Null;
 
             // An expired snooze surfaces the conversation again until acknowledged
             // after its deadline.
@@ -160,7 +160,11 @@ impl Reads {
 
             let unread = (wants_attention || expired_snooze_at.is_some())
                 && db.kv(&format!("plugin-conversation:{id}"))?.is_none()
-                && self.unread(&id, effective_at, blocked || preparation_failed);
+                && self.unread(
+                    &id,
+                    effective_at,
+                    blocked || preparation_failed || expired_snooze_at.is_some(),
+                );
             chat["unread"] = unread.into();
             if unread {
                 chat["preview"] = summary_preview(db, text(chat, "runId"))?;
@@ -306,9 +310,11 @@ pub(crate) async fn snooze(
                 if snooze.finished_at >= activity_at {
                     db.set_snooze(&account, &chat, Some(snooze))?;
                 }
-                db.snoozed_until(&account, &chat, activity_at)
+                Ok(db
+                    .snoozed_until(&account, &chat, activity_at)?
+                    .filter(|until| *until > at))
             } else {
-                db.restore_snooze(&account, &chat)?;
+                db.restore_snooze(&account, &chat, at)?;
                 Ok(None)
             }
         })

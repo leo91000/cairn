@@ -157,9 +157,8 @@ internal fun ChatPage(
     ReadWhileOpen(
         vm,
         chat
-            ?.run
             ?.takeIf { selected && live.synced && !live.catchingUp }
-            ?.let { chat.readAt ?: it.finishedAt }
+            ?.let { it.readAt ?: it.run?.finishedAt }
             ?.let { "chat:${chat.id}" to it },
     )
     var createdId by rememberSaveable(id) { mutableStateOf<String?>(null) }

@@ -120,7 +120,7 @@
           "properties": {
             "at": {
               "format": "int64",
-              "maximum": 9007199254740991,
+              "maximum": 253402300799999,
               "minimum": 1,
               "type": [
                 "integer",

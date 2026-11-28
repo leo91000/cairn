@@ -244,6 +244,38 @@ class SignalPresentationTest {
     }
 
     @Test
+    fun `a due snooze reminds the account about paused or delegated conversations`() {
+        val chats =
+            listOf(
+                Chat(id = "paused", paused = true, unread = true, readAt = 40, snoozedUntil = 40),
+                Chat(
+                    id = "delegated",
+                    requestedBy =
+                        build.cairn.contracts.ConversationRequester(
+                            chatId = "parent",
+                            runId = "run",
+                        ),
+                    status = "succeeded",
+                    unread = true,
+                    finishedAt = 20,
+                    readAt = 40,
+                    snoozedUntil = 40,
+                ),
+            )
+        val feed = buildFeed(chats, read = mapOf("chat:delegated" to 20), now = 39)
+        assertEquals(listOf("chat:paused", "chat:delegated"), feed.unread.map { it.key })
+        assertTrue(
+            buildFeed(
+                    chats,
+                    read = mapOf("chat:paused" to 40, "chat:delegated" to 40),
+                    now = 40,
+                )
+                .unread
+                .isEmpty()
+        )
+    }
+
+    @Test
     fun `a snoozed conversation asks again tomorrow at nine, local time`() {
         val zone = ZoneId.of("Europe/Paris")
         val evening = LocalDateTime.of(2026, 10, 20, 22, 30).atZone(zone).toInstant().toEpochMilli()

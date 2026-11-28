@@ -94,6 +94,25 @@ fn schedule_rule_definition(name: &str, trigger: &Value) -> Value {
 }
 
 #[tokio::test]
+async fn clock_rejects_dates_outside_the_rfc3339_year_range() {
+    let app = App::new().await;
+    let trigger = json!({
+        "type": "clock",
+        "at": cairn_contracts::MAX_CLOCK_DATE_MILLIS + 1,
+        "timezone": "UTC",
+    });
+    let (status, result) = app
+        .request(
+            &app.owner,
+            "POST",
+            "/api/hook-rules",
+            json!({ "definition": schedule_rule_definition("Invalid date", &trigger) }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+}
+
+#[tokio::test]
 async fn clock_cron_rule_catches_up_once_guards_overlap_and_runs_now() {
     let app = App::new().await;
 

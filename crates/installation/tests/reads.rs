@@ -433,8 +433,10 @@ async fn conversations_can_be_snoozed_restored_and_cleared_by_mark_read() {
     assert_eq!(status, StatusCode::OK, "{restored}");
     assert_eq!(restored, json!({ "chatId": chat_id, "snoozedUntil": null }));
     let owner_list = app.get(&app.owner, "/api/chats").await;
-    assert!(find(&owner_list, "id", chat_id)["snoozedUntil"].is_null());
-    assert_eq!(find(&owner_list, "id", chat_id)["unread"], true);
+    let reminder = find(&owner_list, "id", chat_id);
+    assert_eq!(reminder["readAt"], reminder["snoozedUntil"]);
+    assert!(reminder["readAt"].as_i64().unwrap() < until);
+    assert_eq!(reminder["unread"], true);
 
     // Mark read clears any active snooze ("écarter devient marquer lu").
     app.snooze(
@@ -477,6 +479,70 @@ async fn conversations_can_be_snoozed_restored_and_cleared_by_mark_read() {
         .snooze(&app.owner, "not-a-chat", json!({ "kind": "restore" }))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+#[tokio::test]
+async fn restoring_and_expiring_a_snooze_both_remind_the_account_of_an_idle_conversation() {
+    let app = App::new().await;
+    let (status, chat) = app
+        .request(&app.owner, "POST", "/api/chats", json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{chat}");
+    let chat_id = text(&chat, "id");
+
+    for restore in [true, false] {
+        let listed = app.get(&app.owner, "/api/chats").await;
+        let observed = find(&listed, "id", chat_id);
+        let activity = &observed["updatedAt"];
+        let until = now() + 60_000;
+        let (status, snoozed) = app
+            .snooze(
+                &app.owner,
+                chat_id,
+                json!({ "kind": "snooze", "finishedAt": activity, "until": until }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{snoozed}");
+        assert_eq!(snoozed["snoozedUntil"], until);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        if restore {
+            let (status, restored) = app
+                .snooze(&app.owner, chat_id, json!({ "kind": "restore" }))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{restored}");
+        } else {
+            let chat_id = chat_id.to_owned();
+            app.service
+                .store
+                .transaction(move |db| {
+                    db.0.execute(
+                        "UPDATE account_snoozes SET snoozed_until=?1 WHERE chat_id=?2",
+                        rusqlite::params![now(), chat_id],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+
+        let listed = app.get(&app.owner, "/api/chats").await;
+        let reminder = find(&listed, "id", chat_id);
+        assert_eq!(reminder["status"], "idle");
+        assert_eq!(reminder["unread"], true, "{reminder}");
+        assert_eq!(reminder["readAt"], reminder["snoozedUntil"]);
+        assert_eq!(
+            app.read(&app.owner, &[chat_read(chat_id, &reminder["readAt"])])
+                .await
+                .0,
+            StatusCode::OK,
+        );
+        let listed = app.get(&app.owner, "/api/chats").await;
+        let cleared = find(&listed, "id", chat_id);
+        assert_eq!(cleared["unread"], false);
+        assert!(cleared["snoozedUntil"].is_null());
+        let member = app.get(&app.member, "/api/chats").await;
+        assert_eq!(find(&member, "id", chat_id)["unread"], false);
+    }
 }
 
 #[tokio::test]
@@ -529,8 +595,10 @@ async fn snoozing_a_previous_observation_leaves_a_new_turn_unread() {
     app.get(&app.owner, "/api/chats").await;
     let chat = app.finished_chat().await;
     let chat_id = text(&chat, "id");
-    let run_id = text(&chat, "runId");
-    let previous = chat["finishedAt"].as_i64().unwrap();
+    let listed = app.get(&app.owner, "/api/chats").await;
+    let observed = find(&listed, "id", chat_id);
+    let run_id = text(observed, "runId");
+    let previous = observed["readAt"].as_i64().unwrap();
     tokio::time::sleep(Duration::from_millis(5)).await;
     app.service
         .store

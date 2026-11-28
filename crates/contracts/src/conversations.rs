@@ -466,7 +466,7 @@ pub struct Chat {
     #[ts(optional = nullable)]
     #[ts(type = "import('../../contracts').TaskOutcome | null")]
     pub outcome: Option<serde_json::Value>,
-    /// When the calling account snoozed this conversation until, in epoch milliseconds.
+    /// The calling account's snooze deadline, in epoch milliseconds, until it is acknowledged.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

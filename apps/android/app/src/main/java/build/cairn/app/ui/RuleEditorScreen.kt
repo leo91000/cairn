@@ -518,15 +518,19 @@ fun RuleEditorScreen(
                             val clock =
                                 definition.obj("trigger")?.takeIf { it.text("type") == "clock" }
                             if (clock != null)
-                                ClockScheduleFields(
-                                    wireJson.decodeFromJsonElement<HookRuleTrigger.C>(clock)
-                                ) {
-                                    update(
-                                        definition.patch(
-                                            "trigger" to
-                                                wireJson.encodeToJsonElement<HookRuleTrigger>(it)
+                                key(original) {
+                                    ClockScheduleFields(
+                                        wireJson.decodeFromJsonElement<HookRuleTrigger.C>(clock)
+                                    ) {
+                                        update(
+                                            definition.patch(
+                                                "trigger" to
+                                                    wireJson.encodeToJsonElement<HookRuleTrigger>(
+                                                        it
+                                                    )
+                                            )
                                         )
-                                    )
+                                    }
                                 }
                             if (hook?.description?.isNotBlank() == true)
                                 Text(hook.description, style = MaterialTheme.typography.bodySmall)

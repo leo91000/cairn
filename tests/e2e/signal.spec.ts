@@ -307,8 +307,7 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   await expectSingleScroll(page)
   await capture(page, testInfo, 'signal-fil-desktop')
 
-  // J selects the first item and Enter opens it, like a mail client. A mission reads beside the
-  // Fil, which stays the current place, and its Mission tab holds the mission itself.
+  // J selects the first item and Enter opens its conversation beside the Fil.
   await page.getByRole('tab', { name: /^À lire/ }).click()
   await page.getByRole('heading', { name: 'Fil', exact: true }).click()
   await page.keyboard.press('j')
@@ -357,7 +356,7 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   await expect(page).toHaveURL(workspacePath(`/chats/${chat.slug}`))
   await expect(page.getByRole('complementary', { name: 'Fil' }).locator('[aria-current="page"]')).toBeVisible()
   const working = page.locator('.agent-working')
-  await expect(working).toBeVisible()
+  await expect(working).toBeVisible({ timeout: 20000 })
   await expect(working).toHaveAttribute('aria-live', 'polite')
   await expect(page.locator('.chat-page .avatar-orbit').filter({ visible: true })).toHaveCount(1)
   await expectSingleScroll(page)

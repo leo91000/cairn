@@ -440,7 +440,7 @@ fn trigger_payload(
                     }
                 }
                 (None, Some(target)) => {
-                    if target <= 0 {
+                    if !(1..=cairn_contracts::MAX_CLOCK_DATE_MILLIS).contains(&target) {
                         checker.problem("/trigger/at", "Choose a valid date and time.");
                     }
                 }

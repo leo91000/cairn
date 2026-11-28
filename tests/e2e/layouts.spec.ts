@@ -31,7 +31,7 @@ async function screenshotLayout(page: Page, testInfo: TestInfo, name: string, co
   await page.evaluate(() => document.fonts.ready)
   await fits(page)
   if (colorScheme === 'dark') {
-    const brightSurfaces = await page.locator('.run-facts, .settings-section, .resource-card, .mission-card, .skill-card, .connection-card, dialog[open], .vs-popup:popover-open').evaluateAll(elements => elements.filter((el) => {
+    const brightSurfaces = await page.locator('.run-facts, .settings-section, .resource-card, .skill-card, .connection-card, dialog[open], .vs-popup:popover-open').evaluateAll(elements => elements.filter((el) => {
       const color = getComputedStyle(el).backgroundColor.match(/[\d.]+/g)?.map(Number)
       return color && color.length >= 3 && (color[3] ?? 1) > 0.5 && Math.min(...color.slice(0, 3)) > 180
     }).map(el => el.className))
@@ -53,7 +53,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   const runs = await page.request.get(`/api/installations/${workspace.installationId}/api/runs`).then(response => response.json())
   const run = runs.find((item: { status: string }) => item.status === 'succeeded')
 
-  // The rail (desktop) or the dock (phone) leads to the Fil, Missions and the Atelier.
+  // The rail (desktop) or the dock (phone) leads to the Fil, Rules and the Atelier.
   async function navigate(url: string) {
     const documentIdentity = randomUUID()
     await page.evaluate((identity) => {
@@ -135,9 +135,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       await navigate(url)
       await expect(page.locator(ready).first()).toBeVisible()
       await screenshot(`${viewport.width}-${name}`)
-      if (name === 'tasks')
-        await page.getByRole('button', { name: 'Search missions', exact: true }).click()
-      if (name === 'tasks' || name === 'skills') {
+      if (name === 'skills') {
         const geometry = await page.locator('.search-field').evaluate((field) => {
           const icon = field.querySelector('.ui-icon')!.getBoundingClientRect()
           const input = field.querySelector('input')!.getBoundingClientRect()

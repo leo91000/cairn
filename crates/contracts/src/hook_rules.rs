@@ -76,7 +76,7 @@ pub enum HookRuleTrigger {
         #[ts(optional = nullable)]
         cron: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[schemars(range(min = 1, max = 9007199254740991_i64))]
+        #[schemars(range(min = 1, max = MAX_CLOCK_DATE_MILLIS))]
         #[ts(optional = nullable, type = "number | null")]
         at: Option<i64>,
         #[serde(default = "default_clock_timezone")]
@@ -84,6 +84,9 @@ pub enum HookRuleTrigger {
         timezone: String,
     },
 }
+
+/// End of year 9999 UTC, the last year with four digits in RFC 3339.
+pub const MAX_CLOCK_DATE_MILLIS: i64 = 253_402_300_799_999;
 
 fn default_clock_timezone() -> String {
     "Europe/Paris".into()

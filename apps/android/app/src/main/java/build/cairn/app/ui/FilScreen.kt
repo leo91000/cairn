@@ -183,12 +183,14 @@ internal fun buildFeed(
             val agent = chat.agentName.ifBlank { "Agent" }
             val activityAt = chat.readAt ?: chat.finishedAt ?: chat.updatedAt
             val until = chat.snoozedUntil
-            val snoozed = until != null && until > now
+            val reminderDue = until != null && chat.unread && activityAt >= until
+            val snoozed = until != null && until > now && !reminderDue
             val unread =
                 !snoozed &&
                     chat.unread &&
                     unreadNow("chat:${chat.id}", activityAt) &&
-                    (chat.requestedBy == null ||
+                    (reminderDue ||
+                        chat.requestedBy == null ||
                         chat.pendingQuestions > 0 ||
                         chat.outcome?.status == "blocked")
             fun item(kind: FeedKind, subtitle: String) =
@@ -264,6 +266,8 @@ internal fun buildFeed(
                         recent +=
                             item(FeedKind.CHAT, label).copy(unread = false, statusLabel = "Bloquée")
                 }
+                reminderDue && unread ->
+                    toRead += item(FeedKind.UNREAD_CHAT, "Report terminé").copy(stamp = activityAt)
                 !chat.paused &&
                     !chat.exclusiveSuspended &&
                     isQuotaWait(

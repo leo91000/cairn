@@ -556,6 +556,7 @@ onBeforeUnmount(() => {
                 </select>
                 <ClockScheduleFields
                   v-if="definition.trigger.type === 'clock'"
+                  :key="loadedDefinition"
                   v-model="definition.trigger"
                   class="mt-3"
                 />

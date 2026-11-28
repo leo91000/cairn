@@ -449,3 +449,26 @@ it('defaults to nine tomorrow using local time', () => {
   const time = new Date(2026, 4, 1, 22, 5)
   expect(new Date(tomorrowMorning(time.getTime()))).toEqual(new Date(2026, 4, 2, 9))
 })
+
+it('brings explicitly snoozed paused and delegated conversations back at their reminder', () => {
+  const chats = [
+    chat('paused', {
+      paused: true,
+      unread: true,
+      readAt: 40,
+      snoozedUntil: 40,
+    }),
+    chat('delegated', {
+      requestedBy: { chatId: 'parent', runId: 'run', requestId: null },
+      status: 'succeeded',
+      unread: true,
+      finishedAt: 20,
+      readAt: 40,
+      snoozedUntil: 40,
+    }),
+  ]
+  // A server observation of the due reminder can arrive between local clock updates.
+  const read = { 'chat:delegated': 20 }
+  expect(filViews(filOf(chats, read, 39)).unread.map(item => item.title)).toEqual(['paused', 'delegated'])
+  expect(filViews(filOf(chats, { 'chat:paused': 40, 'chat:delegated': 40 }, 40)).unread).toEqual([])
+})

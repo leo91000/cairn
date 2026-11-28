@@ -1702,7 +1702,7 @@
           "type": "string"
         },
         "snoozedUntil": {
-          "description": "When the calling account snoozed this conversation until, in epoch milliseconds.",
+          "description": "The calling account's snooze deadline, in epoch milliseconds, until it is acknowledged.",
           "format": "int64",
           "maximum": 9007199254740991,
           "minimum": 1,
@@ -5506,7 +5506,7 @@
           "properties": {
             "at": {
               "format": "int64",
-              "maximum": 9007199254740991,
+              "maximum": 253402300799999,
               "minimum": 1,
               "type": [
                 "integer",
