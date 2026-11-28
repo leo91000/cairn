@@ -130,7 +130,7 @@ class AccountsDeviceTest {
             fun accounts(): String {
                 val quota =
                     if (checked.get())
-                        """{"windows":[{"id":"gemini-weekly","label":"Weekly · Gemini Models","remainingPercent":75,"resetsAt":1894017600}]}"""
+                        """{"windows":[{"id":"weekly-quota","label":"Weekly · Gemini Models","remainingPercent":75,"resetsAt":1894017600},{"id":"five-hour-quota","label":"5-hour window · Gemini Models","remainingPercent":100},{"id":"3p-weekly","label":"Weekly · Claude and GPT models","remainingPercent":0}]}"""
                     else "null"
                 return """{"accounts":[{"id":"google","provider":"antigravity","name":"Personal Google","modelProvider":"google","state":"ready","status":"next","antigravityQuota":$quota}]}"""
             }
@@ -187,17 +187,39 @@ class AccountsDeviceTest {
                 compose.onNodeWithContentDescription("Vérifier l’usage maintenant").performClick()
                 compose.waitUntil(10000) {
                     compose
-                        .onAllNodesWithText("Quotas dans les détails du compte")
+                        .onAllNodesWithContentDescription(
+                            "75 % restants pour Gemini",
+                            substring = true,
+                        )
                         .fetchSemanticsNodes()
                         .isNotEmpty()
                 }
                 assertTrue(checked.get())
                 compose
-                    .onNodeWithContentDescription(name, substring = true)
-                    .performScrollTo()
-                    .performClick()
+                    .onNodeWithContentDescription(
+                        "5 heures · Gemini Models",
+                        useUnmergedTree = true,
+                    )
+                    .assertExists()
+                compose
+                    .onNodeWithContentDescription("Semaine · Gemini Models", useUnmergedTree = true)
+                    .assertExists()
+                compose
+                    .onNodeWithContentDescription(
+                        "Semaine · Claude and GPT models",
+                        useUnmergedTree = true,
+                    )
+                    .assertDoesNotExist()
+                val accountRow = compose.onNodeWithContentDescription(name, substring = true)
+                accountRow.performScrollTo()
+                compose.onNodeWithText("5 h · 100 %", useUnmergedTree = true).assertIsDisplayed()
+                compose.onNodeWithText("7 j · 75 %", useUnmergedTree = true).assertIsDisplayed()
+                accountRow.performClick()
                 compose.onNodeWithText("Semaine · Gemini Models").assertIsDisplayed()
-                compose.onNodeWithText("75 %").assertIsDisplayed()
+                compose.onNodeWithText("Semaine · Claude and GPT models").assertIsDisplayed()
+                compose
+                    .onNode(hasText("75 %") and hasAnyAncestor(hasTestTag("account-sheet")))
+                    .assertIsDisplayed()
                 compose.onNodeWithText("Reprise ", substring = true).assertIsDisplayed()
             }
         }
