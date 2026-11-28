@@ -582,6 +582,19 @@ fn detach_environment_in(
         chat.lifecycle == cairn_contracts::ConversationLifecycle::Active && !chat.paused
     });
     let resume = expiration.continue_turn && chat_ready && run["chatExecution"].is_object();
+    // A pending v38 retirement may still carry the only surviving copy of its wakeup.
+    let legacy_environment = environment["trigger"]
+        .as_str()
+        .is_some_and(|trigger| trigger != "chat");
+    let migrated_wakeup_id = chat
+        .as_ref()
+        .and_then(|chat| chat.wakeup.as_ref())
+        .filter(|wake| {
+            checkpoint.migrated_mission_wakeup_id.as_deref() == Some(wake.id.as_str())
+                || (legacy_environment && environment["wakeup"]["id"] == wake.id)
+        })
+        .map(|wake| wake.id.clone());
+    let keep_budget = migrated_wakeup_id.is_some() || (legacy_environment && resume);
     let node_change = expiration.cause == Cause::NodeChange;
     let keep_pins = expiration.cause == Cause::NodeRevocation;
 
@@ -628,6 +641,8 @@ fn detach_environment_in(
     };
     let mut fresh = RunCheckpoint {
         completed: Some(true),
+        migrated_mission_wakeup_id: migrated_wakeup_id,
+        remaining_ms: keep_budget.then_some(checkpoint.remaining_ms).flatten(),
         ..Default::default()
     };
     if resume {
@@ -636,7 +651,9 @@ fn detach_environment_in(
         // An earlier attempt of this turn may have delivered its message.
         fresh.launched_turn = checkpoint.launched_turn.clone();
         fresh.turn_pending = Some(true);
-        fresh.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
+        if !keep_budget {
+            fresh.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
+        }
         let mut execution = run["chatExecution"].clone();
         execution["context"] = crate::chats::handoff_context(db, run_id)?.into();
         execution["recovery"] = false.into();
@@ -1097,7 +1114,8 @@ mod tests {
         let store = crate::store::Store::open(root.path()).unwrap();
         store
             .transaction(|db| {
-                for cancelled in [false, true] {
+                for (cancelled, persisted_wakeup) in [(false, false), (false, true), (true, false)]
+                {
                     let (run, chat, turn) = (id(), id(), id());
                     let mut environment = db.add_run_fixture(&json!({
                     "id": run,
@@ -1118,6 +1136,17 @@ mod tests {
                         "createdAt": 1,
                         "wakeAt": 60_001,
                     });
+                    let mut checkpoint = json!({ "remainingMs": 12_000 });
+                    if persisted_wakeup {
+                        let mut wakeup = environment["wakeup"].clone();
+                        wakeup["messageId"] = turn.clone().into();
+                        let mut stored_chat = db.conversation(&chat)?.unwrap();
+                        stored_chat.wakeup = Some(serde_json::from_value(wakeup)?);
+                        db.save_conversation(&stored_chat)?;
+                        checkpoint["migratedMissionWakeupId"] = "kept-wake".into();
+                        environment["trigger"] = "chat".into();
+                    }
+                    db.save_checkpoint_boundary(&run, &checkpoint)?;
                     db.put(
                         PENDING,
                         &serde_json::to_value(Pending {
@@ -1134,15 +1163,22 @@ mod tests {
 
                     let detached = db.run(&run)?.unwrap();
                     let wake = db.conversation(&chat)?.unwrap().wakeup;
+                    let checkpoint = RunCheckpoint::load_in(db, &run)?.unwrap();
                     if cancelled {
                         assert_eq!(detached["status"], "cancelled");
                         assert!(wake.is_none());
+                        assert!(checkpoint.migrated_mission_wakeup_id.is_none());
                     } else {
                         assert_eq!(detached["status"], "succeeded");
                         assert_eq!(detached["finishedAt"], 42);
                         let wake = wake.unwrap();
                         assert_eq!(wake.id, "kept-wake");
                         assert_eq!(wake.message_id.as_deref(), Some(turn.as_str()));
+                        assert_eq!(checkpoint.remaining_ms, Some(Some(12_000)));
+                        assert_eq!(
+                            checkpoint.migrated_mission_wakeup_id.as_deref(),
+                            Some(wake.id.as_str()),
+                        );
                     }
                 }
                 Ok(())
