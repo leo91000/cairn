@@ -1323,7 +1323,7 @@ async fn question_tools_only_withdraw_the_authorized_conversations_pending_quest
         json!([])
     );
 
-    let other_run = crate::run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (_, other_run) = crate::run(&s, Value::Null, MAIN_AGENT_ID).await;
     let other_token = running_run_token(&s, &other_run).await;
     let rejected = project_workspaces::rpc(
         &s,
