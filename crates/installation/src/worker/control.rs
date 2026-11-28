@@ -11,10 +11,14 @@ use crate::{
 use cairn_contracts::{ChatExecution, EventKind, MessageStatus, ResumeExecutionSelection};
 use serde_json::{Value, json};
 use std::{
+    ffi::OsStr,
+    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
+    process::Stdio,
     sync::Arc,
     time::Duration,
 };
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 impl Worker {
     pub async fn cancel(&self, s: &Service, id: &str) -> Result<()> {
@@ -792,6 +796,7 @@ async fn ensure_clean(workspace: &Value, root: &PathBuf, env: &Environment) -> R
         return Ok(());
     }
     let target = target.to_string_lossy().into_owned();
+    verify_worktree_index(&target, env).await?;
     let output = git(
         &[
             "-C",
@@ -808,6 +813,46 @@ async fn ensure_clean(workspace: &Value, root: &PathBuf, env: &Environment) -> R
     if !output.success || !output.stdout.trim().is_empty() {
         return Err(Error::conflict(
             "This worktree contains changes or untracked files. Commit or move them before cleanup.",
+        ));
+    }
+    Ok(())
+}
+
+async fn verify_worktree_index(target: &str, env: &Environment) -> Result<()> {
+    let args = ["-C", target, "ls-files", "-v", "-z"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut child = command("git", &args, env, None)
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut entries = BufReader::new(child.stdout.take().unwrap());
+    let scan = async {
+        let mut entry = Vec::new();
+        while entries.read_until(0, &mut entry).await? != 0 {
+            let tag = entry[0];
+            if tag.is_ascii_lowercase() {
+                return Ok(false);
+            }
+            if tag == b'S' && entry.len() > 3 {
+                let name = OsStr::from_bytes(&entry[2..entry.len() - 1]);
+                match tokio::fs::symlink_metadata(Path::new(target).join(name)).await {
+                    Ok(_) => return Ok(false),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            entry.clear();
+        }
+        Ok(child.wait().await?.success())
+    };
+    let verified = tokio::time::timeout(Duration::from_secs(10), scan)
+        .await
+        .map_err(|_| Error::conflict("Git could not check the worktree index in time."))??;
+    if !verified {
+        return Err(Error::conflict(
+            "Git cannot verify all files in this worktree. Preserve them before cleaning up.",
         ));
     }
     Ok(())
@@ -932,27 +977,54 @@ async fn ensure_removable_worktree(
             "This worktree has initialized submodules. Preserve their files before cleaning up.",
         ));
     }
-    // A detached commit can be retained only by the checkout that cleanup removes.
-    let branch = git(&["-C", target, "symbolic-ref", "-q", "HEAD"], env).await?;
-    if !branch.success {
-        let references = git(
-            &[
-                "-C",
-                target,
-                "for-each-ref",
-                "--count=1",
-                "--contains",
-                "HEAD",
-                "--format=%(refname)",
-            ],
-            env,
-        )
-        .await?;
-        if !references.success || references.stdout.trim().is_empty() {
-            return Err(Error::conflict(
-                "Save the checked-out commit on a branch before cleaning up this worktree.",
-            ));
-        }
+    verify_worktree_history(target, env).await
+}
+
+async fn verify_worktree_history(target: &str, env: &Environment) -> Result<()> {
+    // These refs disappear with the linked checkout. Shared branches and tags remain.
+    let local = git(
+        &[
+            "-C",
+            target,
+            "for-each-ref",
+            "--count=1",
+            "refs/bisect/",
+            "refs/worktree/",
+            "refs/rewritten/",
+        ],
+        env,
+    )
+    .await?;
+    if !local.success || !local.stdout.is_empty() {
+        return Err(Error::conflict(
+            "Save this worktree's private Git references before cleaning it up.",
+        ));
+    }
+    let history = git(
+        &["-C", target, "reflog", "show", "--format=%H", "HEAD"],
+        env,
+    )
+    .await?;
+    if !history.success {
+        return Err(Error::conflict(
+            "Git could not verify this worktree's history.",
+        ));
+    }
+    let mut revisions = vec![
+        "-C",
+        target,
+        "--no-replace-objects",
+        "rev-list",
+        "--max-count=1",
+        "HEAD",
+    ];
+    revisions.extend(history.stdout.lines());
+    revisions.extend(["--not", "--glob=refs/*"]);
+    let unique_commits = git(&revisions, env).await?;
+    if !unique_commits.success || !unique_commits.stdout.is_empty() {
+        return Err(Error::conflict(
+            "Save this worktree's commits on a shared branch before cleaning it up.",
+        ));
     }
     Ok(())
 }
@@ -1619,6 +1691,40 @@ mod tests {
         assert!(dirty.message.contains("untracked files"));
         assert!(untracked.is_file());
         tokio::fs::remove_file(untracked).await.unwrap();
+        let tracked = Path::new(target).join(".gitmodules");
+        let original = tokio::fs::read(&tracked).await.unwrap();
+        for (hide, restore) in [
+            ("--assume-unchanged", "--no-assume-unchanged"),
+            ("--skip-worktree", "--no-skip-worktree"),
+        ] {
+            assert!(
+                git(&["-C", target, "update-index", hide, ".gitmodules"], &env)
+                    .await
+                    .unwrap()
+                    .success
+            );
+            tokio::fs::write(&tracked, "# Keep this local change\n")
+                .await
+                .unwrap();
+            let hidden_change = ensure_clean(&workspace, &root.path().to_path_buf(), &env)
+                .await
+                .unwrap_err();
+            assert!(hidden_change.message.contains("cannot verify all files"));
+            assert_eq!(
+                tokio::fs::read(&tracked).await.unwrap(),
+                b"# Keep this local change\n"
+            );
+            tokio::fs::write(&tracked, &original).await.unwrap();
+            assert!(
+                git(
+                    &["-C", target, "update-index", restore, ".gitmodules"],
+                    &env
+                )
+                .await
+                .unwrap()
+                .success
+            );
+        }
         ensure_removable_worktree(&run, &workspace, &env)
             .await
             .unwrap();
@@ -1645,12 +1751,57 @@ mod tests {
         let detached = ensure_removable_worktree(&run, &workspace, &env)
             .await
             .unwrap_err();
-        assert!(detached.message.contains("Save the checked-out commit"));
+        assert!(detached.message.contains("shared branch"));
+        let detached_tip = git(&["-C", target, "rev-parse", "HEAD"], &env)
+            .await
+            .unwrap();
+        assert!(detached_tip.success);
         assert!(
-            git(&["-C", target, "branch", "saved-work"], &env)
+            git(
+                &["-C", target, "update-ref", "refs/worktree/private", "HEAD"],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let private = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(private.message.contains("private Git references"));
+        assert!(
+            git(
+                &["-C", target, "update-ref", "-d", "refs/worktree/private"],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        assert!(
+            git(&["-C", target, "switch", "--detach", "HEAD~1"], &env)
                 .await
                 .unwrap()
                 .success
+        );
+        let reflog_only = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(reflog_only.message.contains("shared branch"));
+        assert!(
+            git(
+                &[
+                    "-C",
+                    target,
+                    "branch",
+                    "saved-work",
+                    detached_tip.stdout.trim()
+                ],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
         );
         ensure_removable_worktree(&run, &workspace, &env)
             .await
