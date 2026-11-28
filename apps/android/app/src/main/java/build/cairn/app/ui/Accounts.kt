@@ -206,12 +206,31 @@ private fun UsageBar(remaining: Double, muted: Boolean, modifier: Modifier = Mod
 @Composable
 internal fun AccountRow(account: Account, open: () -> Unit) {
     val windows = account.usage?.general.orEmpty().take(2)
+    val quota = account.antigravityQuota
+    val geminiWindows =
+        listOf("5-hour window · Gemini Models" to "5 h", "Weekly · Gemini Models" to "7 j")
+            .mapNotNull { (label, period) ->
+                quota?.windows?.firstOrNull { it.label == label }?.let { period to it }
+            }
+    val remaining =
+        geminiWindows.minOfOrNull { (_, window) -> window.remainingPercent }?.roundToInt()
+            ?: account.remainingPercent?.toInt()
+    val geminiLabel =
+        when {
+            geminiWindows.isEmpty() -> null
+            quota?.error != null -> "Gemini · Échec du relevé"
+            quota?.stale == true -> "Gemini · Relevé périmé"
+            else -> "Gemini"
+        }
     val running = account.activeRunIds.size
-    val muted = account.status == "paused" || account.stale
+    val stale =
+        if (geminiLabel != null) quota?.stale == true || quota?.error != null else account.stale
+    val muted = account.status == "paused" || stale
     // The badge already says when the account needs signing in.
     val note =
         when {
             account.state != "ready" -> null
+            geminiLabel != null -> null
             account.usage?.error != null || account.antigravityQuota?.error != null ->
                 "Usage indisponible"
             account.antigravityQuota?.windows?.isNotEmpty() == true ->
@@ -230,7 +249,10 @@ internal fun AccountRow(account: Account, open: () -> Unit) {
                     listOfNotNull(
                             account.name,
                             accountStatusLabel(account),
-                            account.remainingPercent?.let { "${it.toInt()} % restants" },
+                            remaining?.let {
+                                if (geminiLabel != null) "$it % restants pour Gemini"
+                                else "$it % restants"
+                            },
                         )
                         .joinToString(", ")
             },
@@ -266,7 +288,7 @@ internal fun AccountRow(account: Account, open: () -> Unit) {
                 Spacer(Modifier.width(10.dp))
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        account.remainingPercent?.let { "${it.toInt()} %" } ?: "—",
+                        remaining?.let { "$it %" } ?: "—",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
                         color =
@@ -287,7 +309,44 @@ internal fun AccountRow(account: Account, open: () -> Unit) {
                         )
                 }
             }
-            if (windows.isNotEmpty())
+            if (geminiLabel != null)
+                Column(
+                    Modifier.padding(start = 48.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        geminiLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        geminiWindows.forEach { (period, window) ->
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text(
+                                    "$period · ${window.remainingPercent.roundToInt()} %",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                UsageBar(
+                                    window.remainingPercent,
+                                    muted,
+                                    Modifier.fillMaxWidth().semantics {
+                                        contentDescription = antigravityQuotaLabel(window.label)
+                                        progressBarRangeInfo =
+                                            ProgressBarRangeInfo(
+                                                window.remainingPercent.toFloat(),
+                                                0f..100f,
+                                            )
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+            else if (windows.isNotEmpty())
                 Row(
                     Modifier.padding(start = 48.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),

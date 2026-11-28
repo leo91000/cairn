@@ -12,9 +12,55 @@ import UsageBar from './UsageBar.vue'
 // One account: who it is, the usage it has left, what runs on it and whether it needs you.
 const props = defineProps<{ account: Account, selected?: boolean }>()
 defineEmits<{ open: [] }>()
-const windows = computed(() => generalWindows(props.account.usage).slice(0, 2))
+const geminiWindows = computed(() => {
+  const windows = props.account.antigravityQuota?.windows ?? []
+  const periods = { '5-hour window · Gemini Models': '5 h', 'Weekly · Gemini Models': 'Week' }
+  return Object.entries(periods).flatMap(([label, name]) => {
+    const window = windows.find(window => window.label === label)
+    return window
+      ? [{
+          id: window.id,
+          name,
+          label: window.label,
+          remaining: window.remainingPercent,
+        }]
+      : []
+  })
+})
+const windows = computed(() => {
+  if (geminiWindows.value.length)
+    return geminiWindows.value
+  return generalWindows(props.account.usage).slice(0, 2).map(window => ({
+    id: window.id,
+    label: window.label,
+    name: windowName(window),
+    remaining: remainingPercent(window),
+  }))
+})
+const summaryRemaining = computed(() => geminiWindows.value.length
+  ? Math.min(...geminiWindows.value.map(window => window.remaining))
+  : props.account.remainingPercent)
+const geminiLabel = computed(() => {
+  if (!geminiWindows.value.length)
+    return ''
+  if (props.account.antigravityQuota?.error)
+    return 'Gemini · Check failed'
+  if (props.account.antigravityQuota?.stale)
+    return 'Gemini · Out of date'
+  return 'Gemini'
+})
 const running = computed(() => props.account.activeRunIds.length)
 const paused = computed(() => props.account.status === 'paused')
+const muted = computed(() => {
+  if (paused.value)
+    return true
+  if (geminiWindows.value.length) {
+    const quota = props.account.antigravityQuota
+    return Boolean(quota?.stale || quota?.error)
+  }
+
+  return props.account.stale
+})
 // The badge already says when the account needs signing in.
 const note = computed(() => {
   const { state, usage } = props.account
@@ -59,10 +105,21 @@ const note = computed(() => {
       </span>
     </span>
     <span v-if="windows.length" class="grid gap-[7px] phone:order-last phone:col-span-2 phone:grid-cols-2 phone:gap-2" :class="{ 'opacity-55': paused }">
-      <span v-for="window in windows" :key="window.id" class="grid grid-cols-[2.6rem_minmax(0,1fr)_2.3rem] items-center gap-2 text-[11.5px] phone:grid-cols-1">
-        <span class="text-muted phone:hidden">{{ windowName(window) }}</span>
-        <UsageBar :remaining="remainingPercent(window)" :muted="paused || account.stale" :label="`${account.name} ${window.label} remaining`" />
-        <span class="text-right font-semibold tabular-nums phone:hidden">{{ Math.round(remainingPercent(window)) }}%</span>
+      <span v-if="geminiLabel" class="text-[11.5px] text-muted phone:col-span-2">{{ geminiLabel }}</span>
+      <span
+        v-for="window in windows"
+        :key="window.id"
+        class="grid grid-cols-[2.6rem_minmax(0,1fr)_2.3rem] items-center gap-2 text-[11.5px]"
+        :class="geminiLabel ? 'phone:grid-cols-[1fr_auto] phone:gap-y-1' : 'phone:grid-cols-1'"
+      >
+        <span class="text-muted" :class="{ 'phone:hidden': !geminiLabel }">{{ window.name }}</span>
+        <UsageBar
+          :remaining="window.remaining"
+          :muted="muted"
+          :label="`${account.name} ${window.label} remaining`"
+          :class="{ 'phone:col-span-2 phone:row-start-2': geminiLabel }"
+        />
+        <span class="text-right font-semibold tabular-nums" :class="geminiLabel ? 'phone:col-start-2 phone:row-start-1' : 'phone:hidden'">{{ Math.round(window.remaining) }}%</span>
       </span>
     </span>
     <span v-else class="truncate text-xs text-muted phone:hidden">{{ note }}</span>
@@ -83,7 +140,7 @@ const note = computed(() => {
     </span>
     <Icon :name="ChevronRight" :size="16" class="text-subtle transition-transform group-hover:translate-x-0.5 phone:hidden" />
     <span class="hidden text-right phone:block">
-      <span class="block font-heading text-[19px] leading-none font-extrabold tracking-[-0.02em] tabular-nums" :class="paused ? 'text-muted' : 'text-ink'">{{ account.remainingPercent === null ? '—' : `${Math.round(account.remainingPercent)}%` }}</span>
+      <span class="block font-heading text-[19px] leading-none font-extrabold tracking-[-0.02em] tabular-nums" :class="paused || (geminiLabel && muted) ? 'text-muted' : 'text-ink'">{{ summaryRemaining === null ? '—' : `${Math.round(summaryRemaining)}%` }}</span>
       <span class="mt-1 block text-xs" :class="running ? 'font-semibold text-accent' : 'text-muted'">{{ running ? `${running} running` : windows.length ? '' : note }}</span>
     </span>
   </button>

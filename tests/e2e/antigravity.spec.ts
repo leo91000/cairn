@@ -180,7 +180,22 @@ test('Antigravity shows Google’s terms and requires confirmation before a Goog
   await expect(details.getByText('Use Check usage now in Connections to check this Google account’s quota.')).toBeVisible()
   await details.getByRole('button', { name: 'Close dialog', exact: true }).click()
   await page.getByRole('button', { name: 'Check usage now' }).click()
-  await expect(accountRow).toContainText('See quotas in account details', { timeout: 20000 })
+  const bars = accountRow.getByRole('progressbar')
+  await expect(bars).toHaveCount(2, { timeout: 20000 })
+  await expect(bars.nth(0)).toHaveAccessibleName('Personal Google 5-hour window · Gemini Models remaining')
+  await expect(bars.nth(0)).toHaveAttribute('aria-valuenow', '100')
+  await expect(bars.nth(1)).toHaveAccessibleName('Personal Google Weekly · Gemini Models remaining')
+  await expect(bars.nth(1)).toHaveAttribute('aria-valuenow', '75')
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 })
+    const fiveHourBar = bars.nth(0).locator('..')
+    await expect(fiveHourBar.getByText('5 h', { exact: true })).toBeVisible()
+    await expect(fiveHourBar.getByText('100%', { exact: true })).toBeVisible()
+    const weeklyBar = bars.nth(1).locator('..')
+    await expect(weeklyBar.getByText('Week', { exact: true })).toBeVisible()
+    await expect(weeklyBar.getByText('75%', { exact: true })).toBeVisible()
+  }
+
   await accountRow.click()
   await expect(details.getByText('Weekly · Gemini Models')).toBeVisible()
   await expect(details.getByRole('progressbar', { name: 'Personal Google Weekly · Gemini Models remaining' })).toHaveAttribute('aria-valuenow', '75')
