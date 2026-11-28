@@ -413,6 +413,7 @@ pub(super) fn continue_run(
     run: &Value,
     snapshot: &Value,
     mut execution: ChatExecution,
+    wakeup_id: Option<&str>,
 ) -> Result<()> {
     let agent = &snapshot["snapshot"]["agent"];
     // The workspace keeps what earlier turns could reach, so reduced access needs a new chat.
@@ -518,7 +519,9 @@ pub(super) fn continue_run(
             "The previous environment will be stopped before continuing; background completion is unknown.",
         )?;
     }
-    if checkpoint.held_environment.is_none() {
+    let migrated_wakeup_id = checkpoint.migrated_mission_wakeup_id.take();
+    let resumes_migrated_wait = wakeup_id.is_some() && wakeup_id == migrated_wakeup_id.as_deref();
+    if checkpoint.held_environment.is_none() && !resumes_migrated_wait {
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(agent));
     }
     checkpoint.last_message = None;
@@ -658,7 +661,14 @@ pub(super) fn launch_turn(
         })
     });
     let run_id = if let Some(run) = run {
-        continue_run(db, &chat, &run, &snapshot, execution)?;
+        continue_run(
+            db,
+            &chat,
+            &run,
+            &snapshot,
+            execution,
+            message["wakeup"]["id"].as_str(),
+        )?;
         text(&run, "id").to_owned()
     } else {
         crate::native::policy::apply(&mut snapshot, &serde_json::to_value(&chat)?);

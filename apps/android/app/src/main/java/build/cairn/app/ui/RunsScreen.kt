@@ -460,13 +460,18 @@ fun RunScreen(
                                     else "Pas encore préparé"
                             )
                             // Cleaning up needs access to the run's agent (ADR-0075).
+                            val managedWorkspaces =
+                                current.workspaces.filterNot { it.kind == "direct" }
                             if (
                                 !current.active &&
                                     canCleanUpWorktree &&
                                     current.workspace != null &&
                                     !current.isolated &&
                                     current.snapshot?.task?.worktree == true &&
-                                    current.workspaces.any { it.kind != "direct" }
+                                    managedWorkspaces.isNotEmpty() &&
+                                    managedWorkspaces.all {
+                                        it.kind == "worktree" || it.kind == "clone"
+                                    }
                             ) {
                                 OutlinedButton(
                                     onClick = {

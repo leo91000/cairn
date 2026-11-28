@@ -471,7 +471,8 @@ so its answer and withdrawal actions are unavailable. A quota or coding-agent sw
 card still says why the conversation stopped, without its actions. Pending invitations
 are listed without a switch, and run workspace cleanup is offered only with access to
 the run's agent. Both apps offer cleanup for stopped executions with managed
-worktrees, including multi-project and older single-project executions. Both apps
+Git worktrees or clones, including multi-project and older single-project
+executions. Cleanup requires that Git can check every managed workspace. Both apps
 reload a member's usable agents every 30 seconds while
 shown, when they come back to the foreground and after a refused change. Question
 notifications reach only the owner and the members who may answer them. Unknown

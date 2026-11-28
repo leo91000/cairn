@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import type { Run } from '../../../../packages/contracts/contracts'
+import { computed } from 'vue'
 import { duration } from '../api'
 import UiButton from './UiButton.vue'
 
 // A delegated conversation may be directed through its requester, but cleanup needs the run's agent.
-defineProps<{ run: Run, active: boolean, canCleanUpWorktree: boolean }>()
+const props = defineProps<{ run: Run, active: boolean, canCleanUpWorktree: boolean }>()
 const emit = defineEmits<{ cleanup: [] }>()
+const hasManagedWorktrees = computed(() => {
+  const managed = props.run.workspaces?.filter(entry => entry.kind !== 'direct') ?? []
+  return managed.length > 0 && managed.every(entry => entry.kind === 'worktree' || entry.kind === 'clone')
+})
 </script>
 
 <template>
@@ -25,7 +30,7 @@ const emit = defineEmits<{ cleanup: [] }>()
     </p>
     <UiButton
       v-if="canCleanUpWorktree && !active && run.workspace && !run.isolated
-        && run.snapshot.task.worktree && run.workspaces?.some(entry => entry.kind !== 'direct')"
+        && run.snapshot.task.worktree && hasManagedWorktrees"
       size="small"
       @click="emit('cleanup')"
     >

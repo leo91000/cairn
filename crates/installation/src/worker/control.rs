@@ -236,6 +236,14 @@ impl Worker {
                 "This run has no managed worktree to clean up.",
             ));
         }
+        if managed
+            .iter()
+            .any(|workspace| !matches!(workspace["kind"].as_str(), Some("worktree" | "clone")))
+        {
+            return Err(Error::conflict(
+                "This run contains workspace copies whose changes cannot be checked before cleanup.",
+            ));
+        }
         let generation = RunCheckpoint::load(&s.store, id)
             .await?
             .and_then(|checkpoint| checkpoint.generation);
@@ -643,7 +651,7 @@ fn antigravity_retry_input(
     Ok((message, execution))
 }
 
-/// Worktrees and clones the run created; direct workspaces belong to the user.
+/// Workspaces the run created; direct workspaces belong to the user.
 fn managed_workspaces(run: &Value) -> Vec<Value> {
     let workspaces = run["workspaces"]
         .as_array()

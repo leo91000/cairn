@@ -84,7 +84,7 @@ fn continue_run(
     snapshot: &Value,
     execution: ChatExecution,
 ) -> Result<()> {
-    super::continue_run(db, &fixture_chat(chat), run, snapshot, execution)
+    super::continue_run(db, &fixture_chat(chat), run, snapshot, execution, None)
 }
 
 #[tokio::test]

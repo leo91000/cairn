@@ -947,6 +947,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
                 "launched": true,
                 "completed": true,
                 "runnerId": "legacy-controller-attempt",
+                "remainingMs": 10_000,
             })
             .to_string(),
         ],
@@ -1603,4 +1604,12 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     );
     assert_ne!(resumed["chatExecution"]["messageId"], "legacy-turn");
     assert!(text(&resumed["chatExecution"], "text").contains("Wait for deploy"));
+    let checkpoint = service
+        .store
+        .checkpoint_boundary(&waiting_run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint["remainingMs"], 10_000);
+    assert!(checkpoint.get("migratedMissionWakeupId").is_none());
 }

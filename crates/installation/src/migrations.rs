@@ -623,16 +623,16 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 params![chat_id, agent_id, run.created_at, rule_id],
             )?;
 
-            let legacy_wait: Option<Option<String>> = tx
+            let legacy_wait: Option<(String, Option<String>)> = tx
                 .query_row(
-                    "SELECT message_id FROM durable_wakeups WHERE mission_run_id=?",
+                    "SELECT id,message_id FROM durable_wakeups WHERE mission_run_id=?",
                     [&run.id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
             let turn = legacy_wait
                 .as_ref()
-                .and_then(|message| message.as_deref())
+                .and_then(|(_, message)| message.as_deref())
                 .or_else(|| boundary["missionTurnId"].as_str())
                 .unwrap_or(&run.id);
             let brief = snapshot["task"]["prompt"]
@@ -691,11 +691,16 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                     params![run.id, turn],
                 )?;
             }
-            if legacy_wait.is_some() {
+            if let Some((wakeup_id, _)) = &legacy_wait {
                 tx.execute(
                     "UPDATE durable_wakeups SET chat_id=?1,mission_run_id=NULL,message_id=?2 \
                  WHERE mission_run_id=?3",
                     params![chat_id, turn, run.id],
+                )?;
+                tx.execute(
+                    "UPDATE run_checkpoints SET state=json_set(state,'$.migratedMissionWakeupId',?2)
+                     WHERE run_id=?1",
+                    params![run.id, wakeup_id],
                 )?;
                 // Fencing may still replay a saved mission settlement. A
                 // conversation holds its wakeup after a successful turn.

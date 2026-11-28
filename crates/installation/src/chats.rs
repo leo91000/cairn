@@ -503,7 +503,7 @@ fn compact(db: &Db<'_>, chat_id: &str, origin: &crate::native::policy::Origin) -
             "outcome": run["outcome"],
         }))?),
     };
-    continue_run(db, &chat, &run, &run, execution)?;
+    continue_run(db, &chat, &run, &run, execution, None)?;
     db.event(
         text(&run, "id"),
         &EventKind::Status,

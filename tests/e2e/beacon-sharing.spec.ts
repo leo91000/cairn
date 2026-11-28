@@ -255,6 +255,10 @@ test('owner shares an installation and member works without management controls'
     expect(delegatedResponse.ok()).toBe(true)
     const delegated = await delegatedResponse.json()
     const cleanupRunId = randomUUID()
+    const worktrees = [
+      { projectId: randomUUID(), path: '/fixture/private-worktree/first', kind: 'worktree' },
+      { projectId: randomUUID(), path: '/fixture/private-worktree/second', kind: 'worktree' },
+    ]
     seed!.store.addRun({
       id: cleanupRunId,
       taskId: delegated.id,
@@ -264,10 +268,7 @@ test('owner shares an installation and member works without management controls'
       startedAt: runCreatedAt - 1000,
       finishedAt: runCreatedAt,
       workspace: '/fixture/private-worktree',
-      workspaces: [
-        { projectId: randomUUID(), path: '/fixture/private-worktree/first', kind: 'worktree' },
-        { projectId: randomUUID(), path: '/fixture/private-worktree/second', kind: 'worktree' },
-      ],
+      workspaces: worktrees,
       snapshot: {
         agent: { id: privateAgent.id },
         task: {
@@ -294,13 +295,24 @@ test('owner shares an installation and member works without management controls'
     await page.goto(`${installationUrl}runs/${cleanupRunId}`)
     await page.getByRole('button', { name: 'Run details', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toBeVisible()
-    seed!.store.updateRun(cleanupRunId, {
-      workspaces: [{ projectId: randomUUID(), path: '/fixture/direct', kind: 'direct' }],
+    const copy = { projectId: randomUUID(), path: '/fixture/copy', kind: 'copy' }
+    const direct = { projectId: randomUUID(), path: '/fixture/direct', kind: 'direct' }
+    for (const workspaces of [[direct], [copy], [...worktrees, copy]]) {
+      seed!.store.updateRun(cleanupRunId, { workspaces })
+      await page.reload()
+      await page.getByRole('button', { name: 'Run details', exact: true }).click()
+      await expect(page.getByRole('heading', { name: 'Original instructions', exact: true })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toHaveCount(0)
+    }
+
+    const mixedCleanup = await page.request.post(`${apiRoot}/runs/${cleanupRunId}/cleanup`, {
+      headers: { 'origin': url, 'x-csrf-token': ownerSession.csrf },
+      data: { runId: cleanupRunId },
     })
-    await page.reload()
-    await page.getByRole('button', { name: 'Run details', exact: true }).click()
-    await expect(page.getByRole('heading', { name: 'Original instructions', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toHaveCount(0)
+    expect(mixedCleanup.status()).toBe(409)
+    expect(await mixedCleanup.json()).toMatchObject({ error: expect.stringContaining('workspace copies') })
+    expect(seed!.store.run(cleanupRunId)?.workspace).toBe('/fixture/private-worktree')
+
     seed!.store.updateRun(cleanupRunId, {
       workspaces: null,
       snapshot: {
