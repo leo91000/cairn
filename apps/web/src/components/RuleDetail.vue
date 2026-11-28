@@ -54,6 +54,7 @@ const emit = defineEmits<{ changed: [rule: HookRule | null], close: [] }>()
 const router = useRouter()
 
 const tab = ref<'flow' | 'history' | 'versions'>('flow')
+const latestTriggering = ref('')
 const busy = ref(false)
 const error = ref('')
 const deleting = ref(false)
@@ -93,7 +94,8 @@ const lift = () => act(() => liftHookRuleBudget(api, { ruleId: props.rule.id }),
 
 async function runNow() {
   await act(async () => {
-    await runHookRule(api, { ruleId: props.rule.id })
+    const triggering = await runHookRule(api, { ruleId: props.rule.id })
+    latestTriggering.value = triggering.id
     tab.value = 'history'
     return props.rule
   }, 'Schedule triggered')
@@ -284,6 +286,7 @@ const sources: Record<string, string> = {
     />
     <RuleHistory
       v-if="tab === 'history'"
+      :key="latestTriggering"
       :rule-id="rule.id"
       :version="rule.version"
       :definition="rule.definition"

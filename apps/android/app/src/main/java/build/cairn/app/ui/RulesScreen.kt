@@ -363,6 +363,7 @@ internal fun RuleDetailPanel(
 ) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable(rule.text("id")) { mutableStateOf("flow") }
+    var latestTriggering by rememberSaveable(rule.text("id")) { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     var deleting by remember { mutableStateOf(false) }
@@ -476,7 +477,7 @@ internal fun RuleDetailPanel(
                             busy = true
                             error = ""
                             try {
-                                vm.api.runHookRule(HookRuleInput(id))
+                                latestTriggering = vm.api.runHookRule(HookRuleInput(id)).id
                                 tab = "history"
                             } catch (e: Exception) {
                                 if (e is CancellationException) throw e
@@ -558,7 +559,7 @@ internal fun RuleDetailPanel(
                     catalog,
                     { ruleAgentName(state, it) },
                 )
-            "history" -> RuleHistoryPanel(vm, id, openConversation)
+            "history" -> key(latestTriggering) { RuleHistoryPanel(vm, id, openConversation) }
             "versions" ->
                 RuleVersionsPanel(vm, id, catalog, { ruleAgentName(state, it) }, openConversation)
         }
@@ -781,8 +782,15 @@ internal fun RuleHistoryPanel(
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         else {
+                            val event = loaded.obj("event")
                             val migrated =
-                                loaded.obj("event")?.obj("payload")?.obj("migratedConversation")
+                                event
+                                    ?.takeIf {
+                                        it.text("hook") == "clock" &&
+                                            it.text("instanceId").isBlank()
+                                    }
+                                    ?.obj("payload")
+                                    ?.obj("migratedConversation")
                             val conversationId = migrated.text("id")
                             if (conversationId.isNotBlank()) {
                                 TextButton(onClick = { openConversation(conversationId) }) {

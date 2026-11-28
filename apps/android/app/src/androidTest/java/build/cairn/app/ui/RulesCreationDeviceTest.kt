@@ -9,7 +9,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import build.cairn.app.data.*
 import build.cairn.contracts.RuleCatalogAgent
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
@@ -24,13 +24,14 @@ class RulesCreationDeviceTest : RulesCreationCases() {
     fun quickScheduleCreatesAnEditableClockRuleAndRunsItNow() {
         val requestBody = AtomicReference<JsonObject>()
         val previewBody = AtomicReference<JsonObject>()
-        val ran = AtomicBoolean(false)
+        val runs = AtomicInteger(0)
         val opened = AtomicReference<String>()
         val id = "00000000-0000-4000-8000-000000000020"
         val chatId = "00000000-0000-4000-8000-000000000021"
-        val triggering =
+        val nextTriggering = "00000000-0000-4000-8000-000000000022"
+        fun triggering(triggeringId: String) =
             """
-            {"id":"$id","ruleId":"$id","version":1,"status":"completed","createdAt":1,
+            {"id":"$triggeringId","ruleId":"$id","version":1,"status":"completed","createdAt":1,
              "updatedAt":1,"actions":1,"detailsVisible":true,
              "steps":[{"nodeId":"start_agent","label":"","kind":"startAgent","status":"completed",
              "result":{"conversationId":"$chatId"},"attempts":1,"startedAt":1}]}
@@ -76,12 +77,17 @@ class RulesCreationDeviceTest : RulesCreationCases() {
                                 )
                             }
                             path.endsWith("/hook-rules/$id/run") -> {
-                                ran.set(true)
-                                reply(triggering)
+                                val triggeringId =
+                                    if (runs.incrementAndGet() == 1) id else nextTriggering
+                                reply(triggering(triggeringId))
                             }
-                            path.endsWith("/hook-rules/$id/triggerings") ->
-                                reply("""{"triggerings":[$triggering],"withoutEffect":0}""")
-                            path.endsWith("/hook-rule-triggerings/$id") -> reply(triggering)
+                            path.endsWith("/hook-rules/$id/triggerings") -> {
+                                val entries =
+                                    if (runs.get() == 1) listOf(id) else listOf(nextTriggering, id)
+                                val encoded = entries.joinToString(",", transform = ::triggering)
+                                reply("""{"triggerings":[$encoded],"withoutEffect":0}""")
+                            }
+                            path.endsWith("/hook-rule-triggerings/$id") -> reply(triggering(id))
                             path.endsWith("/hook-rules/$id") && requestBody.get() != null ->
                                 reply(saved(requestBody.get()))
                             path.endsWith("/hook-rules") && request.method == "POST" -> {
@@ -159,7 +165,7 @@ class RulesCreationDeviceTest : RulesCreationCases() {
                         .text("type"),
                 )
                 compose.onNodeWithText("Lancer maintenant").performClick()
-                compose.waitUntil(10000) { ran.get() }
+                compose.waitUntil(10000) { runs.get() == 1 }
                 compose.waitUntil(10000) {
                     compose
                         .onAllNodesWithText("Terminé · 1 actions")
@@ -175,6 +181,14 @@ class RulesCreationDeviceTest : RulesCreationCases() {
                 }
                 compose.onNodeWithText("Ouvrir la conversation").performClick()
                 assertEquals(chatId, opened.get())
+                compose.onNodeWithText("Lancer maintenant").performScrollTo().performClick()
+                compose.waitUntil(10000) {
+                    runs.get() == 2 &&
+                        compose
+                            .onAllNodesWithText("Terminé · 1 actions")
+                            .fetchSemanticsNodes()
+                            .size == 2
+                }
             } finally {
                 ui.close()
             }

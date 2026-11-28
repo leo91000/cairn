@@ -101,7 +101,10 @@ async function toggle(triggering: HookRuleTriggering) {
 }
 
 const ran = computed(() => Object.fromEntries((detail.value?.steps ?? []).map(step => [step.nodeId, step.status])))
-const migratedConversation = computed(() => detail.value?.event?.payload?.migratedConversation)
+const migratedConversation = computed(() => {
+  const event = detail.value?.event
+  return event?.hook === 'clock' && event.instanceId == null ? event.payload?.migratedConversation : null
+})
 const tones: Record<string, string> = {
   success: 'bg-success',
   danger: 'bg-coral',
