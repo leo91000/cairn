@@ -83,6 +83,7 @@ async fn merge_transfers_trash_chats_and_resumable_run_identities() {
         move |db| {
             chat["lifecycle"] = "trash".into();
             chat["trashedAt"] = 1.into();
+            chat["purgeAt"] = (cairn_installation::config::now() + 60_000).into();
             db.save_conversation_boundary(&chat)?;
             db.put_message(&json!({ "id": id(), "chatId": chat["id"], "createdAt": 1, "text": "Keep this message" }))?;
             db.event(run["id"].as_str().unwrap(), &EventKind::Status, "Keep this history", None)?;
@@ -140,11 +141,13 @@ async fn merge_transfers_trash_chats_and_resumable_run_identities() {
         })
         .await
         .unwrap();
-    let resumed = s
-        .worker
-        .resume(&s, run["id"].as_str().unwrap())
-        .await
-        .unwrap();
+    let run_id = run["id"].as_str().unwrap();
+    assert_eq!(
+        s.worker.resume(&s, run_id).await.unwrap_err().status,
+        StatusCode::CONFLICT
+    );
+    s.chat_restore(chat["id"].as_str().unwrap()).await.unwrap();
+    let resumed = s.worker.resume(&s, run_id).await.unwrap();
     assert_eq!(resumed["snapshot"]["agent"]["id"], MAIN_AGENT_ID);
     assert_eq!(resumed["snapshot"]["agent"]["provider"], "claude");
     let reopened = Service::new(common::config(root.path())).await.unwrap();

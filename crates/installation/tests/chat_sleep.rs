@@ -297,14 +297,10 @@ async fn scheduled_continuation_rechecks_permissions_before_reusing_the_workspac
     let detail = f.tick().await;
     assert_eq!(detail["paused"], true);
     assert_eq!(detail["run"]["status"], "succeeded");
-    let error = f
-        .service
-        .store
-        .kv(&format!("chat-error:{}", f.chat))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(error.as_str().unwrap().contains("Agent access was reduced"));
+    assert!(
+        text(&detail, "error").contains("Agent access was reduced"),
+        "{detail}"
+    );
 }
 
 #[tokio::test]

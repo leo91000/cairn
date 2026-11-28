@@ -275,7 +275,7 @@ async fn run_history_includes_the_engine_retries_limits_and_notices() {
     assert_ne!(window["result"]["isError"], true);
     let page = result(&window);
     assert_eq!(page["history"], revision);
-    assert_eq!(page["events"].as_array().unwrap().len(), 4);
+    assert_eq!(page["events"].as_array().unwrap().len(), reports.len());
     let stale = mcp
         .call(
             "read_run_history",
@@ -1906,11 +1906,11 @@ async fn public_questionnaire_answers_preserve_choices_comments_and_withdrawal_a
         endpoint: format!("{origin}/mcp"),
         token: reader,
     };
-    let run = manual_run(&s, "Questionnaire", "Ask about platforms").await;
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = run["id"].clone();
+    let (chat, run) = s
+        .chat_run_fixture(MAIN_AGENT_ID, None, "Ask about platforms")
+        .await
+        .unwrap();
     let chat_id = chat["id"].as_str().unwrap().to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
     let question = "e".repeat(64);
     s.question_receive(
         run["id"].as_str().unwrap(),
@@ -1994,9 +1994,9 @@ async fn public_questionnaire_answers_preserve_choices_comments_and_withdrawal_a
     let repeated = mcp.call("answer_chat_question", input).await;
     assert_eq!(result(&answered), result(&repeated));
     let detail = s.chat_detail(&chat_id).await.unwrap();
-    assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(detail["messages"].as_array().unwrap().len(), 2);
     assert_eq!(
-        detail["messages"][0]["answers"]["platforms"],
+        detail["messages"][1]["answers"]["platforms"],
         json!({
             "selected": [
                 "android",
@@ -2038,7 +2038,7 @@ async fn public_questionnaire_answers_preserve_choices_comments_and_withdrawal_a
             .as_array()
             .unwrap()
             .len(),
-        1
+        2
     );
     server.abort();
 }

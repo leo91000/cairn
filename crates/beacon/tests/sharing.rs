@@ -1624,14 +1624,20 @@ async fn offline_removal_and_reinvitation_do_not_revive_old_hook_rule_commitment
     assert!(retired["nextRun"].is_null(), "{retired}");
 
     // Account access to agents belonged to the earlier membership as well.
-    assert_eq!(
-        request(&relay, &cookie, &session, Method::POST, &rules_path)
-            .json(&json!({ "definition": definition, "enabled": true }))
-            .send()
-            .await
+    let refused = request(&relay, &cookie, &session, Method::POST, &rules_path)
+        .json(&json!({ "definition": definition, "enabled": true }))
+        .send()
+        .await
+        .unwrap();
+    let status = refused.status();
+    let error: Value = refused.json().await.unwrap();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
             .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
+            .contains("access to this agent"),
+        "{error}"
     );
     assert_eq!(
         request(

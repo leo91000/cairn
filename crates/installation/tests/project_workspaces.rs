@@ -48,13 +48,11 @@ async fn fixture() -> (TempDir, Arc<Service>, Vec<Value>) {
     (root, s, projects)
 }
 
-/// Enqueues a conversation run of `agent` on `project`.
-async fn run(s: &Service, project: Value, agent: &str) -> Value {
-    let (_chat, run) = s
-        .chat_run_fixture(agent, project.as_str(), "Hello")
+/// Admits a conversation and returns its linked run.
+async fn run(s: &Service, project: Value, agent: &str) -> (Value, Value) {
+    s.chat_run_fixture(agent, project.as_str(), "Hello")
         .await
-        .unwrap();
-    run
+        .unwrap()
 }
 
 async fn patch_run(s: &Service, run: &Value, patch: Value) {
@@ -94,7 +92,7 @@ fn restricted_agent(name: &str) -> Value {
 #[tokio::test]
 async fn empty_start_does_not_touch_unselected_repositories_and_selected_start_loads_only_one() {
     let (_root, s, projects) = fixture().await;
-    let mut empty = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (_, mut empty) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     // An unavailable, unneeded repository must not prevent a simple chat starting.
     std::fs::remove_dir_all(text(&projects[1], "path")).unwrap();
     let prepared = execution::prepare(&empty, &s.config, &RunCredentials::default(), None, None)
@@ -117,7 +115,7 @@ async fn empty_start_does_not_touch_unselected_repositories_and_selected_start_l
     assert!(plan_prompt.contains("Plan turns cannot import project files"));
     assert!(!plan_prompt.contains("call cairn_workspace.open_project"));
     std::fs::create_dir(text(&projects[1], "path")).unwrap();
-    let selected = run(&s, projects[0]["id"].clone(), MAIN_AGENT_ID).await;
+    let (_, selected) = run(&s, projects[0]["id"].clone(), MAIN_AGENT_ID).await;
     let prepared = execution::prepare(&selected, &s.config, &RunCredentials::default(), None, None)
         .await
         .unwrap();
@@ -150,7 +148,7 @@ async fn managed_resume_does_not_depend_on_unopened_project_sources() {
             } else {
                 Value::Null
             };
-            let mut run = run(&s, project, MAIN_AGENT_ID).await;
+            let (_, mut run) = run(&s, project, MAIN_AGENT_ID).await;
             run["snapshot"]["agent"]["access"]["backend"] = backend.into();
             let prepared =
                 execution::prepare(&run, &s.config, &RunCredentials::default(), None, None)
@@ -244,7 +242,7 @@ async fn scoped_access_rejects_other_projects_expired_grants_and_reduced_permiss
     restricted["access"]["projects"] = json!([projects[0]["id"]]);
     restricted["access"]["sandbox"] = "read-only".into();
     let agent = s.agent_fixture(restricted, None).await.unwrap();
-    let run = run(&s, Value::Null, text(&agent, "id")).await;
+    let (_, run) = run(&s, Value::Null, text(&agent, "id")).await;
     patch_run(&s, &run, json!({ "status": RunStatus::Running })).await;
     let config = s.mcps.run_configuration(&s, &run).await.unwrap();
     assert!(config["codexConfig"].get("cairn_workspace").is_some());
@@ -305,7 +303,7 @@ async fn open_imports_once_reuses_seed_and_restores_loaded_catalog_without_check
     .await;
     let server = common::serve(listener, router);
     let s = &service;
-    let run = run(s, Value::Null, MAIN_AGENT_ID).await;
+    let (_, run) = run(s, Value::Null, MAIN_AGENT_ID).await;
     let prepared = execution::prepare(&run, &s.config, &RunCredentials::default(), None, None)
         .await
         .unwrap();
@@ -371,7 +369,7 @@ async fn open_reports_import_timeout_and_retries_with_the_preserved_seed() {
         None,
     ] {
         let (_root, mut service, projects) = fixture().await;
-        let run = run(&service, Value::Null, MAIN_AGENT_ID).await;
+        let (_, run) = run(&service, Value::Null, MAIN_AGENT_ID).await;
         let project = text(&projects[0], "id").to_owned();
         let attempt = id();
         let credential = execution::secret(&service.config.data_dir, "runner-secret")
@@ -506,18 +504,18 @@ async fn delivered_message_retains_its_original_submission_timestamp() {
         .chat_create(json!({ "agentId": MAIN_AGENT_ID }))
         .await
         .unwrap();
-    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let chat_id = text(&chat, "id");
     let message = s
-        .chat_send(text(&chat, "id"), json!({ "id": id(), "text": "Hello" }))
+        .chat_send(chat_id, json!({ "id": id(), "text": "Hello" }))
         .await
         .unwrap();
-    let mut chat = s.conversation_boundary(text(&chat, "id")).await.unwrap();
-    chat["runId"] = run["id"].clone();
-    s.store.save_conversation_boundary(chat).await.unwrap();
-    s.chat_acknowledge(text(&run, "id"), text(&message, "id"))
+    s.chat_tick(&Default::default()).await.unwrap();
+    let chat = s.chat_detail(chat_id).await.unwrap();
+    let run = &chat["run"];
+    s.chat_acknowledge(text(run, "id"), text(&message, "id"))
         .await
         .unwrap();
-    let run_id = text(&run, "id").to_owned();
+    let run_id = text(run, "id").to_owned();
     let events = s
         .store
         .read(move |db| db.events_fixture(&run_id, 0, 100))
@@ -542,7 +540,7 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
         .await
         .unwrap();
     });
-    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (_, run) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     let token = &running_run_token(&s, &run).await;
     let client = reqwest::Client::new();
     let endpoint = format!("{url}/mcp-workspace");
@@ -662,7 +660,7 @@ fn tool_names(listing: &Value) -> Vec<String> {
 #[tokio::test]
 async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
     let (_root, s, _) = fixture().await;
-    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (chat, run) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     let planning = json!({ "messageId": "plan-message", "text": "Plan", "plan": true });
     patch_run(
         &s,
@@ -718,10 +716,7 @@ async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
     assert!(!pending.to_string().contains("plan turn"), "{pending}");
 
     // A plan turn can ask the user; the answer continues the plan, never implementation.
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = run["id"].clone();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
     let ask = |request: &str| {
         json!({
             "name": "ask_questions",
@@ -800,7 +795,7 @@ async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
 #[tokio::test]
 async fn seed_cleanup_does_not_follow_repository_symlinks_outside_its_private_copy() {
     let (root, s, projects) = fixture().await;
-    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (_, run) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     let prepared = execution::prepare(&run, &s.config, &RunCredentials::default(), None, None)
         .await
         .unwrap();
@@ -1055,7 +1050,7 @@ async fn partial_clone_missing_blobs_are_fetched_from_the_real_promisor() {
 #[tokio::test]
 async fn outcome_is_explicit_validated_and_rejected_after_run_revocation() {
     let (_root, s, _) = fixture().await;
-    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (_, run) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     let bearer = &running_run_token(&s, &run).await;
     let input = json!({
         "status": "blocked",
@@ -1099,7 +1094,7 @@ async fn outcome_is_explicit_validated_and_rejected_after_run_revocation() {
 #[tokio::test]
 async fn an_old_message_grant_cannot_report_an_outcome_for_a_new_turn() {
     let (_root, s, _) = fixture().await;
-    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (_, run) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     patch_run(
         &s,
         &run,
@@ -1189,7 +1184,7 @@ async fn isolated_commits_keep_the_configured_owner_for_main_and_restricted_agen
         .await
         .unwrap();
     for agent_id in [MAIN_AGENT_ID, text(&agent, "id")] {
-        let run = run(&s, Value::Null, agent_id).await;
+        let (_, run) = run(&s, Value::Null, agent_id).await;
         let prepared = execution::prepare(&run, &s.config, &RunCredentials::default(), None, None)
             .await
             .unwrap();
@@ -1231,7 +1226,7 @@ async fn isolated_commits_fall_back_to_the_granted_plugin_account() {
     ] {
         github.state(&json!({ "user": { "id": 12345, "login": "owner-login", "name": name } }));
         let instance = common::github::instance(&s, expected, "fixture-token", &[agent_id]).await;
-        let run = run(&s, Value::Null, agent_id).await;
+        let (_, run) = run(&s, Value::Null, agent_id).await;
         let home = run_home(&s, &run);
         std::fs::create_dir_all(&home).unwrap();
         // Also cover replacing the synthetic identity when preparation is retried.
@@ -1261,7 +1256,7 @@ async fn isolated_commits_fall_back_to_the_granted_plugin_account() {
 #[tokio::test]
 async fn missing_account_identity_never_fabricates_an_agent_author() {
     let (_root, s, _) = fixture().await;
-    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (_, run) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     let home = run_home(&s, &run);
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(
@@ -1291,12 +1286,9 @@ async fn missing_account_identity_never_fabricates_an_agent_author() {
 #[tokio::test]
 async fn question_tools_only_withdraw_the_authorized_conversations_pending_questions() {
     let (_root, s, _) = fixture().await;
-    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (chat, run) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     let bearer = running_run_token(&s, &run).await;
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = run["id"].clone();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
     let question = "a".repeat(64);
     s.question_receive(text(&run, "id"), json!({
         "id": question, "blocking": true, "fields": [{ "id": "scope", "title": "Still needed?" }],
@@ -1357,12 +1349,9 @@ async fn question_tools_only_withdraw_the_authorized_conversations_pending_quest
 #[tokio::test]
 async fn common_questionnaires_are_idempotent_and_keep_choices_distinct_from_comments() {
     let (_root, s, _) = fixture().await;
-    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (chat, run) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     let bearer = running_run_token(&s, &run).await;
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = run["id"].clone();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
     let input = json!({
         "requestId": id(),
         "questions": [
@@ -1450,27 +1439,24 @@ async fn common_questionnaires_are_idempotent_and_keep_choices_distinct_from_com
         .await
         .unwrap();
     let detail = s.chat_detail(&chat_id).await.unwrap();
-    assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(detail["messages"].as_array().unwrap().len(), 2);
     assert_eq!(
-        detail["messages"][0]["answers"]["platforms"]["selected"],
+        detail["messages"][1]["answers"]["platforms"]["selected"],
         json!(["android", "web",])
     );
     assert_eq!(
-        detail["messages"][0]["answers"]["platforms"]["comment"],
+        detail["messages"][1]["answers"]["platforms"]["comment"],
         "Android first"
     );
-    assert!(text(&detail["messages"][0], "text").contains("Android first"));
+    assert!(text(&detail["messages"][1], "text").contains("Android first"));
 }
 
 #[tokio::test]
 async fn common_questionnaires_validate_bounds_complete_groups_and_text_only_alternatives() {
     let (_root, s, _) = fixture().await;
-    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (chat, run) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     let bearer = running_run_token(&s, &run).await;
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = run["id"].clone();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
     let input = json!({
         "requestId": id(),
         "questions": [
@@ -1620,7 +1606,7 @@ async fn common_questionnaires_validate_bounds_complete_groups_and_text_only_alt
         .unwrap();
     let detail = s.chat_detail(&chat_id).await.unwrap();
     assert_eq!(
-        detail["messages"][0]["answers"]["platforms"],
+        detail["messages"][1]["answers"]["platforms"],
         json!({
             "selected": [],
             "comment": "Another idea",
@@ -1664,7 +1650,7 @@ async fn common_questionnaires_validate_bounds_complete_groups_and_text_only_alt
             .any(|q| q["id"] == pending["structuredContent"]["questionId"]
                 && q["status"] == "cancelled")
     );
-    assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(detail["messages"].as_array().unwrap().len(), 2);
     patch_run(
         &s,
         &run,
@@ -1694,12 +1680,9 @@ async fn common_questionnaires_validate_bounds_complete_groups_and_text_only_alt
 #[tokio::test]
 async fn valid_large_choice_answers_use_the_questionnaire_delivery_budget() {
     let (_root, s, _) = fixture().await;
-    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (chat, run) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     let bearer = running_run_token(&s, &run).await;
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = run["id"].clone();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
     let options = (0..30)
         .map(|i| {
             json!({
@@ -1743,7 +1726,7 @@ async fn valid_large_choice_answers_use_the_questionnaire_delivery_budget() {
     .await
     .unwrap();
     let detail = s.chat_detail(&chat_id).await.unwrap();
-    assert!(text(&detail["messages"][0], "text").len() > 50_000);
+    assert!(text(&detail["messages"][1], "text").len() > 50_000);
     let mut other = field.clone();
     other["id"] = "other".into();
     let oversized =
@@ -1756,12 +1739,12 @@ async fn valid_large_choice_answers_use_the_questionnaire_delivery_budget() {
 #[tokio::test]
 async fn concurrent_large_questionnaire_responses_are_delivered_in_bounded_batches() {
     let (_root, s, _) = fixture().await;
-    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (chat, run) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     running_run_token(&s, &run).await;
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = run["id"].clone();
+    s.chat_acknowledge(text(&run, "id"), text(&run["chatExecution"], "messageId"))
+        .await
+        .unwrap();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
     let fields = (0..20)
         .map(|i| {
             json!({
@@ -1830,7 +1813,7 @@ async fn concurrent_large_questionnaire_responses_are_delivered_in_bounded_batch
 #[tokio::test]
 async fn plan_question_can_be_retired_after_chat_clarification_without_answer_or_authorization() {
     let (_root, s, _) = fixture().await;
-    let original = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let (chat, original) = run(&s, Value::Null, MAIN_AGENT_ID).await;
     patch_run(
         &s,
         &original,
@@ -1842,10 +1825,7 @@ async fn plan_question_can_be_retired_after_chat_clarification_without_answer_or
     .await;
     let current = s.store.run(text(&original, "id")).await.unwrap();
     let token = run_token(&s, &current).await;
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = current["id"].clone();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
     let asked = workspace_rpc(&s, &token, "tools/call", json!({
         "name": "ask_questions", "arguments": {
             "requestId": id(),
@@ -1902,7 +1882,7 @@ async fn plan_question_can_be_retired_after_chat_clarification_without_answer_or
 async fn plan_policy_read_failure_cannot_write_outcome_or_dispatch_plugin_command() {
     for plugin in [false, true] {
         let (_root, s, _) = fixture().await;
-        let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+        let (_, run) = run(&s, Value::Null, MAIN_AGENT_ID).await;
         patch_run(
             &s,
             &run,

@@ -126,51 +126,6 @@ async fn domain_changes_still_commit_when_lifecycle_fields_are_unchanged() {
         .await
         .unwrap();
     let mut changes = store.subscribe();
-    let wakeup = serde_json::from_value(json!({
-        "id": "wait", "messageId": null, "reason": "Synthetic wait",
-        "seconds": 60, "createdAt": 0, "wakeAt": 60000,
-    }))
-    .unwrap();
-    store
-        .change_run(
-            "run",
-            RunChanges {
-                wakeup: Some(Some(wakeup)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert!(
-        store
-            .read(|db| db.wakeup(false, "run"))
-            .await
-            .unwrap()
-            .is_some()
-    );
-    assert!(changes.has_changed().unwrap());
-    changes.borrow_and_update();
-
-    store
-        .change_run(
-            "run",
-            RunChanges {
-                wakeup: Some(None),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert!(
-        store
-            .read(|db| db.wakeup(false, "run"))
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(changes.has_changed().unwrap());
-    changes.borrow_and_update();
-
     let lifecycle = store
         .change_run(
             "run",
