@@ -937,7 +937,12 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         "INSERT INTO run_checkpoints(run_id,state) VALUES(?1,?2)",
         params![
             waiting_run_id,
-            json!({ "launched": true, "completed": true }).to_string()
+            json!({
+                "launched": true,
+                "completed": true,
+                "runnerId": "legacy-controller-attempt",
+            })
+            .to_string(),
         ],
     )
     .unwrap();
@@ -1532,6 +1537,36 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let detail = service.chat_detail(&waiting_chat_id).await.unwrap();
     assert_eq!(detail["run"]["chatExecution"]["messageId"], "legacy-turn");
     assert_eq!(detail["wakeup"]["messageId"], "legacy-turn");
+    assert_eq!(detail["run"]["recoveryPending"], true);
+    service
+        .chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let fenced = service.chat_detail(&waiting_chat_id).await.unwrap();
+    assert_eq!(fenced["status"], "succeeded");
+    assert_eq!(fenced["wakeup"]["id"], "w1");
+
+    // The fixture runs without a worker. Model completion of controller
+    // fencing before checking wakeup admission.
+    let fenced_id = waiting_run_id.clone();
+    service
+        .store
+        .transaction(move |db| {
+            db.0.execute(
+                "UPDATE run_checkpoints SET state=json_remove(state,'$.runnerId') WHERE run_id=?",
+                [&fenced_id],
+            )?;
+            db.change_run(
+                &fenced_id,
+                cairn_installation::runs::RunChanges {
+                    recovery_pending: Some(false),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     service
         .chat_tick(&std::collections::HashSet::new())
         .await

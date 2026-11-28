@@ -61,7 +61,7 @@ listener on a dedicated handler thread, attached only while the activity is star
 Screen/swipe attribution reflects the category when a callback is processed, so
 frames at navigation boundaries can fall into either adjacent category. These are
 diagnostics, not a replacement for a release-build Perfetto trace on the affected phone.
-The mixed Fil pager reports the settled page's conversation or mission category,
+The Fil pager reports the settled conversation page's category,
 including when a swipe does not change the original navigation route.
 
 ## Regressions addressed
@@ -107,7 +107,7 @@ Tests in `PerformanceStoreTest` cover refresh-rate deadlines, frozen frames, bou
 retention, reset, percentile bounds and concurrent collectors.
 `PerformanceUploaderTest` exercises restarted foreground/opt-in collections and
 cancelled requests with a virtual clock. `FilPagerDeviceTest` checks screen
-attribution while swiping between missions and conversations and returning to Fil.
+attribution while swiping between conversations and returning to Fil.
 These synthetic workloads do not measure production network latency or performance
 on the affected physical phone.
 

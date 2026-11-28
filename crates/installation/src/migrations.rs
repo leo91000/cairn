@@ -652,8 +652,11 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             });
             // Older mission processes used the saved turn id without a conversation
             // message. Preserve that id in the conversation, wakeup and checkpoint.
+            // A v38 worker committed Waiting before releasing the controller.
+            // Keep the recovery gate until the previous attempt is fenced.
             tx.execute(
             "UPDATE runs SET task_id=?1,trigger='chat', \
+             recovery_pending=CASE WHEN status='waiting' AND ?2 THEN 1 ELSE recovery_pending END, \
              status=CASE WHEN status='waiting' AND ?2 THEN 'succeeded' ELSE status END, \
              finished_at=CASE WHEN status='waiting' AND ?2 THEN coalesce(finished_at,?3) ELSE finished_at END, \
              boundary=json_set(boundary,'$.chatExecution',json(?4),'$.sourceTaskId',?5, \
