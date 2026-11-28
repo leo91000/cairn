@@ -510,8 +510,10 @@ pub(crate) fn requeue(
         })
     } else {
         expected_turn_id.is_some_and(|expected| {
-            run["chatExecution"]["messageId"].as_str() != Some(expected)
-                && run["missionTurnId"].as_str() != Some(expected)
+            run["chatExecution"]["messageId"]
+                .as_str()
+                .or_else(|| run["missionTurnId"].as_str())
+                != Some(expected)
         })
     };
     if turn_mismatch {

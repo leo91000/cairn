@@ -6,11 +6,12 @@
 Web et Android ouvrent **Programmer un agent** depuis les Règles. Le formulaire
 choisit l’agent, le projet, le brief et un cron à cinq champs ou une date unique
 avec fuseau IANA. Android utilise les sélecteurs natifs de date et d’heure.
+Les deux éditeurs prévisualisent les prochaines dates d’un cron dans son fuseau.
 Le formulaire crée une règle Horloge avec une condition de chevauchement que
 l’éditeur complet peut modifier. **Lancer maintenant** apparaît lorsque le
 serveur l’autorise et ouvre l’historique de la règle.
-Sur les deux plateformes, cet historique donne accès aux conversations issues
-des anciens runs de la mission.
+Sur les deux plateformes, cet historique ouvre les conversations lancées par la
+règle et celles issues des anciens runs de la mission.
 
 Le Fil montre l’origine des conversations programmées, les résultats bloqués
 et les questions. **Reporter jusqu’à**, **Rétablir** et **Marquer comme lu**

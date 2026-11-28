@@ -1181,7 +1181,8 @@ fn migrated_view(
         String,
     ) = db.0.query_row(
         "SELECT h.created_at,
-               coalesce(json_extract(h.origin,'$.legacyRun.finishedAt'),r.finished_at),
+               CASE WHEN json_extract(h.origin,'$.legacyRun.status') IS NOT NULL
+                    THEN json_extract(h.origin,'$.legacyRun.finishedAt') ELSE r.finished_at END,
                coalesce(json_extract(h.origin,'$.legacyRun.status'),r.status,'interrupted'),
                c.title,c.slug,h.agent_id
              FROM hook_rule_conversations h JOIN conversations c ON c.id=h.chat_id

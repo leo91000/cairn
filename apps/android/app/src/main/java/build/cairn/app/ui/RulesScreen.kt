@@ -808,6 +808,16 @@ internal fun RuleHistoryPanel(
                                         step.text("error"),
                                         color = MaterialTheme.colorScheme.error,
                                     )
+                                val started = step.obj("result").text("conversationId")
+                                if (
+                                    step.text("kind") == "startAgent" &&
+                                        step.text("status") == "completed" &&
+                                        started.isNotBlank()
+                                ) {
+                                    TextButton(onClick = { openConversation(started) }) {
+                                        Text("Ouvrir la conversation")
+                                    }
+                                }
                                 RuleDataDisclosure("Entrée", step.jsonObject["input"])
                                 RuleDataDisclosure("Résultat", step.jsonObject["result"])
                             }

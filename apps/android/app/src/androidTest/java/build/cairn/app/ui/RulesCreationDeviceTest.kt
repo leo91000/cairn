@@ -23,8 +23,19 @@ class RulesCreationDeviceTest : RulesCreationCases() {
     @Test
     fun quickScheduleCreatesAnEditableClockRuleAndRunsItNow() {
         val requestBody = AtomicReference<JsonObject>()
+        val previewBody = AtomicReference<JsonObject>()
         val ran = AtomicBoolean(false)
+        val opened = AtomicReference<String>()
         val id = "00000000-0000-4000-8000-000000000020"
+        val chatId = "00000000-0000-4000-8000-000000000021"
+        val triggering =
+            """
+            {"id":"$id","ruleId":"$id","version":1,"status":"completed","createdAt":1,
+             "updatedAt":1,"actions":1,"detailsVisible":true,
+             "steps":[{"nodeId":"start_agent","label":"","kind":"startAgent","status":"completed",
+             "result":{"conversationId":"$chatId"},"attempts":1,"startedAt":1}]}
+        """
+                .trimIndent()
         val catalog =
             rootSchemaCatalog()
                 .copy(
@@ -56,12 +67,21 @@ class RulesCreationDeviceTest : RulesCreationCases() {
                         return when {
                             path.endsWith("/hook-rules/catalog") ->
                                 reply(wireJson.encodeToString(catalog))
-                            path.endsWith("/hook-rules/$id/run") -> {
-                                ran.set(true)
+                            path.endsWith("/hook-rules/schedule/preview") -> {
+                                previewBody.set(
+                                    wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
+                                )
                                 reply(
-                                    """{"id":"$id","ruleId":"$id","version":1,"status":"completed","createdAt":1,"updatedAt":1,"steps":[],"actions":0,"detailsVisible":true}"""
+                                    """{"timezone":"Europe/Paris","occurrences":[1796000000000]}"""
                                 )
                             }
+                            path.endsWith("/hook-rules/$id/run") -> {
+                                ran.set(true)
+                                reply(triggering)
+                            }
+                            path.endsWith("/hook-rules/$id/triggerings") ->
+                                reply("""{"triggerings":[$triggering],"withoutEffect":0}""")
+                            path.endsWith("/hook-rule-triggerings/$id") -> reply(triggering)
                             path.endsWith("/hook-rules/$id") && requestBody.get() != null ->
                                 reply(saved(requestBody.get()))
                             path.endsWith("/hook-rules") && request.method == "POST" -> {
@@ -99,7 +119,10 @@ class RulesCreationDeviceTest : RulesCreationCases() {
                         vm.connect(origin)
                     }
                     val state by vm.state.collectAsState()
-                    if (state.installation != null) CairnTheme { RulesScreen(vm, state, edit = {}) }
+                    if (state.installation != null)
+                        CairnTheme {
+                            RulesScreen(vm, state, openConversation = { opened.set(it) }, edit = {})
+                        }
                 }
                 compose.waitUntil(15000) {
                     compose
@@ -110,6 +133,12 @@ class RulesCreationDeviceTest : RulesCreationCases() {
                 compose.onNodeWithText("Programmer un agent").performClick()
                 compose.onNodeWithText("Nom").performTextInput("Revue du matin")
                 compose.onNodeWithText("Brief").performTextInput("Examiner les changements.")
+                compose
+                    .onNodeWithText("Prévisualiser les prochaines dates")
+                    .performScrollTo()
+                    .performClick()
+                compose.waitUntil(10000) { previewBody.get() != null }
+                assertEquals("0 9 * * *", previewBody.get().text("cron"))
                 compose.onNodeWithText("Créer la programmation").performClick()
                 compose.waitUntil(15000) {
                     compose
@@ -131,6 +160,21 @@ class RulesCreationDeviceTest : RulesCreationCases() {
                 )
                 compose.onNodeWithText("Lancer maintenant").performClick()
                 compose.waitUntil(10000) { ran.get() }
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Terminé · 1 actions")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Terminé · 1 actions").performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Ouvrir la conversation")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Ouvrir la conversation").performClick()
+                assertEquals(chatId, opened.get())
             } finally {
                 ui.close()
             }

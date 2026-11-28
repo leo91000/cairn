@@ -10,6 +10,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -26,12 +27,16 @@ import build.cairn.contracts.HookRuleTrigger
 import build.cairn.contracts.ReplaceHookRuleInput
 import build.cairn.contracts.RuleCondition
 import build.cairn.contracts.RuleNode
+import build.cairn.contracts.SchedulePreviewInput
 import build.cairn.contracts.createHookRule
+import build.cairn.contracts.previewSchedule
 import build.cairn.contracts.replaceHookRule
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -92,11 +97,17 @@ private fun DateAndTime(
 @Composable
 internal fun ClockScheduleFields(
     initial: HookRuleTrigger.C,
+    api: CairnApi? = null,
     changed: (HookRuleTrigger.C) -> Unit,
 ) {
     var recurring by rememberSaveable { mutableStateOf(initial.cron != null) }
     var cron by rememberSaveable { mutableStateOf(initial.cron ?: "0 9 * * *") }
     var timezone by rememberSaveable { mutableStateOf(initial.timezone) }
+    val scope = rememberCoroutineScope()
+    var previews by
+        remember(recurring, cron, timezone, api) { mutableStateOf<List<String>>(emptyList()) }
+    var previewError by remember(recurring, cron, timezone, api) { mutableStateOf("") }
+    var previewing by remember(recurring, cron, timezone, api) { mutableStateOf(false) }
     var date by rememberSaveable {
         val zone = runCatching { ZoneId.of(timezone) }.getOrDefault(ZoneId.systemDefault())
         val value = initial.at?.let { Instant.ofEpochMilli(it).atZone(zone).toLocalDateTime() }
@@ -154,6 +165,37 @@ internal fun ClockScheduleFields(
         label = { Text("Fuseau horaire (IANA)") },
         singleLine = true,
     )
+    if (recurring && api != null) {
+        OutlinedButton(
+            enabled = !previewing && cron.isNotBlank() && timezone.isNotBlank(),
+            onClick = {
+                val input = SchedulePreviewInput(cron = cron.trim(), timezone = timezone.trim())
+                scope.launch {
+                    previewing = true
+                    previewError = ""
+                    previews = emptyList()
+                    try {
+                        val result = api.previewSchedule(input)
+                        val zone = ZoneId.of(result.timezone)
+                        val formatter = DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM)
+                        previews =
+                            result.occurrences.map {
+                                formatter.format(Instant.ofEpochMilli(it).atZone(zone))
+                            }
+                    } catch (error: Exception) {
+                        if (error is CancellationException) throw error
+                        previewError = error.message.orEmpty()
+                    } finally {
+                        previewing = false
+                    }
+                }
+            },
+        ) {
+            Text("Prévisualiser les prochaines dates")
+        }
+        if (previewError.isNotBlank()) Text(previewError)
+        previews.forEach { Text(it) }
+    }
 }
 
 @Composable
@@ -225,7 +267,7 @@ internal fun ScheduleAgentDialog(
                     label = { Text("Brief") },
                     minLines = 3,
                 )
-                ClockScheduleFields(trigger) { triggerJson = wireJson.encodeToString(it) }
+                ClockScheduleFields(trigger, vm.api) { triggerJson = wireJson.encodeToString(it) }
                 if (error.isNotBlank()) Text(error)
             }
         },

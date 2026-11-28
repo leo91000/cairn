@@ -522,7 +522,8 @@ fun RuleEditorScreen(
                             if (clock != null)
                                 key(original, clockFieldsGeneration) {
                                     ClockScheduleFields(
-                                        wireJson.decodeFromJsonElement<HookRuleTrigger.C>(clock)
+                                        wireJson.decodeFromJsonElement<HookRuleTrigger.C>(clock),
+                                        vm.api,
                                     ) {
                                         update(
                                             definition.patch(

@@ -172,9 +172,9 @@ fn rebuild_rule_tables(tx: &Connection) -> Result<()> {
           fired_at INTEGER CHECK(fired_at BETWEEN 0 AND 9007199254740991),
           legacy_chain_depth INTEGER NOT NULL DEFAULT 0 CHECK(legacy_chain_depth BETWEEN 0 AND 8)
          ) WITHOUT ROWID;
-         CREATE INDEX IF NOT EXISTS hook_rule_schedules_due ON hook_rule_schedules(next_run) WHERE next_run IS NOT NULL;
-         CREATE INDEX IF NOT EXISTS hook_rule_conversations_rule ON hook_rule_conversations(rule_id);",
+         CREATE INDEX IF NOT EXISTS hook_rule_schedules_due ON hook_rule_schedules(next_run) WHERE next_run IS NOT NULL;",
     )?;
+    tx.execute_batch(crate::rules::engine::conversations::SCHEMA)?;
     Ok(())
 }
 
@@ -993,8 +993,13 @@ fn link_converted_mission_runs(
     known_owner: Option<&str>,
 ) -> Result<()> {
     let mut converted = tx.prepare(
-        "SELECT c.id,c.agent_id,c.created_at,r.id,json_extract(r.boundary,'$.sourceTaskId'), \
-            coalesce(nullif(r.task_name,''),c.title), r.status, r.finished_at \
+        "SELECT c.id,c.agent_id,r.created_at,r.id,json_extract(r.boundary,'$.sourceTaskId'), \
+            coalesce(nullif(r.task_name,''),c.title), \
+            coalesce(\
+                (SELECT e.created_at FROM events e WHERE e.run_id=r.id \
+                 AND e.type='status' AND e.text='succeeded' ORDER BY e.id LIMIT 1), \
+                CASE WHEN r.status='succeeded' AND json_type(r.boundary,'$.chatExecution') IS NULL \
+                     THEN r.finished_at END) \
          FROM conversations c JOIN runs r ON r.id=c.run_id \
          WHERE r.trigger='chat' AND json_type(r.boundary,'$.sourceTaskId')='text'",
     )?;
@@ -1023,14 +1028,14 @@ fn link_converted_mission_runs(
         let agent_id: String = row.get(1)?;
         let created_at: i64 = row.get(2)?;
         let run_id: String = row.get(3)?;
-        let status: String = row.get(6)?;
-        let finished_at: Option<i64> = row.get(7)?;
+        let finished_at: Option<i64> = row.get(6)?;
         let origin = json!({
             "hook": "clock",
             "ruleName": rule_name,
             "schedule": true,
             "legacyRun": {
-                "status": finished_at.map(|_| status),
+                // The v38 converter admitted only successful mission runs.
+                "status": "succeeded",
                 "finishedAt": finished_at,
             },
         });

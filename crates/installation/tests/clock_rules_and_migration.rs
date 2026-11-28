@@ -963,6 +963,8 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
 
     conn.execute_batch(
         "DROP TABLE IF EXISTS hook_rule_schedules;
+         DROP INDEX IF EXISTS hook_rule_migrated_history;
+         DROP INDEX IF EXISTS hook_rule_conversations_rule;
          DROP TABLE IF EXISTS account_snoozes;
          DROP TABLE IF EXISTS account_reads;
          DROP TABLE IF EXISTS wait_conditions;
@@ -1289,18 +1291,26 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     }
 
     let converted_run = id();
+    let original_run_created_at = t0 - 86_400_000;
+    let original_run_finished_at = original_run_created_at + 1000;
     conn.execute(
         "INSERT INTO runs(id,task_id,status,trigger,created_at,finished_at,snapshot,boundary, \
           recovery_pending,resume_available,resume_count) \
-         VALUES(?1,?2,'succeeded','chat',?3,?3,?4,?5,0,0,0)",
+         VALUES(?1,?2,'failed','chat',?3,?4,?5,?6,0,0,0)",
         params![
             converted_run,
             regular_chat_id,
-            t0,
+            original_run_created_at,
+            t0 + 1000,
             json!({ "agent": agent, "task": { "name": "Existing chat", "prompt": "Old brief", "worktree": false } }).to_string(),
             json!({ "sourceTaskId": active_mission_id, "sourceTaskPrompt": "Old brief" }).to_string(),
         ],
     ).unwrap();
+    conn.execute(
+        "INSERT INTO events(run_id,created_at,type,text) VALUES(?1,?2,'status','succeeded')",
+        params![converted_run, original_run_finished_at],
+    )
+    .unwrap();
     conn.execute(
         "UPDATE conversations SET run_id=?1 WHERE id=?2",
         params![converted_run, regular_chat_id],
@@ -1544,6 +1554,13 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .unwrap();
     assert_eq!(next_run, Some(t0));
     assert_eq!(legacy_depth, 8);
+    assert!(
+        migrated.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='hook_rule_migrated_history')",
+            [],
+            |row| row.get::<_, bool>(0),
+        ).unwrap()
+    );
     assert!(
         migrated
             .query_row(
@@ -2075,6 +2092,22 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
 
     let app = router(service.clone()).await.unwrap();
     let owner = RelayContext::new(&common::relay_fixture::context(&service).await);
+    let stale_resume = owner
+        .authorize(common::request(
+            "POST",
+            &format!("/api/runs/{waiting_run_id}/resume"),
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"turnId":"legacy-turn"}"#))
+        .unwrap();
+    let response = common::send(&app, stale_resume).await;
+    let status = response.status();
+    let refusal = common::read_json(response).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert!(
+        text(&refusal, "error").contains("This turn changed"),
+        "{refusal}"
+    );
     let member =
         RelayContext::new(&common::relay_fixture::member_context(&service, "history-reader").await);
     let history = format!("/api/hook-rules/{active_mission_id}/triggerings");
@@ -2110,4 +2143,12 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let hidden = get(&member, &entry).await;
     assert_eq!(hidden["detailsVisible"], false);
     assert!(hidden["event"].is_null());
+    let converted_entry = get(
+        &owner,
+        &format!("/api/hook-rule-triggerings/{regular_chat_id}"),
+    )
+    .await;
+    assert_eq!(converted_entry["status"], "completed");
+    assert_eq!(converted_entry["createdAt"], original_run_created_at);
+    assert_eq!(converted_entry["finishedAt"], original_run_finished_at);
 }

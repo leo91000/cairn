@@ -202,6 +202,13 @@ const pretty = (value: unknown) => JSON.stringify(value, null, 2)
               <p v-if="step.error" class="m-0! mt-1! text-xs text-coral">
                 {{ step.error }}
               </p>
+              <RouterLink
+                v-if="step.kind === 'startAgent' && step.status === 'completed' && typeof step.result?.conversationId === 'string'"
+                :to="`/chats/${encodeURIComponent(step.result.conversationId)}`"
+                class="mt-2 inline-block text-sm font-semibold text-accent hover:underline"
+              >
+                Open conversation
+              </RouterLink>
               <details v-if="step.input !== undefined && step.input !== null" class="mt-2">
                 <summary class="cursor-pointer text-xs font-semibold text-muted">
                   Input
