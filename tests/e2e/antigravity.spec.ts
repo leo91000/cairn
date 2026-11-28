@@ -139,6 +139,7 @@ test('Antigravity connects a Gemini API key, selects a model and runs a conversa
 
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('fixture:agy-unknown-429 Verify an ambiguous refusal.')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run?.status, { timeout: 30000 }).toBe('failed')
   const refusal = page.getByRole('status', { name: 'Antigravity refused the request (429)' })
   await expect(refusal.getByRole('button', { name: 'Resume conversation' })).toBeVisible()
   await expect(page.getByRole('status', { name: 'Coding agent quota reached' })).toHaveCount(0)

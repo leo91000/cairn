@@ -1153,6 +1153,46 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
             }).to_string(),
         ],
     ).unwrap();
+    let mut antigravity_retries = Vec::new();
+    for startup in [false, true] {
+        let retry_run = id();
+        let mut profile = agent.clone();
+        profile["provider"] = "antigravity".into();
+        let session = (!startup).then_some("saved-antigravity-session");
+        conn.execute(
+            "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,snapshot,boundary,
+              recovery_pending,resume_available,resume_count,session_id,retry_attempt,retry_limit,
+              retry_next_at,retry_cause)
+             VALUES(?1,?2,'queued','schedule',?3,?3,?4,'{}',1,1,0,?5,1,5,?6,?7)",
+            params![
+                retry_run,
+                id(),
+                t0 + 8_500,
+                json!({ "agent": profile, "task": { "name": "Antigravity retry",
+                    "prompt": "Prepare the original report." } })
+                .to_string(),
+                session,
+                t0 + 60_000,
+                json!({ "kind": "rate-limit", "message": "Provider capacity", "startup": startup })
+                    .to_string(),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO run_checkpoints(run_id,state) VALUES(?1,?2)",
+            params![
+                retry_run,
+                json!({
+                    "launched": true,
+                    "launchedTurn": retry_run,
+                    "antigravityPaidTurn": if startup { None } else { Some(retry_run.as_str()) }
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+        antigravity_retries.push(retry_run);
+    }
 
     let converted_run = id();
     conn.execute(
@@ -1636,6 +1676,27 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         )
         .unwrap();
     assert!(continuation.contains("Wait for the CI") && continuation.contains("succeeded"));
+    for retry_run in &antigravity_retries {
+        let run = cairn_installation::store::Db(&migrated)
+            .run(retry_run)
+            .unwrap()
+            .unwrap();
+        let plan = cairn_installation::run_output::chat_plan(
+            &run,
+            &json!({ "cwd": "/fixture/workspace", "output": "/fixture/output/events.json" }),
+            dir.path(),
+            &json!({}),
+            run["sessionId"].as_str(),
+        )
+        .unwrap();
+        assert_eq!(plan["execution"]["messageId"], *retry_run);
+        assert_eq!(
+            plan["execution"]["text"],
+            "Task brief:\nPrepare the original report."
+        );
+        assert_eq!(plan["execution"]["recovery"], false);
+        assert_eq!(run["retry"]["nextAttemptAt"], t0 + 60_000);
+    }
     let interrupted: (bool, String, String) = migrated
         .query_row(
             "SELECT json_extract(r.boundary,'$.chatExecution.recovery'), \
