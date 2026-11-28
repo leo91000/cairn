@@ -2,7 +2,7 @@ import {
   expect,
   expectSingleScroll,
   signIn,
-  test,
+  isolatedWorkspaceTest as test,
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
