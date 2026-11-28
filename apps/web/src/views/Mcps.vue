@@ -24,6 +24,7 @@ import {
 } from '../api'
 import Empty from '../components/Empty.vue'
 import Icon from '../components/Icon.vue'
+import MenuButton from '../components/MenuButton.vue'
 import Modal from '../components/Modal.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
@@ -36,6 +37,7 @@ import {
   KeyRound,
   LoaderCircle,
   MoreHorizontal,
+  Pencil,
   Plus,
   Search,
   Server,
@@ -305,19 +307,20 @@ async function copyCallback() {
       :class="{ disabled: !item.enabled }"
     >
       <header>
-        <span class="mcp-mark grid place-items-center w-[45px] h-[45px] shrink-0 text-accent bg-soft rounded-xl border border-line"><Icon v-if="item.transport === 'http'" :name="Server" :size="23" /><Icon v-else :name="Terminal" :size="23" /></span><div><h2>{{ item.name }}</h2><span class="mcp-transport text-muted text-2xs">{{ item.transport === 'http' ? 'Remote server' : 'Command server' }}</span></div><details class="task-action-menu relative" @click="($event.target as HTMLElement).closest('button') && (($event.currentTarget as HTMLDetailsElement).open = false)">
-          <summary :class="twMerge(iconButton, 'icon-button')" :aria-label="`Actions for ${item.name}`">
+        <span class="mcp-mark grid place-items-center w-[45px] h-[45px] shrink-0 text-accent bg-soft rounded-xl border border-line"><Icon v-if="item.transport === 'http'" :name="Server" :size="23" /><Icon v-else :name="Terminal" :size="23" /></span><div><h2>{{ item.name }}</h2><span class="mcp-transport text-muted text-2xs">{{ item.transport === 'http' ? 'Remote server' : 'Command server' }}</span></div><MenuButton :label="`Actions for ${item.name}`" :trigger-class="twMerge(iconButton, 'icon-button shrink-0')">
+          <template #trigger>
             <Icon :name="MoreHorizontal" :size="19" />
-          </summary><div>
-            <button @click="edit(item)">
-              Edit connection
-            </button><button @click="disconnecting = item">
-              Remove credentials
-            </button><button @click="removing = item">
-              Delete connection
+          </template>
+          <template #default="{ select }">
+            <button class="menu-item" role="menuitem" @click="select(() => edit(item))">
+              <Icon :name="Pencil" :size="15" />Edit connection
+            </button><button class="menu-item" role="menuitem" @click="select(() => disconnecting = item)">
+              <Icon :name="KeyRound" :size="15" />Remove credentials
+            </button><button class="menu-item text-danger!" role="menuitem" @click="select(() => removing = item)">
+              <Icon :name="Trash2" :size="15" />Delete connection
             </button>
-          </div>
-        </details>
+          </template>
+        </MenuButton>
       </header>
       <p class="mcp-endpoint text-muted [font:11px/1.8_ui-monospace,_monospace] whitespace-nowrap text-ellipsis overflow-hidden mt-5.5 mb-[17px] mx-0" :title="item.transport === 'http' ? item.url : item.command">
         {{ item.transport === 'http' ? item.url : [item.command, ...item.args].join(' ') }}
