@@ -958,6 +958,8 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let waiting_run_id = id();
     let retirement_run_id = id();
     let resuming_retirement_run_id = id();
+    let stopped_wait_run_id = id();
+    let failed_wait_run_id = id();
     let regular_chat_id = id();
     let t0 = 1_700_000_000_000i64;
     let future_snooze = now() + 3_600_000;
@@ -1250,6 +1252,36 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         ],
     )
     .unwrap();
+
+    for (run, turn, wakeup) in [
+        (
+            &stopped_wait_run_id,
+            "stopped-migrated-turn",
+            "stopped-wake",
+        ),
+        (&failed_wait_run_id, "failed-migrated-turn", "failed-wake"),
+    ] {
+        conn.execute(
+            "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,boundary,
+               snapshot,session_id,recovery_pending,resume_available,resume_count,summary)
+             SELECT ?1,task_id,'cancelled','schedule',created_at,started_at,finished_at,
+               json_set(boundary,'$.missionTurnId',?3),
+               snapshot,session_id,0,0,0,'Partial mission result' FROM runs WHERE id=?2",
+            params![run, retirement_run_id, turn],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO run_checkpoints(run_id,state) VALUES(?1,'{\"completed\":true,\"remainingMs\":12000}')",
+            [run],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO records(kind,id,data,updated_at)
+             SELECT kind,?1,json_set(data,'$.id',?1,'$.runId',?1,'$.environment.wakeup.id',?3,
+               '$.environment.wakeup.messageId',?4),updated_at FROM records WHERE id=?2",
+            params![run, retirement_run_id, wakeup, turn],
+        )
+        .unwrap();
+    }
 
     let queued_id = id();
     conn.execute(
@@ -2087,6 +2119,64 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     let resumed = get(&owner, &resumed_history).await;
     assert_eq!(resumed["status"], "running");
     assert!(resumed["finishedAt"].is_null());
+    let stopping_run = service.store.run(&stopped_wait_run_id).await.unwrap();
+    let stopped_wait_chat_id = text(&stopping_run, "taskId");
+    let stopped_history_path = format!("/api/hook-rule-triggerings/{stopped_wait_chat_id}");
+    assert_eq!(
+        get(&owner, &stopped_history_path).await["status"],
+        "waiting"
+    );
+    let stop = owner
+        .authorize(common::request(
+            "POST",
+            &format!("/api/chats/{stopped_wait_chat_id}/stop"),
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let response = common::send(&app, stop).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_json(response).await
+    );
+    let stopped_live = service.chat_detail(stopped_wait_chat_id).await.unwrap();
+    assert_eq!(stopped_live["run"]["status"], "succeeded");
+    assert!(stopped_live["wakeup"].is_null());
+    let stopped_occurrence = get(&owner, &stopped_history_path).await;
+    assert_eq!(stopped_occurrence["status"], "stopped");
+    assert_eq!(
+        stopped_occurrence["event"]["payload"]["migratedConversation"]["summary"],
+        "Partial mission result"
+    );
+    let failed_wait = service.store.run(&failed_wait_run_id).await.unwrap();
+    let failed_history_path = format!(
+        "/api/hook-rule-triggerings/{}",
+        text(&failed_wait, "taskId")
+    );
+    assert_eq!(get(&owner, &failed_history_path).await["status"], "waiting");
+    service
+        .store
+        .change_run(
+            &failed_wait_run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                error: Some(Some("Recovery could not retain the native session".into())),
+                recovery_pending: Some(false),
+                finished_at: Some(Some(now())),
+                wakeup: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let failed_occurrence = get(&owner, &failed_history_path).await;
+    assert_eq!(failed_occurrence["status"], "failed");
+    assert_eq!(
+        failed_occurrence["error"],
+        "Recovery could not retain the native session"
+    );
     let retirement_chat = service.chat_detail(&retirement_chat_id).await.unwrap();
     assert!(retirement_chat["wakeup"].is_null());
     assert_eq!(

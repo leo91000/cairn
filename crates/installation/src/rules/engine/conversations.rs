@@ -813,7 +813,7 @@ fn cancel(db: &Db<'_>, acting: &Acting<'_>, input: &Json) -> Result<Json> {
         if let Some(run) = chat.run_id.as_deref() {
             crate::chats::coding_agent::cancel_in(db, run)?;
             crate::environment_expiration::cancel_continuation_in(db, run)?;
-            crate::chats::continuation::cancel_for_run(db, run)?;
+            crate::chats::continuation::stop_for_run(db, run)?;
         }
         return Ok(json!({ "conversationId": chat.id, "cancelled": false }));
     };

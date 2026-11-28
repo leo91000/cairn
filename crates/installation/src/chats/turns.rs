@@ -563,11 +563,14 @@ pub(super) fn continue_run(
     checkpoint.retired_environment_deadline = None;
     checkpoint.retained_completion = None;
     checkpoint.store_in(db, run_id)?;
-    if migrated_wakeup_id.is_some() && !resumes_migrated_wait {
-        // New input can supersede a parked legacy wakeup. Keep the prior result
-        // before reusing the run for a different turn.
-        let previous = required(db.run_state(run_id)?, "Run not found")?;
-        db.record_migrated_settlement(&previous)?;
+    if !resumes_migrated_wait
+        && chat
+            .wakeup
+            .as_ref()
+            .is_some_and(|wake| migrated_wakeup_id.as_deref() == Some(wake.id.as_str()))
+    {
+        // New input ends the parked occurrence before reusing its run.
+        super::continuation::record_stopped_migrated_wait(db, run_id)?;
     }
     let compaction = execution.operation.as_deref() == Some(COMPACT);
     let mut patch = crate::runs::RunChanges {

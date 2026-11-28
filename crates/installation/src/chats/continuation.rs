@@ -139,10 +139,45 @@ impl Service {
 
 pub(super) fn cancel(db: &Db<'_>, id: &str) -> Result<()> {
     let mut chat = required(db.conversation(id)?, "Chat not found")?;
-    if chat.wakeup.take().is_some() {
+    if let Some(wakeup) = chat.wakeup.take() {
+        if let Some(run) = chat.run_id.as_deref() {
+            clear_migrated_wait(db, run, &wakeup.id)?;
+        }
         db.save_conversation(&chat)?;
     }
     Ok(())
+}
+
+/// Explicit Stop settles the original migrated occurrence without overwriting
+/// the live conversation's completed reply.
+pub(crate) fn stop_for_run(db: &Db<'_>, run: &str) -> Result<bool> {
+    if let Some(wakeup) = db.wakeup(false, run)?
+        && clear_migrated_wait(db, run, &wakeup.id)?
+    {
+        record_stopped_migrated_wait(db, run)?;
+    }
+    cancel_for_run(db, run)
+}
+
+fn clear_migrated_wait(db: &Db<'_>, run: &str, wakeup_id: &str) -> Result<bool> {
+    let Some(mut checkpoint) = super::RunCheckpoint::load_in(db, run)? else {
+        return Ok(false);
+    };
+    if checkpoint.migrated_mission_wakeup_id.as_deref() != Some(wakeup_id) {
+        return Ok(false);
+    }
+    checkpoint.migrated_mission_wakeup_id = None;
+    checkpoint.store_in(db, run)?;
+    Ok(true)
+}
+
+pub(super) fn record_stopped_migrated_wait(db: &Db<'_>, run: &str) -> Result<()> {
+    let mut stopped = required(db.run_state(run)?, "Run not found")?;
+    stopped.status = RunStatus::Cancelled;
+    stopped.finished_at = Some(crate::config::now());
+    stopped.recovery_pending = false;
+    stopped.retry = None;
+    db.record_migrated_settlement(&stopped)
 }
 
 pub(crate) fn cancel_for_run(db: &Db<'_>, run: &str) -> Result<bool> {

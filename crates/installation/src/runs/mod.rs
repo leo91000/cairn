@@ -610,8 +610,8 @@ impl Db<'_> {
                      WHERE id=?2 AND json_type(boundary,'$.outcome')='object')))
              WHERE chat_id=?1 AND run_id=?2 AND json_type(origin,'$.legacyRun')='object'
              AND json_extract(origin,'$.legacyRun.status') IS NULL
-             AND NOT EXISTS (SELECT 1 FROM run_checkpoints WHERE run_id=?2
-                 AND json_type(state,'$.migratedMissionWakeupId')='text')
+             AND NOT EXISTS (SELECT 1 FROM run_checkpoints k JOIN durable_wakeups w ON w.chat_id=?1
+                 WHERE k.run_id=?2 AND w.id=json_extract(k.state,'$.migratedMissionWakeupId'))
              AND NOT EXISTS (SELECT 1 FROM records WHERE id=?2 AND kind='environment-expirations'
                  AND json_extract(data,'$.continueTurn')=1
                  AND coalesce(json_extract(data,'$.cancelled'),0)=0)",
