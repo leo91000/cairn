@@ -10,7 +10,7 @@ use serde_json::Value;
 
 pub use cairn_contracts::AccountState;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub id: String,
@@ -42,6 +42,54 @@ pub struct Account {
     pub priority: Option<u64>,
     pub model_provider: Option<String>,
     pub model_provider_name: Option<String>,
+}
+
+impl PartialEq for Account {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            id,
+            provider,
+            name,
+            revision,
+            enabled,
+            email,
+            plan,
+            identity,
+            created_at,
+            checked_at,
+            state,
+            error,
+            usage,
+            last_used_at,
+            exhausted,
+            loaded_exhaustion_at: _,
+            max_concurrent_runs,
+            reset_error,
+            priority,
+            model_provider,
+            model_provider_name,
+        } = self;
+        id == &other.id
+            && provider == &other.provider
+            && name == &other.name
+            && revision == &other.revision
+            && enabled == &other.enabled
+            && email == &other.email
+            && plan == &other.plan
+            && identity == &other.identity
+            && created_at == &other.created_at
+            && checked_at == &other.checked_at
+            && state == &other.state
+            && error == &other.error
+            && usage == &other.usage
+            && last_used_at == &other.last_used_at
+            && exhausted == &other.exhausted
+            && max_concurrent_runs == &other.max_concurrent_runs
+            && reset_error == &other.reset_error
+            && priority == &other.priority
+            && model_provider == &other.model_provider
+            && model_provider_name == &other.model_provider_name
+    }
 }
 
 /// A run stopped on the account's usage limit for `model`, with the usage read at that time.

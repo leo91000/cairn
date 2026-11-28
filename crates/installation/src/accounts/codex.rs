@@ -499,17 +499,82 @@ async fn read_usage(
     // A natural reset comes first: it leaves banked resets for later.
     super::replenish(&mut account, &Codex);
     super::claim(s, account.clone()).await?;
+    let exhaustion_at = account.exhausted.as_ref().map(|exhaustion| exhaustion.at);
     let model = account.exhausted_model(model);
     let redemption = reset(s, &account, model, rpc, &tokens).await?;
     let mut account = s.accounts.account(s, id).await?;
-    // A confirmed banked reset restores capacity before usage reports lower readings.
-    if redemption.confirmed && redemption.usage.available(account.exhausted_model("")) {
+    apply_redemption(&mut account, exhaustion_at, redemption);
+    save(s, &account).await
+}
+
+fn apply_redemption(account: &mut Account, exhaustion_at: Option<i64>, redemption: Redemption) {
+    // A confirmed reset can precede a lower usage reading, but it cannot
+    // clear a refusal recorded while that reset or its usage read was in flight.
+    if redemption.confirmed
+        && account.exhausted.as_ref().is_some_and(|exhaustion| {
+            exhaustion_at == Some(exhaustion.at)
+                && redemption
+                    .usage
+                    .checked_at
+                    .is_some_and(|at| at > exhaustion.at)
+                && redemption.usage.available(&exhaustion.model)
+        })
+    {
         account.exhausted = None;
     }
     account.usage = Some(redemption.usage);
     account.reset_error = Some(redemption.error);
-    super::replenish(&mut account, &Codex);
-    save(s, &account).await
+    super::replenish(account, &Codex);
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn a_banked_reset_cannot_clear_a_newer_quota_refusal() {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(root.path()).unwrap();
+    let usage = |checked_at| {
+        Usage::from_value(&json!({
+            "allowed": true, "checkedAt": checked_at,
+            "windows": [{ "id": "primary", "usedPercent": 50 }],
+        }))
+    };
+    store
+        .transaction(move |db| {
+            let mut account = Account::new(Provider::Codex, "Fixture", AccountState::Ready);
+            account.usage = Some(usage(now()));
+            db.save_coding_account(&account)?;
+            db.exhaust_coding_account(&account.id, "old-model")?;
+            let observed = db
+                .coding_account(&account.id)?
+                .unwrap()
+                .exhausted
+                .unwrap()
+                .at;
+            db.exhaust_coding_account(&account.id, "new-model")?;
+
+            let mut latest = db.coding_account(&account.id)?.unwrap();
+            let newer = latest.exhausted.as_ref().unwrap().at;
+            apply_redemption(
+                &mut latest,
+                Some(observed),
+                Redemption::new(usage(newer - 1), "", true),
+            );
+            assert_eq!(latest.exhausted.as_ref().unwrap().model, "new-model");
+            assert_eq!(latest.usage().checked_at, Some(newer - 1));
+            db.save_coding_account(&latest)?;
+
+            let mut latest = db.coding_account(&account.id)?.unwrap();
+            assert_eq!(latest.exhausted.as_ref().unwrap().at, newer);
+            apply_redemption(
+                &mut latest,
+                Some(newer),
+                Redemption::new(usage(newer + 1), "", true),
+            );
+            assert!(latest.exhausted.is_none());
+            db.save_coding_account(&latest)
+        })
+        .await
+        .unwrap();
 }
 
 /// A banked reset request, persisted until its outcome is known.
