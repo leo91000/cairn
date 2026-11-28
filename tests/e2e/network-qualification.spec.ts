@@ -265,8 +265,7 @@ test('bounded DATA loss delivers directly and precise starvation recovers safely
     const seeded = await relay('POST', `/${chatId}/messages`, { id: randomUUID(), text: seedText })
     expect(seeded.status()).toBe(200)
     const seededChat = fixture.seed.store.list('chats').find(chat => chat.id === chatId)!
-    const task = fixture.seed.task({ name: 'Synthetic cursor qualification', prompt: 'Fixture only', agentId: seededChat.agentId })
-    const run = await fixture.seed.enqueue(task.id)
+    const run = fixture.seed.chatRun(seededChat.id, 'Synthetic cursor qualification')
     fixture.seed.store.updateRun(run.id, { status: 'succeeded', finishedAt: Date.now() })
     fixture.seed.store.put('chats', { ...seededChat, runId: run.id })
     for (const value of [1, 2, 3])

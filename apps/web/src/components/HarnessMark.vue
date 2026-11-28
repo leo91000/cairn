@@ -4,7 +4,7 @@ import { providers } from '../../../../packages/contracts/accounts'
 import { brands } from '../accounts'
 import Icon from './Icon.vue'
 
-// The coding agent of a conversation's or mission's latest turn, in its brand colour.
+// The coding agent of a conversation's latest turn, in its brand colour.
 withDefaults(defineProps<{ provider: Provider, size?: number }>(), { size: 12 })
 </script>
 

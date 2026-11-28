@@ -203,8 +203,7 @@ test('claims an installation and sends after relay restarts and beacon session r
     // Seed a finished run using the same fixture module as the native browser
     // journeys. Its detail is then read through the real beacon HTTP relay.
     const chat = seed.store.list('chats')[0]!
-    const task = seed.task({ name: 'Finished conversation', prompt: 'Review the workspace', agentId: chat.agentId })
-    const run = await seed.enqueue(task.id)
+    const run = seed.chatRun(chat.id, 'Finished conversation')
     seed.store.updateRun(run.id, { status: 'succeeded', summary: 'The **relayed agent reply** remains readable.', finishedAt: Date.now() })
     seed.store.event(run.id, 'item.completed', 'The **relayed agent reply** remains readable.', { item: { id: 'relayed-reply', type: 'agent_message', text: 'The **relayed agent reply** remains readable.' } })
     seed.store.put('chats', { ...chat, runId: run.id })

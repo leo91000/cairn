@@ -17,7 +17,7 @@ fn rfc3339(ms: i64) -> String {
 pub(crate) fn next_for_clock(
     trigger: &HookRuleTrigger,
     at: i64,
-    existing: Option<ScheduleRow>,
+    existing: Option<&ScheduleRow>,
     trigger_changed: bool,
 ) -> Result<Option<i64>> {
     match trigger {
@@ -26,7 +26,7 @@ pub(crate) fn next_for_clock(
             at: None,
             timezone,
         } => {
-            if !trigger_changed && let Some(next) = existing.as_ref().and_then(|row| row.next_run) {
+            if !trigger_changed && let Some(next) = existing.and_then(|row| row.next_run) {
                 return Ok(Some(next));
             }
             Ok(crate::service::next_occurrences(pattern, timezone, at, 1)?
@@ -41,10 +41,10 @@ pub(crate) fn next_for_clock(
             if trigger_changed {
                 return Ok(Some(*target));
             }
-            if existing.as_ref().is_some_and(|row| row.fired_at.is_some()) {
+            if existing.is_some_and(|row| row.fired_at.is_some()) {
                 return Ok(None);
             }
-            if let Some(next) = existing.as_ref().and_then(|row| row.next_run) {
+            if let Some(next) = existing.and_then(|row| row.next_run) {
                 return Ok(Some(next));
             }
             Ok((*target > at).then_some(*target))
@@ -91,7 +91,12 @@ pub(crate) fn sync_schedule(
         return Ok(None);
     }
 
-    let next_run = next_for_clock(&definition.trigger, now(), existing, trigger_changed)?;
+    let next_run = next_for_clock(
+        &definition.trigger,
+        now(),
+        existing.as_ref(),
+        trigger_changed,
+    )?;
     db.save_hook_rule_schedule(&ScheduleRow {
         rule_id: row.id.clone(),
         next_run,

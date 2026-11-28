@@ -532,7 +532,7 @@ onUnmounted(() => {
           The previous environment expired. Choose the node for its first admission.
         </p>
         <p v-else>
-          The current turn stops and open questions close. The next environment waits for capacity on this destination. Queued messages, scheduled waits and active missions continue there; otherwise the conversation waits for your next message.
+          The current turn stops and open questions close. The next environment waits for capacity on this destination. Queued messages and scheduled waits continue there; otherwise the conversation waits for your next message.
         </p>
         <div class="mt-3 flex justify-end">
           <UiButton size="small" :disabled="!canMove" type="submit">

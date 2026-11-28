@@ -1,4 +1,4 @@
-//! Run deliverables, including mission runs without conversations, on the shared registry.
+//! Run deliverables on the shared registry.
 use super::{ResumeContext, decode};
 use crate::{
     error::{Error, Result, required},
@@ -44,17 +44,17 @@ pub(crate) const ARTIFACT_OPERATIONS: &[ArtifactOperation] = &[
     ArtifactOperation {
         name: "list_run_artifacts",
         scope: "read",
-        description: "List published file versions of a run, including a mission run without a conversation. Paginated; files remain private unless explicitly shared.",
+        description: "List published file versions of a run,. Paginated; files remain private unless explicitly shared.",
     },
     ArtifactOperation {
         name: "read_run_artifact",
         scope: "read",
-        description: "Read a run artifact as bounded base64 chunks, including private files and mission runs. Start at offset 0; append decoded data until nextOffset is null. file.digest is the complete SHA-256.",
+        description: "Read a run artifact as bounded base64 chunks, including private files. Start at offset 0; append decoded data until nextOffset is null. file.digest is the complete SHA-256.",
     },
     ArtifactOperation {
         name: "set_run_artifact_visibility",
         scope: "manage",
-        description: "Enable or revoke a public link for one run artifact version, including a mission run. Only make files public when requested. Human sharing requires the installation owner; execution access requires a current installation grant. Revocation cannot remove downloaded copies.",
+        description: "Enable or revoke a public link for one run artifact version. Only make files public when requested. Human sharing requires the installation owner; execution access requires a current installation grant. Revocation cannot remove downloaded copies.",
     },
 ];
 

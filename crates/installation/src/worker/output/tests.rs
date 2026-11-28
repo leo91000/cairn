@@ -1302,10 +1302,9 @@ async fn common_questions_survive_native_closures_without_becoming_answers() {
 }
 
 #[tokio::test]
-async fn a_completed_outcome_retires_questions_but_input_needed_and_old_reports_do_not() {
+async fn a_completed_outcome_retires_questions_but_blocked_and_old_reports_do_not() {
     for (status, message, pending) in [
         ("completed", "current", 0),
-        ("needs_input", "current", 1),
         ("blocked", "current", 1),
         ("completed", "previous", 1),
     ] {

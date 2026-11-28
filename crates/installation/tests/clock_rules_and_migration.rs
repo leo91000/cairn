@@ -66,6 +66,7 @@ fn schedule_rule_definition(name: &str, trigger: Value) -> Value {
         "description": "ADR-0094 test schedule",
         "executionAgentId": MAIN_AGENT_ID,
         "trigger": trigger,
+        "limits": cairn_contracts::HookRuleLimits::default(),
         "steps": [
             {
                 "type": "if",
@@ -105,7 +106,7 @@ async fn clock_cron_rule_catches_up_once_guards_overlap_and_runs_now() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{preview}");
-    assert_eq!(preview["upcoming"].as_array().unwrap().len(), 3);
+    assert_eq!(preview["occurrences"].as_array().unwrap().len(), 3);
 
     let (status, _) = app
         .request(
@@ -130,7 +131,7 @@ async fn clock_cron_rule_catches_up_once_guards_overlap_and_runs_now() {
             json!({ "definition": def }),
         )
         .await;
-    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(status, StatusCode::OK, "{created}");
     let rule_id = text(&created, "id").to_owned();
     assert!(created["nextRun"].as_i64().is_some());
     assert_eq!(created["allowed"]["runNow"], true);
@@ -312,7 +313,7 @@ async fn clock_single_date_fires_once_and_never_repeats() {
             json!({ "definition": def }),
         )
         .await;
-    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(status, StatusCode::OK, "{created}");
     let rule_id = text(&created, "id").to_owned();
     assert_eq!(created["nextRun"], target);
 
@@ -469,6 +470,7 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
           native_authority_nodes TEXT NOT NULL DEFAULT '[]',
           native_parent_run_id TEXT,
           native_parent_access TEXT,
+          native_plugin_grants TEXT,
           native_provenance_unknown INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE mission_tags(mission_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(mission_id,tag)) WITHOUT ROWID;
@@ -476,17 +478,17 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
 
          CREATE TABLE account_reads(
           account_id TEXT NOT NULL,
-          target_kind TEXT NOT NULL CHECK(target_kind IN ('chat','mission')),
-          target_id TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('chat','mission')),
+          item_id TEXT NOT NULL,
           finished_at INTEGER NOT NULL,
-          PRIMARY KEY(account_id,target_kind,target_id)
+          PRIMARY KEY(account_id,kind,item_id)
          ) WITHOUT ROWID;
 
          CREATE TABLE account_dismissals(
           account_id TEXT NOT NULL,
           task_id TEXT NOT NULL,
           finished_at INTEGER NOT NULL,
-          until INTEGER,
+          snoozed_until INTEGER,
           PRIMARY KEY(account_id,task_id)
          ) WITHOUT ROWID;
 
@@ -537,8 +539,8 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
 
     // Seed an existing regular conversation for account_reads preservation.
     conn.execute(
-        "INSERT INTO conversations(id,agent_id,title,paused,lifecycle,revision,created_at,updated_at) \
-         VALUES(?1,?2,'Existing chat',0,'active','r1',?3,?3)",
+        "INSERT INTO conversations(id,slug,agent_id,title,paused,lifecycle,revision,created_at,updated_at,persisted_at,session_restart_requested,cancelled_by_deletion) \
+         VALUES(?1,'existing-chat',?2,'Existing chat',0,'active','r1',?3,?3,?3,0,0)",
         params![regular_chat_id, MAIN_AGENT_ID, t0],
     )
     .unwrap();
@@ -577,20 +579,23 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
 
     // Seed two legacy mission runs: one finished+blocked (for active_mission_id) and one waiting with wakeup (for oneshot_mission_id).
     conn.execute(
-        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,task_name,agent_name,outcome) \
-         VALUES(?1,?2,'succeeded','schedule',?3,?3,?4,'Daily standup','Main',?5)",
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,snapshot,boundary,\
+           recovery_pending,resume_available,resume_count) \
+         VALUES(?1,?2,'succeeded','schedule',?3,?3,?4,?5,?6,0,0,0)",
         params![
             blocked_run_id,
             active_mission_id,
             t0,
             t0 + 5000,
-            json!({ "status": "blocked", "reason": "Waiting on review" }).to_string(),
+            json!({ "task": { "name": "Daily standup" }, "agent": { "id": MAIN_AGENT_ID, "name": "Main" } }).to_string(),
+            json!({ "outcome": { "status": "blocked", "reason": "Waiting on review" }, "nativeProvenanceUnknown": false }).to_string(),
         ],
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,task_name,agent_name) \
-         VALUES(?1,?2,'waiting','manual',?3,?3,'Manual one-shot','Main')",
+        "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,boundary,\
+           recovery_pending,resume_available,resume_count) \
+         VALUES(?1,?2,'waiting','manual',?3,?3,'{}',0,1,0)",
         params![waiting_run_id, oneshot_mission_id, t0],
     )
     .unwrap();
@@ -671,17 +676,19 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
     assert_eq!(rule_count, 5);
 
     // Active cron mission preserves schedule & native authority.
-    let (disabled, membership_ended, rights_lost): (Option<i64>, Option<i64>, Option<i64>) =
-        migrated
-            .query_row(
-                "SELECT disabled_at,membership_ended_at,rights_lost_at FROM hook_rules WHERE id=?1",
-                [&active_mission_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
+    let (disabled, membership_ended, owner): (Option<i64>, Option<i64>, bool) = migrated
+        .query_row(
+            "SELECT disabled_at,membership_ended_at,creator_owner FROM hook_rules WHERE id=?1",
+            [&active_mission_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
     assert!(disabled.is_none());
     assert!(membership_ended.is_none());
-    assert!(rights_lost.is_none());
+    assert!(
+        !owner,
+        "only a verified Beacon observation can confer owner authority"
+    );
     let next_run: Option<i64> = migrated
         .query_row(
             "SELECT next_run FROM hook_rule_schedules WHERE rule_id=?1",
@@ -692,7 +699,7 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
     assert_eq!(next_run, Some(t0 + 60_000));
 
     // Disabled/archived -> disabled_at set; removed author -> membership_ended_at set;
-    // suspended rights -> rights_lost_at set; one-shot -> disabled_at set (no cron).
+    // a suspended author still needs current agent access; one-shot -> disabled_at set (no cron).
     let disabled_at: Option<i64> = migrated
         .query_row(
             "SELECT disabled_at FROM hook_rules WHERE id=?1",
@@ -709,14 +716,14 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
         )
         .unwrap();
     assert!(removed_at.is_some());
-    let rights_at: Option<i64> = migrated
+    let suspended_author: (String, bool) = migrated
         .query_row(
-            "SELECT rights_lost_at FROM hook_rules WHERE id=?1",
+            "SELECT creator_account_id,creator_owner FROM hook_rules WHERE id=?1",
             [&suspended_mission_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert!(rights_at.is_some());
+    assert_eq!(suspended_author, ("member-acct".into(), false));
     let oneshot_disabled: Option<i64> = migrated
         .query_row(
             "SELECT disabled_at FROM hook_rules WHERE id=?1",
@@ -767,6 +774,14 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
         )
         .unwrap();
     assert_eq!(wakeup_chat_id, waiting_chat_id);
+    let waiting_status: String = migrated
+        .query_row(
+            "SELECT status FROM runs WHERE id=?1",
+            [&waiting_run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(waiting_status, "succeeded");
 
     // Reads & snoozes migrated cleanly:
     // - regular chat read preserved
@@ -782,7 +797,7 @@ fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly() {
     assert_eq!(regular_read, t0 + 1000);
     let owner_snooze: i64 = migrated
         .query_row(
-            "SELECT until FROM account_snoozes WHERE account_id='owner-acct' AND chat_id=?1",
+            "SELECT snoozed_until FROM account_snoozes WHERE account_id='owner-acct' AND chat_id=?1",
             [&blocked_chat_id],
             |row| row.get(0),
         )

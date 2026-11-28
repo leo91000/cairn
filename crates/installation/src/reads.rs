@@ -109,18 +109,12 @@ impl Reads {
             let question = chat["pendingQuestions"].as_u64().unwrap_or(0) > 0;
             let status = chat["status"].as_str();
             let failed = matches!(status, Some("failed" | "interrupted"));
-            let blocked_for_user = status == Some("succeeded")
-                && chat["outcome"]["status"] == "blocked"
-                && !matches!(
-                    chat["outcome"]["waitingOn"].as_str(),
-                    Some("requester" | "external")
-                );
+            let blocked = status == Some("succeeded") && chat["outcome"]["status"] == "blocked";
             let quiet_rule = !chat["originRule"].is_null() && chat["personParticipated"] != true;
             let finished = matches!(status, Some("succeeded" | "failed" | "interrupted"))
                 && chat["requestedBy"].is_null()
                 && chat["paused"] != true;
-            let wants_attention =
-                question || failed || blocked_for_user || (finished && !quiet_rule);
+            let wants_attention = question || failed || blocked || (finished && !quiet_rule);
 
             let activity_at = chat["readAt"]
                 .as_i64()
@@ -250,7 +244,7 @@ pub(crate) async fn mark(
                 let ReadTarget::Chat { chat_id } = &item.target;
                 let id = chat_id.to_string();
                 db.mark_read(&account, &id, item.finished_at)?;
-                db.set_snooze(&account, &id, None)?;
+                db.clear_snooze_through(&account, &id, item.finished_at)?;
             }
             Ok(())
         })

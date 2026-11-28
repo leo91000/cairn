@@ -121,7 +121,7 @@ const cards = computed(() => catalog.value.packages.map(card))
 const soon = [
   { id: 'slack', name: 'Slack', detail: 'Bot in channels and DMs' },
   { id: 'telegram', name: 'Telegram', detail: 'Chat with an agent on the go' },
-  { id: 'linear', name: 'Linear', detail: 'Turn issues into missions' },
+  { id: 'linear', name: 'Linear', detail: 'Start agent conversations from issues' },
 ]
 
 /** A chosen file's path inside the package: its folder's own name is dropped. */

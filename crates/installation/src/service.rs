@@ -231,7 +231,7 @@ impl Service {
                     if creation_id.is_some() { return Ok((current.clone(), false)); }
                     return Err(Error::conflict("Agent already exists."));
                 }
-                if db.0.query_row("SELECT EXISTS(SELECT 1 FROM records WHERE id=? UNION ALL SELECT 1 FROM projects WHERE id=? UNION ALL SELECT 1 FROM missions WHERE id=?)", rusqlite::params![agent.id.to_string(), agent.id.to_string(), agent.id.to_string()], |row| row.get::<_, bool>(0))? {
+                if db.0.query_row("SELECT EXISTS(SELECT 1 FROM records WHERE id=? UNION ALL SELECT 1 FROM projects WHERE id=? UNION ALL SELECT 1 FROM conversations WHERE id=?)", rusqlite::params![agent.id.to_string(), agent.id.to_string(), agent.id.to_string()], |row| row.get::<_, bool>(0))? {
                     return Err(Error::conflict("This creation identity belongs to a different resource."));
                 }
             } else {

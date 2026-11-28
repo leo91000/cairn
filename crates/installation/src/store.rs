@@ -1453,6 +1453,8 @@ mod schema_tests {
              INSERT INTO direct_storage_grants VALUES('object');",
         )
         .unwrap();
+        db.execute_batch("DROP TABLE account_snoozes; ALTER TABLE account_reads ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'; ALTER TABLE account_reads RENAME COLUMN chat_id TO item_id; ALTER TABLE durable_wakeups ADD COLUMN mission_run_id TEXT;")
+            .unwrap();
         db.pragma_update(None, "user_version", PRE_COMPACTION_DATABASE_VERSION)
             .unwrap();
 

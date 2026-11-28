@@ -1,7 +1,7 @@
 //! B4 reuses A1/A2 clocks, distributions, connections and alternating layout runs.
-//! Frozen KV mapping of read marks and set-aside outcomes: f489e1a5 (v17).
+//! Compare v39 chat read marks and snoozes with the equivalent v38 rows.
 use super::*;
-use cairn_installation::reads::sql::{ReadKind, StoredDismissal};
+use cairn_installation::reads::sql::StoredSnooze;
 
 const ACCOUNT: &str = "00000000-0000-4000-8000-0000000000a1";
 /// Another member's state shares the tables and KV range the account reads.
@@ -9,39 +9,30 @@ const OTHER: &str = "00000000-0000-4000-8000-0000000000a2";
 
 fn previous_schema(db: &Connection) {
     db.execute_batch(
-        "DROP TABLE account_read_starts; DROP TABLE account_reads; DROP TABLE account_dismissals;
-DROP TABLE kv; CREATE TABLE kv(key TEXT PRIMARY KEY,data TEXT NOT NULL,expires INTEGER);",
+        "DROP TABLE account_reads; DROP TABLE account_snoozes;
+         CREATE TABLE account_reads(account_id TEXT NOT NULL, kind TEXT NOT NULL,
+             item_id TEXT NOT NULL, finished_at INTEGER NOT NULL,
+             PRIMARY KEY(account_id,kind,item_id)) WITHOUT ROWID;
+         CREATE TABLE account_dismissals(account_id TEXT NOT NULL, task_id TEXT NOT NULL,
+             finished_at INTEGER NOT NULL, snoozed_until INTEGER,
+             PRIMARY KEY(account_id,task_id)) WITHOUT ROWID;",
     )
     .unwrap();
 }
 
 fn candidate(db: &Connection) -> bool {
-    db.table_exists(None, "account_reads").unwrap()
+    db.table_exists(None, "account_snoozes").unwrap()
 }
 
 fn item(n: u128) -> String {
     uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | n).to_string()
 }
 
-/// One account's read mark, by Fil key (`chat:<id>` or `task:<id>`).
+/// A conversation read mark.
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
 struct Mark {
     key: String,
     finished_at: i64,
-}
-
-fn split(key: &str) -> (ReadKind, &str) {
-    match key.split_once(':').unwrap() {
-        ("chat", id) => (ReadKind::Chat, id),
-        (_, id) => (ReadKind::Mission, id),
-    }
-}
-
-fn kind(kind: ReadKind) -> &'static str {
-    match kind {
-        ReadKind::Chat => "chat",
-        ReadKind::Mission => "mission",
-    }
 }
 
 impl StorageEntity for Mark {
@@ -56,15 +47,13 @@ impl StorageEntity for Mark {
     fn setup(db: &Connection) {
         let db = Db(db);
         for n in 0..1000 {
-            let key = format!("{}:{}", ["chat", "task"][n as usize % 2], item(n));
+            let key = item(n);
             if candidate(db.0) {
-                let (kind, id) = split(&key);
-                db.mark_read(OTHER, kind, id, 1_761_800_000_000).unwrap();
+                db.mark_read(OTHER, &key, 1_761_800_000_000).unwrap();
             } else {
-                db.set(
-                    &format!("read:{OTHER}:{key}"),
-                    &1_761_800_000_000_i64.into(),
-                    None,
+                db.0.execute(
+                    "INSERT INTO account_reads VALUES(?1,'chat',?2,?3)",
+                    params![OTHER, key, 1_761_800_000_000_i64],
                 )
                 .unwrap();
             }
@@ -76,13 +65,12 @@ impl StorageEntity for Mark {
     }
 
     fn read(db: &Db<'_>, id: &str) -> Self {
-        let (read_kind, item) = split(id);
         let finished_at =
             db.0.prepare_cached(
-                "SELECT finished_at FROM account_reads WHERE account_id=? AND kind=? AND item_id=?",
+                "SELECT finished_at FROM account_reads WHERE account_id=? AND chat_id=?",
             )
             .unwrap()
-            .query_row(params![ACCOUNT, kind(read_kind), item], |r| r.get(0))
+            .query_row(params![ACCOUNT, id], |r| r.get(0))
             .unwrap();
         Self {
             key: id.into(),
@@ -93,10 +81,9 @@ impl StorageEntity for Mark {
     fn reference_read(db: &Db<'_>, id: &str) -> Self {
         Self {
             key: id.into(),
-            finished_at: db
-                .kv_as::<i64>(&format!("read:{ACCOUNT}:{id}"))
-                .unwrap()
-                .unwrap(),
+            finished_at: db.0.prepare_cached(
+                "SELECT finished_at FROM account_reads WHERE account_id=? AND kind='chat' AND item_id=?",
+            ).unwrap().query_row(params![ACCOUNT, id], |r| r.get(0)).unwrap(),
         }
     }
 
@@ -104,86 +91,97 @@ impl StorageEntity for Mark {
         db.read_marks(ACCOUNT).unwrap().len()
     }
 
-    /// The frozen `Reads::load`: a prefix scan collected into a map by item key.
     fn reference_list(db: &Db<'_>) -> usize {
-        let prefix = format!("read:{ACCOUNT}:");
-        db.keys_as::<i64>(&prefix)
+        let mut statement = db
+            .0
+            .prepare_cached("SELECT kind,item_id,finished_at FROM account_reads WHERE account_id=?")
+            .unwrap();
+        statement
+            .query_map([ACCOUNT], |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                    row.get::<_, i64>(2)?,
+                ))
+            })
             .unwrap()
-            .into_iter()
-            .map(|(key, at)| (key[prefix.len()..].to_owned(), at))
-            .collect::<std::collections::HashMap<_, _>>()
+            .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()
+            .unwrap()
             .len()
     }
 
     fn write(&self, db: &Db<'_>, _replacement: bool) {
-        let (kind, id) = split(&self.key);
-        db.mark_read(ACCOUNT, kind, id, self.finished_at).unwrap();
+        db.mark_read(ACCOUNT, &self.key, self.finished_at).unwrap();
         db.audit(Self::SAVE, &json!({ "id": self.key })).unwrap();
     }
 
-    /// The frozen monotonic overwrite: read the previous mark, keep the newest.
     fn reference_write(&self, db: &Db<'_>, _replacement: bool) {
-        let key = format!("read:{ACCOUNT}:{}", self.key);
-        let previous = db.kv_as::<i64>(&key).unwrap().unwrap_or(0);
-        db.set(&key, &previous.max(self.finished_at).into(), None)
-            .unwrap();
-    }
-
-    fn delete_candidate(db: &Db<'_>, id: &str) {
-        let (read_kind, item) = split(id);
         db.0.prepare_cached(
-            "DELETE FROM account_reads WHERE account_id=? AND kind=? AND item_id=?",
+            "INSERT INTO account_reads VALUES(?1,'chat',?2,?3) ON CONFLICT DO UPDATE
+             SET finished_at=max(finished_at,excluded.finished_at)",
         )
         .unwrap()
-        .execute(params![ACCOUNT, kind(read_kind), item])
+        .execute(params![ACCOUNT, self.key, self.finished_at])
         .unwrap();
     }
 
+    fn delete_candidate(db: &Db<'_>, id: &str) {
+        db.0.prepare_cached("DELETE FROM account_reads WHERE account_id=? AND chat_id=?")
+            .unwrap()
+            .execute(params![ACCOUNT, id])
+            .unwrap();
+    }
+
     fn reference_delete(db: &Db<'_>, id: &str) {
-        db.delete(&format!("read:{ACCOUNT}:{id}")).unwrap();
+        db.0.prepare_cached(
+            "DELETE FROM account_reads WHERE account_id=? AND kind='chat' AND item_id=?",
+        )
+        .unwrap()
+        .execute(params![ACCOUNT, id])
+        .unwrap();
     }
 
     fn encoded_bytes(db: &Db<'_>) -> Option<i64> {
-        let sql = if candidate(db.0) {
-            "SELECT sum(payload) FROM dbstat WHERE name='account_reads'"
-        } else {
-            "SELECT sum(payload) FROM dbstat WHERE name IN ('kv','sqlite_autoindex_kv_1')"
-        };
-        Some(db.0.query_row(sql, [], |row| row.get(0)).unwrap())
+        Some(
+            db.0.query_row(
+                "SELECT sum(payload) FROM dbstat WHERE name='account_reads'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        )
     }
 }
 
-/// A mission outcome the account set aside, half of them snoozed.
+/// The same dated reminder under the legacy mission and conversation keys.
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
 struct Aside {
-    task_id: String,
+    chat_id: String,
     finished_at: i64,
-    until: Option<i64>,
+    until: i64,
 }
 
 impl StorageEntity for Aside {
-    const KIND: &'static str = "dismissals";
-    const TABLE: &'static str = "account_dismissals";
-    const SAVE: &'static str = "dismissal.saved";
+    const KIND: &'static str = "snoozes";
+    const TABLE: &'static str = "account_snoozes";
+    const SAVE: &'static str = "snooze.saved";
 
     fn id(&self) -> String {
-        self.task_id.clone()
+        self.chat_id.clone()
     }
 
     fn setup(db: &Connection) {
         let db = Db(db);
         for n in 0..1000 {
-            let dismissal = StoredDismissal {
+            let snooze = StoredSnooze {
                 finished_at: 1_761_800_000_000,
-                until: None,
+                until: 1_761_886_400_000,
             };
             if candidate(db.0) {
-                db.set_dismissal(OTHER, &item(n), Some(dismissal)).unwrap();
+                db.set_snooze(OTHER, &item(n), Some(snooze)).unwrap();
             } else {
-                db.set(
-                    &format!("dismissed:{OTHER}:task:{}", item(n)),
-                    &json!({ "finishedAt": dismissal.finished_at, "until": null }),
-                    None,
+                db.0.execute(
+                    "INSERT INTO account_dismissals VALUES(?,?,?,?)",
+                    params![OTHER, item(n), snooze.finished_at, snooze.until],
                 )
                 .unwrap();
             }
@@ -195,91 +193,93 @@ impl StorageEntity for Aside {
     }
 
     fn read(db: &Db<'_>, id: &str) -> Self {
-        let (finished_at, until) = db
-            .0
-            .prepare_cached(
-                "SELECT finished_at,snoozed_until FROM account_dismissals WHERE account_id=? AND task_id=?",
-            )
-            .unwrap()
-            .query_row(params![ACCOUNT, id], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap();
+        let (finished_at, until) = db.0.prepare_cached(
+            "SELECT finished_at,snoozed_until FROM account_snoozes WHERE account_id=? AND chat_id=?",
+        ).unwrap().query_row(params![ACCOUNT, id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
         Self {
-            task_id: id.into(),
+            chat_id: id.into(),
             finished_at,
             until,
         }
     }
 
     fn reference_read(db: &Db<'_>, id: &str) -> Self {
-        let value = db
-            .kv(&format!("dismissed:{ACCOUNT}:task:{id}"))
-            .unwrap()
-            .unwrap();
+        let (finished_at, until) = db.0.prepare_cached(
+            "SELECT finished_at,snoozed_until FROM account_dismissals WHERE account_id=? AND task_id=?",
+        ).unwrap().query_row(params![ACCOUNT, id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
         Self {
-            task_id: id.into(),
-            finished_at: value["finishedAt"].as_i64().unwrap(),
-            until: value["until"].as_i64(),
+            chat_id: id.into(),
+            finished_at,
+            until,
         }
     }
 
     fn list(db: &Db<'_>) -> usize {
-        db.dismissals(ACCOUNT).unwrap().len()
+        db.snoozes(ACCOUNT).unwrap().len()
     }
 
-    /// The frozen `Reads::load`: typed dismissals collected into a map by item key.
     fn reference_list(db: &Db<'_>) -> usize {
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        #[allow(dead_code)]
-        struct Dismissal {
-            finished_at: i64,
-            until: Option<i64>,
-        }
-        let prefix = format!("dismissed:{ACCOUNT}:");
-        db.keys_as::<Dismissal>(&prefix)
+        let mut statement = db.0.prepare_cached(
+            "SELECT task_id,finished_at,snoozed_until FROM account_dismissals WHERE account_id=?",
+        ).unwrap();
+        statement
+            .query_map([ACCOUNT], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (row.get::<_, i64>(1)?, row.get::<_, Option<i64>>(2)?),
+                ))
+            })
             .unwrap()
-            .into_iter()
-            .map(|(key, dismissal)| (key[prefix.len()..].to_owned(), dismissal))
-            .collect::<std::collections::HashMap<_, _>>()
+            .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()
+            .unwrap()
             .len()
     }
 
     fn write(&self, db: &Db<'_>, _replacement: bool) {
-        let dismissal = StoredDismissal {
+        let snooze = StoredSnooze {
             finished_at: self.finished_at,
             until: self.until,
         };
-        db.set_dismissal(ACCOUNT, &self.task_id, Some(dismissal))
-            .unwrap();
-        db.audit(Self::SAVE, &json!({ "id": self.task_id }))
+        db.set_snooze(ACCOUNT, &self.chat_id, Some(snooze)).unwrap();
+        db.audit(Self::SAVE, &json!({ "id": self.chat_id }))
             .unwrap();
     }
 
     fn reference_write(&self, db: &Db<'_>, _replacement: bool) {
-        db.set(
-            &format!("dismissed:{ACCOUNT}:task:{}", self.task_id),
-            &json!({ "finishedAt": self.finished_at, "until": self.until }),
-            None,
+        db.0.prepare_cached(
+            "INSERT INTO account_dismissals VALUES(?,?,?,?) ON CONFLICT DO UPDATE
+             SET finished_at=excluded.finished_at,snoozed_until=excluded.snoozed_until",
         )
+        .unwrap()
+        .execute(params![ACCOUNT, self.chat_id, self.finished_at, self.until])
         .unwrap();
     }
 
     fn delete_candidate(db: &Db<'_>, id: &str) {
-        db.set_dismissal(ACCOUNT, id, None).unwrap();
+        db.set_snooze(ACCOUNT, id, None).unwrap();
     }
 
     fn reference_delete(db: &Db<'_>, id: &str) {
-        db.delete(&format!("dismissed:{ACCOUNT}:task:{id}"))
+        db.0.prepare_cached("DELETE FROM account_dismissals WHERE account_id=? AND task_id=?")
+            .unwrap()
+            .execute(params![ACCOUNT, id])
             .unwrap();
     }
 
     fn encoded_bytes(db: &Db<'_>) -> Option<i64> {
-        let sql = if candidate(db.0) {
-            "SELECT sum(payload) FROM dbstat WHERE name='account_dismissals'"
+        let table = if candidate(db.0) {
+            Self::TABLE
         } else {
-            "SELECT sum(payload) FROM dbstat WHERE name IN ('kv','sqlite_autoindex_kv_1')"
+            "account_dismissals"
         };
-        Some(db.0.query_row(sql, [], |row| row.get(0)).unwrap())
+        Some(
+            db.0.query_row(
+                "SELECT sum(payload) FROM dbstat WHERE name=?",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        )
     }
 }
 
@@ -288,7 +288,7 @@ impl StorageEntity for Aside {
 async fn read_mark_storage_layouts() {
     let marks: Vec<Mark> = (0..1000)
         .map(|n| Mark {
-            key: format!("{}:{}", ["chat", "task"][n as usize % 2], item(10_000 + n)),
+            key: item(10_000 + n),
             finished_at: 1_761_800_000_000 + n as i64,
         })
         .collect();
@@ -297,12 +297,12 @@ async fn read_mark_storage_layouts() {
 
 #[tokio::test]
 #[ignore = "local measurement; run alone with --ignored --nocapture --test-threads=1"]
-async fn dismissal_storage_layouts() {
+async fn snooze_storage_layouts() {
     let asides: Vec<Aside> = (0..1000)
         .map(|n| Aside {
-            task_id: item(10_000 + n),
+            chat_id: item(10_000 + n),
             finished_at: 1_761_800_000_000 + n as i64,
-            until: (n % 2 == 0).then_some(1_761_886_400_000),
+            until: 1_761_886_400_000,
         })
         .collect();
     measure(&asides);

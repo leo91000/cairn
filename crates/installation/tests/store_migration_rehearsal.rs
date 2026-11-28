@@ -15,7 +15,11 @@ fn rehearsal_upgrades_only_the_copy_and_is_stable_on_reopen() {
     let copy_file = copy.path().join("manager.db");
     let db = Connection::open(&source_file).unwrap();
     db.execute_batch(
-        "INSERT INTO kv VALUES('migration:local-conversation-disks:v1','{\"completedAt\":1}',NULL);
+        "DROP TABLE account_snoozes;
+         ALTER TABLE account_reads ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';
+         ALTER TABLE account_reads RENAME COLUMN chat_id TO item_id;
+         ALTER TABLE durable_wakeups ADD COLUMN mission_run_id TEXT;
+         INSERT INTO kv VALUES('migration:local-conversation-disks:v1','{\"completedAt\":1}',NULL);
          INSERT INTO kv VALUES('retained-fixture','true',NULL);
          CREATE TABLE shared_publications(id TEXT PRIMARY KEY,run_id TEXT NOT NULL);
          INSERT INTO shared_publications VALUES('retired-publication','legacy-run');

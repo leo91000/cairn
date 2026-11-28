@@ -13,6 +13,7 @@ import { deleteHookRule } from '../../../../packages/contracts/generated/deleteH
 import { duplicateHookRule } from '../../../../packages/contracts/generated/duplicateHookRule'
 import { liftHookRuleBudget } from '../../../../packages/contracts/generated/liftHookRuleBudget'
 import { listHookRuleVersions } from '../../../../packages/contracts/generated/listHookRuleVersions'
+import { runHookRule } from '../../../../packages/contracts/generated/runHookRule'
 import { setHookRuleEmergencyPause } from '../../../../packages/contracts/generated/setHookRuleEmergencyPause'
 import { setHookRuleEnabled } from '../../../../packages/contracts/generated/setHookRuleEnabled'
 import { api, notify, state } from '../api'
@@ -90,6 +91,14 @@ const toggle = () => act(() => setHookRuleEnabled(api, { ruleId: props.rule.id, 
 const pause = (paused: boolean) => act(() => setHookRuleEmergencyPause(api, { ruleId: props.rule.id, paused }), paused ? 'Rule paused' : 'Rule resumed')
 const lift = () => act(() => liftHookRuleBudget(api, { ruleId: props.rule.id }), 'Rule resumed')
 
+async function runNow() {
+  await act(async () => {
+    await runHookRule(api, { ruleId: props.rule.id })
+    tab.value = 'history'
+    return props.rule
+  }, 'Schedule triggered')
+}
+
 async function duplicate() {
   await act(async () => {
     const copy = await duplicateHookRule(api, { ruleId: props.rule.id, creationId: duplicateId })
@@ -128,6 +137,7 @@ const sources: Record<string, string> = {
   installationAgent: 'by an agent',
   duplicate: 'as a duplicate',
   template: 'from a template',
+  migration: 'from a migrated mission',
 }
 </script>
 
@@ -231,6 +241,9 @@ const sources: Record<string, string> = {
     </p>
 
     <div class="flex flex-wrap gap-2">
+      <UiButton v-if="rule.allowed.runNow" :disabled="busy" @click="runNow">
+        <Icon :name="Play" :size="15" />Run now
+      </UiButton>
       <UiButton v-if="rule.allowed.edit" variant="primary" @click="router.push(`/rules/${rule.id}/edit`)">
         <Icon :name="Pencil" :size="15" />Edit
       </UiButton>

@@ -1,11 +1,9 @@
 import type { ChatView } from '../../../packages/contracts/chats'
-import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
+import type { RunEvent, RunListItem } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import { exclusiveSuspensionLabel } from '../src/run-status'
 import {
   backgroundWait,
-  dismissible,
-  filFolds,
   filOf,
   filThread,
   filViews,
@@ -26,6 +24,7 @@ function chat(id: string, values: Partial<ChatView> = {}): ChatView {
     slug: '',
     revision: '',
     lifecycle: 'active',
+    personParticipated: false,
     sessionRestartRequested: false,
     canRequestNewSession: false,
     unread: false,
@@ -45,63 +44,6 @@ function chat(id: string, values: Partial<ChatView> = {}): ChatView {
     agentName: 'Cairn',
     projectName: null,
     status: 'idle',
-    ...values,
-  }
-}
-
-function task(id: string, values: Partial<Task> = {}): Task {
-  return {
-    revision: 'fixture',
-    authorId: null,
-    authorAccessId: null,
-    authorRemoved: false,
-    scheduleWaitReason: null,
-    scheduleFailure: null,
-    nativePrincipals: [],
-    nativeAuthorityNodes: [],
-    nativeParentRunId: null,
-    nativeParentAccess: null,
-    nativeProvenanceUnknown: true,
-    nativePluginGrants: null,
-    id,
-    name: id,
-    prompt: 'Do it',
-    agentId: 'ops',
-    projectId: null,
-    skills: null,
-    tags: [],
-    cron: null,
-    timezone: 'Europe/Paris',
-    enabled: true,
-    archived: false,
-    worktree: true,
-    createdAt: 1,
-    nextRun: null,
-    ...values,
-  }
-}
-
-function run(id: string, taskId: string, values: Partial<RunListItem> = {}): RunListItem {
-  return {
-    id,
-    taskId,
-    projectId: null,
-    status: 'succeeded',
-    trigger: 'manual',
-    createdAt: 1,
-    startedAt: 1,
-    finishedAt: 2,
-    sessionId: null,
-    workspace: null,
-    usage: null,
-    taskName: taskId,
-    agentName: 'Ops',
-    isolated: false,
-    workspaces: [],
-    unread: false,
-    recoveryPending: false,
-    resumeAvailable: false,
-    resumeCount: 0,
     ...values,
   }
 }
@@ -158,7 +100,7 @@ describe('the Fil', () => {
     createdAt: 1,
     expiresAt: 1000,
     waitUntil: 1000,
-    pausedRunIds: ['chat-run', 'mission-run'],
+    pausedRunIds: ['chat-run'],
     minimumAvailableMemoryMiB: 0,
   }
 
@@ -168,17 +110,17 @@ describe('the Fil', () => {
       chat('failed', { status: 'failed', suspendedByExclusive: reservation }),
       chat('question', { status: 'running', pendingQuestions: 1, suspendedByExclusive: reservation }),
       chat('paused', { status: 'running', paused: true, suspendedByExclusive: reservation }),
-    ], [task('compile')], [run('mission-run', 'compile', { status: 'running', finishedAt: null, suspendedByExclusive: reservation })])
+    ])
     expect(fil.live.map(item => [item.title, item.kind, item.subtitle])).toEqual([
       ['suspended', 'suspended', exclusiveSuspensionLabel],
-      ['compile', 'suspended', exclusiveSuspensionLabel],
     ])
     expect(fil.forYou.map(item => item.kind)).toEqual(['failed', 'question'])
     expect(fil.recent.map(item => item.kind)).toEqual(['paused'])
   })
 
-  it('keeps settled mission review visible after an earlier exclusive suspension', () => {
-    const fil = filOf([], [task('compile')], [run('mission-run', 'compile', {
+  it('keeps settled conversation review visible after an earlier exclusive suspension', () => {
+    const fil = filOf([chat('compile', {
+      unread: true,
       status: 'succeeded',
       suspendedByExclusive: reservation,
       outcome: {
@@ -201,7 +143,7 @@ describe('the Fil', () => {
       chat('paused', { status: 'running', paused: true, updatedAt: 6 }),
       chat('queued', { status: 'queued', updatedAt: 7 }),
       chat('deleted', { status: 'failed', lifecycle: 'trash' }),
-    ], [], [])
+    ])
     expect(fil.forYou.map(item => [item.title, item.kind])).toEqual([['failed', 'failed'], ['question', 'question']])
     expect(fil.live.map(item => [item.title, item.kind])).toEqual([['queued', 'queued'], ['working', 'running']])
     expect(fil.recent.map(item => [item.title, item.kind])).toEqual([['paused', 'paused'], ['recent', 'recent']])
@@ -210,57 +152,10 @@ describe('the Fil', () => {
 
   it('leaves questions a member cannot answer waiting for someone with access', () => {
     const question = chat('question', { pendingQuestions: 1, status: 'running' })
-    const fil = filOf([question], [], [], {}, Date.now(), [])
+    const fil = filOf([question], {}, {}, Date.now(), [])
     expect(fil.forYou).toEqual([])
     expect(fil.waiting).toMatchObject([{ title: 'question', kind: 'waiting', subtitle: 'Waiting for someone with access' }])
-    expect(filOf([question], [], [], {}, Date.now(), ['main']).forYou.map(item => item.kind)).toEqual(['question'])
-  })
-
-  it('marks each conversation and mission with the coding agent of its latest turn', () => {
-    const fil = filOf([
-      chat('switched', { status: 'running', provider: 'claude' }),
-      chat('new', { provider: null }),
-    ], [task('audit')], [run('audit-run', 'audit', { status: 'running', finishedAt: null, provider: 'opencode' })])
-    expect([...fil.live, ...fil.recent].map(item => [item.title, item.harness])).toEqual([
-      ['switched', 'claude'],
-      ['audit', 'opencode'],
-      ['new', undefined],
-    ])
-  })
-
-  it('reports each mission from its latest run and leaves chat runs to their conversation', () => {
-    const fil = filOf([], [task('audit'), task('triage'), task('digest'), task('old', { archived: true }), task('never')], [
-      run('audit-1', 'audit', { status: 'failed', createdAt: 10, error: 'Tests failed\nstack' }),
-      run('audit-0', 'audit', { status: 'succeeded', createdAt: 5 }),
-      run('triage-1', 'triage', {
-        status: 'running',
-        createdAt: 12,
-        startedAt: 12,
-        finishedAt: null,
-      }),
-      run('digest-1', 'digest', {
-        outcome: {
-          status: 'blocked',
-          reason: 'Needs a GitHub token',
-          evidence: [],
-          reportedAt: 3,
-        },
-        createdAt: 3,
-      }),
-      run('old-1', 'old', { status: 'failed' }),
-      run('chat-1', 'digest', { status: 'failed', trigger: 'chat', createdAt: 99 }),
-    ])
-    expect(fil.forYou.map(item => [item.title, item.kind, item.subtitle])).toEqual([
-      ['audit', 'failed-mission', 'Tests failed'],
-      ['digest', 'review', 'Blocked · Needs a GitHub token'],
-    ])
-    // Missions open beside the Fil, like conversations.
-    expect(fil.live).toMatchObject([{
-      title: 'triage',
-      kind: 'running',
-      to: '/fil/runs/triage-1',
-      runId: 'triage-1',
-    }])
+    expect(filOf([question], {}, {}, Date.now(), ['main']).forYou.map(item => item.kind)).toEqual(['question'])
   })
 
   it('keeps finished work the user has not read in For you, below what needs an answer', () => {
@@ -280,31 +175,29 @@ describe('the Fil', () => {
         updatedAt: 2,
       }),
       chat('paused', { status: 'succeeded', paused: true, unread: false }),
-    ], [task('digest'), task('audit')], [
-      run('digest-1', 'digest', { finishedAt: 60, unread: true, preview: 'Three stories today.' }),
-      run('audit-1', 'audit', {
+      chat('audit', {
+        status: 'succeeded',
+        updatedAt: 70,
         finishedAt: 70,
         unread: true,
         outcome: {
-          status: 'needs_input',
+          status: 'blocked',
           reason: 'Pick a scope',
-          evidence: [],
           reportedAt: 70,
+          evidence: [],
         },
       }),
     ])
     expect(fil.forYou.map(item => [item.title, item.kind])).toEqual([
       ['audit', 'review'],
       ['question', 'question'],
-      ['digest', 'unread'],
       ['done', 'unread'],
     ])
-    expect(fil.forYou[3]).toMatchObject({ at: 40, subtitle: 'Finished', preview: 'Shipped the notes.' })
-    expect(fil.forYou[2]).toMatchObject({ key: 'task:digest', subtitle: 'Mission finished', preview: 'Three stories today.' })
+    expect(fil.forYou[2]).toMatchObject({ at: 40, subtitle: 'Finished', preview: 'Shipped the notes.' })
     expect(fil.recent.map(item => item.title).sort()).toEqual(['paused', 'read'])
   })
 
-  it('lists a mission that scheduled its continuation with waiting conversations, soonest first', () => {
+  it('lists dated conversation continuations, soonest first', () => {
     const wakeup = (wakeAt: number) => ({
       id: `wake-${wakeAt}`,
       messageId: null,
@@ -315,15 +208,14 @@ describe('the Fil', () => {
     })
     const fil = filOf([
       chat('later', { status: 'succeeded', unread: false, wakeup: wakeup(900) }),
-    ], [task('watch')], [
-      run('watch-1', 'watch', { status: 'waiting', finishedAt: null, wakeup: wakeup(300) }),
+      chat('watch', { status: 'succeeded', unread: false, wakeup: wakeup(300) }),
     ])
     expect(fil.live).toEqual([])
     expect(fil.waiting.map(item => [item.title, item.kind, item.wakeAt])).toEqual([
       ['watch', 'waiting', 300],
       ['later', 'waiting', 900],
     ])
-    expect(fil.waiting[0]).toMatchObject({ key: 'task:watch', subtitle: 'Wait for CI', runId: 'watch-1' })
+    expect(fil.waiting[0]).toMatchObject({ key: 'chat:watch', wakeAt: 300 })
   })
 
   it('places automatic quota waits after dated resumptions and keeps attention and suspension priorities', () => {
@@ -348,89 +240,19 @@ describe('the Fil', () => {
           wakeAt: 300,
         },
       }),
-    ], [task('mission')], [run('mission-1', 'mission', quota)])
-    expect(fil.waiting.map(item => item.title)).toEqual(['dated', 'quota', 'admission', 'mission'])
+    ])
+    expect(fil.waiting.map(item => item.title)).toEqual(['dated', 'quota', 'admission'])
     expect(fil.waiting.slice(1).every(item => item.subtitle === 'Waiting for quota' && item.wakeAt === undefined)).toBe(true)
     expect(fil.forYou.map(item => item.title)).toEqual(['question', 'failed'])
     expect(fil.recent.map(item => item.title)).toEqual(['paused'])
     expect(fil.live.map(item => item.title)).toEqual(['reconnect', 'suspended', 'runner'])
-    expect(filOf([chat('quota', { ...quota, accountWaitReason: null })], [], []).live[0].kind).toBe('running')
-  })
-
-  describe('a blocked mission', () => {
-    const blocked = (values: Partial<RunListItem['outcome'] & object> = {}): RunListItem['outcome'] => ({
-      status: 'blocked',
-      reason: 'CI belongs to the parent',
-      evidence: [],
-      reportedAt: 2,
-      ...values,
-    })
-
-    it('goes back to the agent work that started it when it waits on that work', () => {
-      const fil = filOf([chat('orchestrate', { title: 'Orchestrate F8' })], [task('proof'), task('review'), task('orphan')], [
-        run('proof-1', 'proof', { outcome: blocked({ waitingOn: 'requester' }), requestedBy: { runId: 'chat-run', chatId: 'orchestrate' } }),
-        run('review-1', 'review', { outcome: blocked({ waitingOn: 'requester' }), requestedBy: { runId: 'proof-1', taskId: 'proof' } }),
-        // Its requester is gone: the user is the one left to act.
-        run('orphan-1', 'orphan', { outcome: blocked({ waitingOn: 'requester' }), requestedBy: { runId: 'gone', chatId: 'deleted' } }),
-      ])
-      expect(fil.recent.map(item => [item.title, item.kind, item.setAside, item.subtitle, item.requester?.to])).toEqual([
-        ['proof', 'set-aside', 'requester', 'Waiting on Orchestrate F8', '/chats/orchestrate'],
-        ['review', 'set-aside', 'requester', 'Waiting on proof', '/fil/runs/proof-1'],
-        ['Orchestrate F8', 'recent', undefined, 'Cairn', undefined],
-      ])
-      expect(fil.forYou.map(item => [item.title, item.kind])).toEqual([['orphan', 'review']])
-    })
-
-    it('waits in Recent on an outside check, and asks the user by default', () => {
-      const fil = filOf([], [task('ci'), task('token')], [
-        run('ci-1', 'ci', { outcome: blocked({ waitingOn: 'external' }) }),
-        run('token-1', 'token', { outcome: blocked({ waitingOn: 'user' }) }),
-      ])
-      expect(fil.recent).toMatchObject([{
-        title: 'ci',
-        kind: 'set-aside',
-        setAside: 'external',
-        outcome: 'blocked',
-      }])
-      expect(fil.forYou).toMatchObject([{ title: 'token', kind: 'review', outcome: 'blocked' }])
-    })
-
-    it('leaves For you once dismissed, and waits until its snooze ends', () => {
-      const runs = [
-        run('dismissed-1', 'dismissed', { outcome: blocked(), dismissal: { until: null } }),
-        run('snoozed-1', 'snoozed', { outcome: blocked({ status: 'needs_input', reason: 'Pick a scope' }), dismissal: { until: 100 } }),
-      ]
-      const tasks = [task('dismissed'), task('snoozed')]
-      const before = filOf([], tasks, runs, {}, 50)
-      expect(before.recent).toMatchObject([{ title: 'dismissed', kind: 'set-aside', setAside: 'dismissed' }])
-      expect(before.waiting).toMatchObject([{
-        title: 'snoozed',
-        kind: 'snoozed',
-        wakeAt: 100,
-        subtitle: 'Snoozed · Needs your input · Pick a scope',
-      }])
-      expect(before.forYou).toEqual([])
-      expect(filOf([], tasks, runs, {}, 100).forYou.map(item => [item.title, item.kind])).toEqual([['snoozed', 'review']])
-    })
-
-    it('can be dismissed only when blocked: input the agent asked for can only be snoozed', () => {
-      const fil = filOf([], [task('blocked'), task('input')], [
-        run('blocked-1', 'blocked', { outcome: blocked(), createdAt: 2 }),
-        run('input-1', 'input', { outcome: blocked({ status: 'needs_input' }) }),
-      ])
-      expect(fil.forYou.map(item => [item.title, dismissible(item)])).toEqual([['blocked', true], ['input', false]])
-    })
-
-    it('asks again tomorrow at nine, local time', () => {
-      const evening = new Date(2026, 9, 20, 22, 30).getTime()
-      expect(new Date(tomorrowMorning(evening))).toEqual(new Date(2026, 9, 21, 9, 0))
-    })
+    expect(filOf([chat('quota', { ...quota, accountWaitReason: null })]).live[0].kind).toBe('running')
   })
 
   it('treats work read on this page as read until the server catches up, but not a later turn', () => {
     const chats = [chat('done', { status: 'succeeded', unread: true, finishedAt: 40 })]
-    expect(filOf(chats, [], [], { 'chat:done': 40 }).recent.map(item => item.title)).toEqual(['done'])
-    expect(filOf(chats, [], [], { 'chat:done': 39 }).forYou.map(item => item.kind)).toEqual(['unread'])
+    expect(filOf(chats, { 'chat:done': 40 }).recent.map(item => item.title)).toEqual(['done'])
+    expect(filOf(chats, { 'chat:done': 39 }).forYou.map(item => item.kind)).toEqual(['unread'])
   })
 })
 
@@ -508,7 +330,7 @@ describe('delegated conversations', () => {
   it('name the conversation that delegated them while it remains', () => {
     const requester = chat('requester', { title: 'Refactor the send queue', slug: 'refactor' })
     const delegated = chat('delegated', { status: 'running', requester: { chatId: 'requester', title: 'Refactor the send queue' } })
-    const fil = filOf([requester, delegated], [], [])
+    const fil = filOf([requester, delegated])
     expect(fil.live.find(item => item.chatId === 'delegated')?.requester).toEqual({ title: 'Refactor the send queue', to: '/chats/requester', chatId: 'requester' })
     expect(fil.recent.find(item => item.chatId === 'requester')?.requester).toBeUndefined()
   })
@@ -519,18 +341,7 @@ describe('delegated conversations', () => {
       chat('review', { title: 'Review R51', updatedAt: 30, requester: { chatId: 'ship', title: 'Ship PR 382' } }),
       chat('other', { title: 'Other work', updatedAt: 20 }),
       chat('orphan', { title: 'Orphan review', updatedAt: 5, requester: { chatId: 'gone', title: 'Deleted' } }),
-    ], [task('proof')], [
-      run('proof-1', 'proof', {
-        finishedAt: 1,
-        outcome: {
-          status: 'blocked',
-          reason: 'CI belongs to the parent',
-          evidence: [],
-          reportedAt: 1,
-          waitingOn: 'requester',
-        },
-        requestedBy: { runId: 'chat-run', chatId: 'review' },
-      }),
+      chat('proof', { updatedAt: 1, requester: { chatId: 'review', title: 'Review R51' } }),
     ])
     const rows = filThread(filViews(fil).all)
     expect(rows.map(({ item, nested }) => [item.title, nested])).toEqual([
@@ -551,44 +362,8 @@ describe('delegated conversations', () => {
         updatedAt: 30,
         requester: { chatId: 'ship', title: 'Ship PR 382' },
       }),
-    ], [], [])
+    ])
     expect(filThread(filViews(fil).ongoing)).toEqual([{ item: expect.objectContaining({ title: 'Review R51' }), nested: false }])
-  })
-})
-
-describe('quiet missions', () => {
-  const fold = (fil: ReturnType<typeof filOf>) => filFolds(filThread(filViews(fil).all)).map(entry => entry.folded ? entry.folded.map(item => item.title) : entry.item.title)
-
-  it('fold together when two or more finished and were read in a row', () => {
-    const fil = filOf([chat('talk', { title: 'talk', updatedAt: 25 })], [task('a'), task('b'), task('c'), task('d'), task('e')], [
-      run('a-1', 'a', { finishedAt: 50 }),
-      run('b-1', 'b', { finishedAt: 40 }),
-      run('c-1', 'c', { finishedAt: 30 }),
-      run('d-1', 'd', { finishedAt: 20 }),
-      // A lone quiet mission stays a row.
-      run('e-1', 'e', { status: 'failed', finishedAt: 10 }),
-    ])
-    expect(fold(fil)).toEqual([['a', 'b', 'c'], 'talk', 'd', 'e'])
-  })
-
-  it('stay rows while unread, unfinished or followed by the work they delegated', () => {
-    const fil = filOf([], [task('a'), task('b'), task('c'), task('child')], [
-      run('a-1', 'a', { finishedAt: 50, unread: true }),
-      run('b-1', 'b', { finishedAt: 40 }),
-      run('c-1', 'c', { finishedAt: 30 }),
-      run('child-1', 'child', {
-        finishedAt: 20,
-        outcome: {
-          status: 'blocked',
-          reason: 'Waits on c',
-          evidence: [],
-          reportedAt: 20,
-          waitingOn: 'requester',
-        },
-        requestedBy: { runId: 'c-1', taskId: 'c' },
-      }),
-    ])
-    expect(fold(fil)).toEqual(['a', 'b', 'c', 'child'])
   })
 })
 
@@ -598,11 +373,10 @@ describe('finished work', () => {
       chat('done', { title: 'done', status: 'succeeded' }),
       chat('failed', { title: 'failed', status: 'failed' }),
       chat('paused', { title: 'paused', status: 'succeeded', paused: true }),
-    ], [task('mission')], [run('mission-1', 'mission', { status: 'succeeded' })])
+    ])
     expect(filViews(fil).all.map(item => [item.title, !!item.finished]).sort()).toEqual([
       ['done', true],
       ['failed', false],
-      ['mission', true],
       ['paused', false],
     ])
   })
@@ -620,31 +394,14 @@ describe('compact reception tabs', () => {
       }),
       chat('working', { status: 'running' }),
     ]
-    const before = filViews(filOf(chats, [], []))
+    const before = filViews(filOf(chats))
     expect(before.unread.map(item => item.title)).toEqual(['answer', 'error'])
     expect(before.ongoing.map(item => item.title)).toEqual(['answer', 'working'])
-    const after = filViews(filOf(chats, [], [], { 'chat:answer': 10, 'chat:error': 20 }))
+    const after = filViews(filOf(chats, { 'chat:answer': 10, 'chat:error': 20 }))
     expect(after.unread).toEqual([])
     expect(after.ongoing.map(item => [item.title, item.kind])).toEqual([['answer', 'question'], ['working', 'running']])
     expect(after.all.find(item => item.title === 'error')?.kind).toBe('failed')
-    expect(filViews(filOf([chat('answer', { pendingQuestions: 2, unread: true, readAt: 30 })], [], [], { 'chat:answer': 10 })).unread).toHaveLength(1)
-  })
-
-  it('keeps read mission results in Tout and pending outcomes in En cours', () => {
-    const runs = [run('done', 'mission', { unread: true, finishedAt: 20 }), run('blocked', 'input', {
-      unread: true,
-      finishedAt: 30,
-      outcome: {
-        status: 'needs_input',
-        reason: 'Pick one',
-        reportedAt: 30,
-        evidence: [],
-      },
-    })]
-    const views = filViews(filOf([], [task('mission'), task('input')], runs, { 'task:mission': 20, 'task:input': 30 }))
-    expect(views.unread).toEqual([])
-    expect(views.ongoing.map(item => item.title)).toEqual(['input'])
-    expect(views.all.map(item => item.title)).toEqual(['input', 'mission'])
+    expect(filViews(filOf([chat('answer', { pendingQuestions: 2, unread: true, readAt: 30 })], { 'chat:answer': 10 })).unread).toHaveLength(1)
   })
 
   it('does not notify for completed delegated conversations', () => {
@@ -654,38 +411,33 @@ describe('compact reception tabs', () => {
       finishedAt: 30,
       requestedBy: { chatId: 'parent', runId: 'run', requestId: null },
 
-    })], [], []))
+    })]))
     expect(views.unread).toEqual([])
     expect(views.all.map(item => item.title)).toEqual(['delegate'])
   })
 })
 
-it('shows unread notifications regardless of outcome routing or snooze state', () => {
-  for (const waitingOn of ['external', 'user'] as const) {
-    const views = filViews(filOf([], [task('mission')], [run('result', 'mission', {
-      unread: true,
-      finishedAt: 20,
-      outcome: {
-        status: 'blocked',
-        waitingOn,
-        reason: 'Waiting',
-        reportedAt: 20,
-        evidence: [],
-      },
-      ...(waitingOn === 'user' ? { dismissal: { until: 100 } } : {}),
-    })], {}, 50))
-    expect(views.unread).toHaveLength(1)
-    expect(views.all[0].unread).toBe(true)
-    expect(filViews(filOf([], [task('mission')], [run('result', 'mission', {
-      unread: true,
-      finishedAt: 20,
-      outcome: {
-        status: 'blocked',
-        waitingOn,
-        reason: 'Waiting',
-        reportedAt: 20,
-        evidence: [],
-      },
-    })], { 'task:mission': 20 })).unread).toEqual([])
+it('shows blocked conversations until read or snoozed for the account', () => {
+  const outcome = {
+    status: 'blocked' as const,
+    waitingOn: 'external' as const,
+    reason: 'Waiting for CI',
+    reportedAt: 20,
+    evidence: [],
   }
+  const chats = [chat('schedule', {
+    status: 'succeeded',
+    originRule: { ruleId: 'rule', ruleName: 'CI', schedule: true },
+    unread: true,
+    finishedAt: 20,
+    outcome,
+  }), chat('question', { pendingQuestions: 1, unread: true, readAt: 30 })]
+  expect(filOf(chats).forYou.map(item => item.kind)).toEqual(['review', 'question'])
+  expect(filOf(chats, {}, { schedule: 100, question: 100 }, 50).waiting.map(item => item.kind)).toEqual(['snoozed', 'snoozed'])
+  expect(filOf(chats, { 'chat:schedule': 20 }).recent[0]).toMatchObject({ outcome: 'blocked' })
+})
+
+it('defaults to nine tomorrow using local time', () => {
+  const time = new Date(2026, 4, 1, 22, 5)
+  expect(new Date(tomorrowMorning(time.getTime()))).toEqual(new Date(2026, 4, 2, 9))
 })

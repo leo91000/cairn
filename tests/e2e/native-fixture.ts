@@ -4,7 +4,6 @@ import type {
   Project,
   Run,
   RunEvent,
-  Task,
 } from '../../packages/contracts/contracts'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
@@ -62,8 +61,8 @@ export class NativeFixture {
   })
 
   project = (input: unknown): Project => this.call('project', input)
-  task = (input: unknown, id?: string): Task => this.call('task', input, id)
-  enqueue = (id: string): Run => this.call('enqueue', id)
+  /** An existing conversation owns the synthetic run used to seed timeline and artifacts. */
+  chatRun = (chatId: string, title: string): Run => this.call('chatRun', chatId, title)
   skills = { save: (name: string, content: string) => this.call('skill', name, content) }
   chats = { detail: (id: string): ChatDetail => this.call('detail', id) }
   questions = { list: (id: string) => this.chats.detail(id).questions }

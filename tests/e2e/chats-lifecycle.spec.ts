@@ -640,7 +640,7 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   // independent flow with a fresh limiter while preserving the seeded data.
   await workspace.restart()
   initializeRepository(workspace.projectPath)
-  await page.goto(workspacePath('/tasks'))
+  await page.goto(workspacePath('/rules'))
   await authenticateWorkspace(page)
   await expect(page.locator('.task-focus-detail')).toBeVisible()
   await page.goto(workspacePath('/chats'))

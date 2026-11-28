@@ -671,26 +671,6 @@ class ConversationPresentationTest {
     }
 
     @Test
-    fun `run outcomes and project revisions survive decoding and task attention grouping`() {
-        val run =
-            wireJson.decodeFromString<Run>(
-                """{"id":"r","status":"succeeded","outcome":{"status":"blocked","reason":"Missing access","evidence":["403"],"reportedAt":10},"workspaces":[{"projectId":"p","path":"/p","revision":"abcdef","kind":"worktree"}],"taskId":"fixture-task"}"""
-            )
-        assertEquals("À examiner", taskGroup(Task(), run))
-        assertEquals("abcdef", run.workspaces.single().revision)
-        assertEquals(listOf("403"), run.outcome!!.evidence)
-        val project =
-            wireJson.decodeFromString<Project>(
-                """{"id":"00000000-0000-4000-8000-000000000001","name":"Project","path":"/project","origin":"","revision":"fixture","createdAt":0,"sourceMode":"local"}"""
-            )
-        assertEquals("local", project.sourceMode)
-        assertEquals(
-            "Terminées",
-            taskGroup(Task(), run.copy(outcome = run.outcome.copy(status = "completed"))),
-        )
-    }
-
-    @Test
     fun `the header stays quiet while the agent works and names a background wait or a failure`() {
         // The ring on the avatar shows work; the subtitle names the project, or the agent without
         // one.

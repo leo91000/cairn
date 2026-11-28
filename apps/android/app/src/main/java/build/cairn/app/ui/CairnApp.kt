@@ -38,14 +38,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Top-level destinations reached from the dock; everything else is a pushed screen. */
-private val topLevel = setOf("fil", "missions", "atelier")
+private val topLevel = setOf("fil", "rules", "atelier")
 
 /** Screens that take the whole height: no dock, no generic top bar. */
 private fun focusedRoute(route: String) =
     route.startsWith("chat/") ||
         route.startsWith("new-chat") ||
         route.startsWith("run/") ||
-        route.startsWith("fil/run/") ||
         route.startsWith("agents/") ||
         route.startsWith("coding-agent-configuration/") ||
         route == "search" ||
@@ -54,11 +53,7 @@ private fun focusedRoute(route: String) =
 internal fun dockSelection(route: String): String =
     when {
         route in topLevel -> route
-        route.startsWith("chat/") ||
-            route.startsWith("fil/run/") ||
-            route.startsWith("new-chat") ||
-            route == "search" -> "fil"
-        route.startsWith("run/") -> "missions"
+        route.startsWith("chat/") || route.startsWith("new-chat") || route == "search" -> "fil"
         else -> "atelier"
     }
 
@@ -381,13 +376,14 @@ private fun WorkspaceApp(
     val focused = focusedContent || focusedRoute(route)
     val selected = dockSelection(route)
     val conversations = rememberFilConversations(vm, state)
-    val activity = rememberFilActivity(vm)
+    LaunchedEffect(conversations.state?.chats) {
+        conversations.state?.chats?.let(vm::observeSnoozes)
+    }
     val feed =
         buildFeed(
             conversations.state?.chats.orEmpty().filter { it.lifecycle == "active" },
-            activity.orEmpty(),
-            state.tasks,
             vm.localReads,
+            vm.localSnoozes,
             usable = state.usableAgents,
         )
     val attention = filAttention(feed)
@@ -404,7 +400,7 @@ private fun WorkspaceApp(
         LocalPerformanceScreen provides { detailScreen = it },
         LocalSnackbar provides snackbar,
         LocalAgentPortraits provides rememberAgentPortraits(vm, state),
-        LocalFilSnapshot provides FilSnapshot(conversations, activity),
+        LocalFilSnapshot provides FilSnapshot(conversations),
     ) {
         BoxWithConstraints(
             Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
@@ -509,7 +505,6 @@ private fun WorkspaceApp(
                                     vm,
                                     state,
                                     openChat = { nav.navigate("chat/$it") },
-                                    openRun = { nav.navigate("fil/run/$it") },
                                     openConnections = ::openConnections,
                                     search = { nav.navigate("search") },
                                     openAccount = ::openSettings,
@@ -521,8 +516,6 @@ private fun WorkspaceApp(
                                     state,
                                     back = { nav.popBackStack() },
                                     openChat = { nav.navigate("chat/$it") { popUpTo("fil") } },
-                                    openRun = { nav.navigate("run/$it") { popUpTo("fil") } },
-                                    openMission = { navigate("missions") },
                                     newChat = { agent ->
                                         nav.navigate("new-chat?agent=$agent&project=") {
                                             popUpTo("fil")
@@ -538,7 +531,6 @@ private fun WorkspaceApp(
                                     entry.arguments?.getString("id"),
                                     openChat = { nav.navigate("chat/$it") { popUpTo("fil") } },
                                     openRun = { nav.navigate("run/$it") },
-                                    openFilRun = { nav.navigate("fil/run/$it") { popUpTo("fil") } },
                                     back = { nav.popBackStack() },
                                     create = { nav.navigate("new-chat") },
                                     openConnections = ::openConnections,
@@ -558,20 +550,6 @@ private fun WorkspaceApp(
                                         entry.arguments?.getString("project").orEmpty(),
                                     openChat = { nav.navigate("chat/$it") { popUpTo("fil") } },
                                     openRun = { nav.navigate("run/$it") },
-                                    back = { nav.popBackStack() },
-                                    create = { nav.navigate("new-chat") },
-                                    openConnections = ::openConnections,
-                                    openSettings = ::openSettings,
-                                )
-                            }
-                            composable("fil/run/{id}") { entry ->
-                                FilRunScreen(
-                                    vm,
-                                    state,
-                                    entry.arguments?.getString("id").orEmpty(),
-                                    openChat = { nav.navigate("chat/$it") { popUpTo("fil") } },
-                                    openRun = { nav.navigate("run/$it") },
-                                    openFilRun = { nav.navigate("fil/run/$it") { popUpTo("fil") } },
                                     back = { nav.popBackStack() },
                                     create = { nav.navigate("new-chat") },
                                     openConnections = ::openConnections,
@@ -635,10 +613,7 @@ private fun WorkspaceApp(
                                     back = { nav.popBackStack() },
                                 )
                             }
-                            composable("missions") {
-                                MissionsScreen(vm, state) { nav.navigate("run/$it") }
-                            }
-                            composable("runs") { RunsScreen(vm, state) { nav.navigate("run/$it") } }
+                            composable("runs") { RunsScreen(vm) { nav.navigate("run/$it") } }
                             composable("run/{id}") { entry ->
                                 RunScreen(
                                     vm,

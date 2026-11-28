@@ -73,29 +73,21 @@ class SignalJourneyTest {
     private val manager = Project("bac8fd52-058a-52cd-8904-a2d40746b051", "Cairn")
     private val site = Project("e11e98cf-45bf-5364-83b7-7606435a2154", "Site vitrine")
     private val daily =
-        Task(
-            "a05f5991-ec1e-57a2-a8e5-ec314581a110",
-            "Revue quotidienne",
-            "Relire les changements du jour.",
-            MAIN_AGENT_ID,
-            cron = "0 9 * * *",
-            nextRun = now + 3_600_000,
-            scheduleFailure =
-                ScheduleFailure(
-                    message = "Aucune node native autorisée.",
-                    scheduledFor = now - 82_800_000,
-                    at = now - 82_800_000,
-                ),
+        build.cairn.contracts.RunTaskSnapshot(
+            id = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
+            name = "Revue quotidienne",
+            prompt = "Relire les changements du jour.",
+            agentId = MAIN_AGENT_ID,
         )
     private val failed =
         Run(
             id = "failed-run",
             taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
             status = "failed",
-            trigger = "schedule",
+            trigger = "chat",
             startedAt = now - 7_200_000,
             finishedAt = now - 7_000_000,
-            snapshot = Snapshot(task = daily.runTaskSnapshot(), agent = main),
+            snapshot = Snapshot(task = daily, agent = main),
         )
     private val chats =
         listOf(
@@ -189,35 +181,6 @@ class SignalJourneyTest {
                                         )
                                     )
                                 )
-                            path == "/api/installations/fixture/api/tasks" &&
-                                request.method == "GET" ->
-                                json(
-                                    wireJson.encodeToString(
-                                        build.cairn.contracts.ListMissionsOutput(listOf(daily))
-                                    )
-                                )
-                            path ==
-                                "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/state" &&
-                                request.method == "POST" ->
-                                json(wireJson.encodeToString(daily.copy(enabled = false)))
-                            path == "/api/installations/fixture/api/tasks/activity" ->
-                                json(wireJson.encodeToString(listOf(failed)))
-                            path ==
-                                "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run" ->
-                                json(
-                                    wireJson.encodeToString(
-                                        Run(
-                                            id = "new-run",
-                                            taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
-                                            status = "running",
-                                            snapshot =
-                                                Snapshot(
-                                                    task = daily.runTaskSnapshot(),
-                                                    agent = main,
-                                                ),
-                                        )
-                                    )
-                                )
                             path == "/api/installations/fixture/api/runs" ->
                                 json(
                                     wireJson.encodeToString(
@@ -291,10 +254,10 @@ class SignalJourneyTest {
                                                         .removeSuffix("/stream"),
                                                 taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
                                                 status = "running",
-                                                trigger = "schedule",
+                                                trigger = "chat",
                                                 snapshot =
                                                     Snapshot(
-                                                        task = daily.runTaskSnapshot(),
+                                                        task = daily,
                                                         agent = main,
                                                     ),
                                             )
@@ -498,26 +461,9 @@ class SignalJourneyTest {
     fun `fil groups what needs the user, live work and recent conversations`() = journey {
         waitText("Choisir la pagination")
         compose.onNodeWithText("Tout").assertIsSelected()
-        // Conversations and mission activity arrive through separate requests.
-        waitText("Revue quotidienne")
         compose.onNodeWithText("Répondre").assertExists()
         compose.onNodeWithText("En cours", useUnmergedTree = true).assertExists()
-        compose.onNodeWithText("Revue quotidienne").assertExists()
-        // The running conversation animates in the Fil: comet ring and "En cours" with its wave.
-        compose
-            .onAllNodesWithTag("chat-working-avatar", useUnmergedTree = true)
-            .assertCountEquals(0)
-        compose.onNodeWithText("En cours 2").assertExists()
         capture("fil-light")
-        // A failed mission is retried in place and its new run opens.
-        compose.onNodeWithContentDescription("Autres actions pour Revue quotidienne").performClick()
-        compose.onNodeWithText("Relancer").performClick()
-        waitCall(
-            "POST",
-            "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run",
-        )
-        waitDescription("Retour")
-        compose.onNodeWithContentDescription("Retour").performClick()
         // A running conversation shows the live working indicator.
         waitText("Refonte de l’application")
         compose.onNodeWithText("Refonte de l’application").performClick()
@@ -538,31 +484,6 @@ class SignalJourneyTest {
         compose.waitUntil(15000) {
             compose.onAllNodes(hasTestTag(tag) and isSelected()).fetchSemanticsNodes().isNotEmpty()
         }
-
-    @Test
-    fun `a mission opens beside its conversations and swipes follow the Fil`() = journey {
-        waitText("Revue quotidienne")
-        compose.onNodeWithText("Revue quotidienne").performClick()
-        waitPage("run-page:failed-run")
-        // The mission itself is one tab away from its run.
-        waitText("Mission")
-        compose.onNodeWithText("Mission").performClick()
-        waitText("Lancer maintenant")
-        compose.onNodeWithContentDescription("Modifier la mission").assertExists()
-        capture("fil-mission-light")
-        // Tout is chronological: question, running conversation, failed mission, older chat.
-        val pager = compose.onNodeWithTag("conversation-pager")
-        pager.performTouchInput { swipeRight() }
-        waitPage("chat-page:451f26a2-b83b-5559-b07e-9a031e6de7cb")
-        waitDescription("Changer de conversation : Refonte de l’application")
-        pager.performTouchInput { swipeRight() }
-        waitPage("chat-page:765886cd-efa2-5d30-bdce-99340ee87a3d")
-        waitDescription("Changer de conversation : Choisir la pagination")
-        // Swiping replaces nothing in the back stack: Back returns to the Fil.
-        compose.onNodeWithContentDescription("Retour").performClick()
-        waitText("Revue quotidienne")
-        compose.onNodeWithTag("fil").assertExists()
-    }
 
     @Test
     fun `a conversation waiting for a background task says so instead of working`() =
@@ -628,25 +549,6 @@ class SignalJourneyTest {
         }
 
     @Test
-    fun `search finds missions and conversations and launches a mission`() = journey {
-        waitText("Choisir la pagination")
-        compose.onNodeWithContentDescription("Rechercher").performClick()
-        compose.onNodeWithTag("search-field").performTextInput("revue")
-        waitText("Lancer « Revue quotidienne »")
-        compose.onNodeWithText("Guide de revue").assertExists()
-        capture("search-light")
-        compose.onNodeWithTag("search-field").performTextReplacement("pagination")
-        waitText("CONVERSATIONS")
-        compose.onNodeWithText("Lancer « Revue quotidienne »").assertDoesNotExist()
-        compose.onNodeWithTag("search-field").performTextReplacement("revue")
-        compose.onNodeWithText("Lancer « Revue quotidienne »").performClick()
-        waitCall(
-            "POST",
-            "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run",
-        )
-    }
-
-    @Test
     fun `new conversation chooses the agent and project on screen`() = journey {
         waitText("Choisir la pagination")
         compose.onNodeWithContentDescription("Nouvelle conversation").performClick()
@@ -698,57 +600,6 @@ class SignalJourneyTest {
                 .jsonObject
         assertEquals("Préparer la nouvelle page d’accueil", message["text"]?.jsonPrimitive?.content)
         assertEquals("claude", message["provider"]?.jsonPrimitive?.content)
-    }
-
-    @Test
-    fun `mission sheet shows the schedule and history and pauses the mission`() = journey { vm ->
-        waitDescription("Missions")
-        compose.onNodeWithContentDescription("Missions").performClick()
-        // The strip appears once the recent runs are loaded.
-        waitDescription("1 réussies sur 2 dernières exécutions")
-        compose.onNodeWithText("Tous les jours · 09:00").assertExists()
-        compose.onNodeWithText("Revue quotidienne").performClick()
-        compose.onNodeWithTag("mission-sheet").assertIsDisplayed()
-        waitText("50 % de réussite")
-        compose.onNodeWithText("09:00").assertExists()
-        // The failure is flagged on the card and listed in the history.
-        compose.onAllNodesWithText("Échec").assertCountEquals(2)
-        // A skipped scheduled occurrence is explained instead of leaving a silent gap.
-        compose
-            .onNodeWithText("n’a pas démarré : Aucune node native autorisée.", substring = true)
-            .assertExists()
-        capture("mission-sheet-light")
-        compose.onNodeWithContentDescription("Mettre en pause").performScrollTo().performClick()
-        waitCall(
-            "POST",
-            "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/state",
-        )
-        val saved =
-            wireJson
-                .parseToJsonElement(
-                    calls
-                        .first {
-                            it.first == "POST" &&
-                                it.second ==
-                                    "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/state"
-                        }
-                        .third
-                )
-                .jsonObject
-        assertEquals("false", saved["enabled"]?.jsonPrimitive?.content)
-        // Actions stay disabled while the save refreshes the workspace.
-        compose.waitUntil(15000) {
-            compose
-                .onAllNodes(hasText("Lancer maintenant") and isEnabled())
-                .fetchSemanticsNodes()
-                .isNotEmpty() && !vm.state.value.busy
-        }
-        compose.onNodeWithText("Lancer maintenant").performScrollTo().performClick()
-        waitCall(
-            "POST",
-            "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run",
-        )
-        waitDescription("Retour")
     }
 
     @Test

@@ -63,20 +63,7 @@ class RefreshMeasurementTest {
                 assertTrue(vm.state.value.session.authenticated)
                 val agent =
                     vm.api.send<JsonObject>("POST", "/agents", body("name" to "Native measurement"))
-                val task =
-                    vm.api.send<JsonObject>(
-                        "POST",
-                        "/tasks",
-                        buildJsonObject {
-                            put("name", "Native mission")
-                            put("agentId", agent["id"]!!)
-                            put("prompt", "Fixture only")
-                            put("enabled", false)
-                            put("worktree", false)
-                        },
-                    )
                 val agentForm = wireJson.decodeFromJsonElement<Agent>(agent)
-                val taskForm = wireJson.decodeFromJsonElement<Task>(task)
                 for (route in listOf("relay", "direct")) {
                     vm.api.closeStreams()
                     if (route == "direct") {
@@ -88,18 +75,12 @@ class RefreshMeasurementTest {
                             } while (vm.api.transport.route.value != "direct")
                         }
                     }
-                    for ((kind, record, strategy) in
-                        listOf(
-                            Triple("agents", agent, "global"),
-                            Triple("tasks", task, "global"),
-                            Triple("tasks", task, "task-only-prototype"),
-                        )) {
+                    for ((kind, record, strategy) in listOf(Triple("agents", agent, "global"))) {
                         repeat(21) { index ->
                             withContext(Dispatchers.Main) {
                                 Performance.mainThread = Looper.getMainLooper().thread
                                 Performance.store.clear()
-                                Performance.screen =
-                                    if (kind == "tasks") PerfScreen.MISSIONS else PerfScreen.ATELIER
+                                Performance.screen = PerfScreen.ATELIER
                                 Performance.connection =
                                     if (route == "direct") PerfConnection.DIRECT
                                     else PerfConnection.RELAY
@@ -107,46 +88,22 @@ class RefreshMeasurementTest {
                                 val saving = ResourceSave(id)
                                 val editedName = "Native $kind $index"
                                 val started = System.nanoTime()
-                                val response =
-                                    saving.save(
-                                        vm.api,
-                                        "/$kind",
-                                        {
-                                            if (kind == "agents")
-                                                wireJson.encodeToJsonElement(
-                                                    agentForm.copy(name = editedName)
-                                                )
-                                            else
-                                                wireJson.encodeToJsonElement(
-                                                    taskForm.copy(name = editedName)
-                                                )
-                                        },
-                                    )
-                                if (kind == "tasks") wireJson.decodeFromJsonElement<Task>(response)
-                                val written = System.nanoTime()
-                                if (strategy == "global") {
-                                    vm.refresh()
-                                    val published =
-                                        if (kind == "agents")
-                                            vm.state.value.agents.any {
-                                                it.id == id && it.name == editedName
-                                            }
-                                        else
-                                            vm.state.value.tasks.any {
-                                                it.id == id && it.name == editedName
-                                            }
-                                    assertTrue(published)
-                                } else
-                                    coroutineScope {
-                                        // Read-set experiment only: no new product invalidation
-                                        // rules.
-                                        val tasks = async { vm.api.get<List<Task>>("/tasks") }
-                                        assertTrue(
-                                            tasks.await().any {
-                                                it.id == id && it.name == editedName
-                                            }
+                                saving.save(
+                                    vm.api,
+                                    "/$kind",
+                                    {
+                                        wireJson.encodeToJsonElement(
+                                            agentForm.copy(name = editedName)
                                         )
+                                    },
+                                )
+                                val written = System.nanoTime()
+                                vm.refresh()
+                                assertTrue(
+                                    vm.state.value.agents.any {
+                                        it.id == id && it.name == editedName
                                     }
+                                )
                                 val finished = System.nanoTime()
                                 val snapshot = Performance.store.snapshot()
                                 assertEquals(route, vm.api.transport.route.value)
@@ -206,7 +163,6 @@ class RefreshMeasurementTest {
                         buildJsonObject {
                             put("agents", vm.state.value.agents.size)
                             put("projects", vm.state.value.projects.size)
-                            put("tasks", vm.state.value.tasks.size)
                             put("skills", vm.state.value.skills.size)
                             put("mcps", vm.state.value.mcps.size)
                             put(

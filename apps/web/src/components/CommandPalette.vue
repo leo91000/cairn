@@ -12,10 +12,10 @@ import {
 } from 'vue'
 import { useRouter } from 'vue-router'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
-import { runMission as queueMission } from '../../../../packages/contracts/generated/runMission'
 import { canUseAgent, defaultAgent } from '../agent-use'
-import { api, notify, state } from '../api'
+import { state } from '../api'
 import { chatList } from '../chat-list'
+import { localSnoozes } from '../dismissals'
 import {
   Activity,
   BookOpen,
@@ -26,7 +26,6 @@ import {
   Keyboard,
   Layers,
   Moon,
-  Play,
   Plug,
   Plus,
   Puzzle,
@@ -35,7 +34,6 @@ import {
   Trash2,
   X,
 } from '../icons'
-import { refreshMissionRuns, useMissionRuns } from '../mission-runs'
 import { localReads } from '../reads'
 import { modifier } from '../shortcuts'
 import { filOf, filViews } from '../signal'
@@ -44,7 +42,7 @@ import { chatPath } from '../workspace-links'
 import AgentAvatar from './AgentAvatar.vue'
 import Icon from './Icon.vue'
 
-// Universal search with direct actions: conversations, missions, agents, projects and skills.
+// Universal search with direct actions: conversations, agents, projects and skills.
 const emit = defineEmits<{
   close: []
   shortcuts: []
@@ -52,7 +50,6 @@ const emit = defineEmits<{
   trash: []
 }>()
 const router = useRouter()
-const runs = useMissionRuns()
 const dialog = ref<HTMLDialogElement>()
 const input = ref<HTMLInputElement>()
 const list = ref<HTMLElement>()
@@ -72,17 +69,6 @@ interface Command {
 }
 
 const go = (to: string) => () => router.push(to)
-
-async function runMission(id: string, name: string) {
-  try {
-    await queueMission(api, { taskId: id })
-    notify(`${name} started`)
-    await refreshMissionRuns()
-  }
-  catch (error) {
-    notify((error as Error).message)
-  }
-}
 
 const commands = computed<Command[]>(() => {
   const items: Command[] = [
@@ -111,12 +97,12 @@ const commands = computed<Command[]>(() => {
       run: go('/'),
     },
     {
-      id: 'missions',
+      id: 'rules',
       group: 'Actions',
-      label: 'Go to Missions',
+      label: 'Go to Rules',
       icon: CalendarClock,
-      keys: ['G', 'M'],
-      run: go('/tasks'),
+      keys: ['G', 'R'],
+      run: go('/rules'),
     },
     {
       id: 'atelier',
@@ -135,12 +121,12 @@ const commands = computed<Command[]>(() => {
       run: go('/runs'),
     },
     {
-      id: 'new-mission',
+      id: 'schedule-agent',
       group: 'Actions',
-      label: 'New mission',
+      label: 'Schedule an agent',
       icon: CalendarClock,
       keywords: 'task schedule',
-      run: go('/tasks?new=1'),
+      run: go('/rules?schedule=1'),
     },
     {
       id: 'theme',
@@ -190,7 +176,7 @@ const commands = computed<Command[]>(() => {
     }
   }
 
-  const fil = filOf(chatList.value, state.tasks, runs.value, localReads, undefined, state.usableAgents)
+  const fil = filOf(chatList.value, localReads, localSnoozes, undefined, state.usableAgents)
   for (const item of filViews(fil).unread) {
     items.push({
       id: `need-${item.key}`,
@@ -212,28 +198,6 @@ const commands = computed<Command[]>(() => {
         hint: [chat.agentName, chat.projectName].filter(Boolean).join(' · '),
         avatar: { name: chat.agentName, key: chat.agentId },
         run: go(chatPath(chat)),
-      })
-    }
-  }
-
-  for (const task of state.tasks.filter(task => !task.archived)) {
-    const usable = canUseAgent(state.usableAgents, task.agentId)
-    items.push({
-      id: `task-${task.id}`,
-      group: 'Missions',
-      label: task.name,
-      hint: task.enabled ? 'Mission' : 'Paused mission',
-      icon: CalendarClock,
-      keywords: task.prompt.slice(0, 400),
-      run: go(`/tasks?task=${task.id}`),
-    })
-    if (usable) {
-      items.push({
-        id: `run-${task.id}`,
-        group: 'Missions',
-        label: `Run “${task.name}” now`,
-        icon: Play,
-        run: () => runMission(task.id, task.name),
       })
     }
   }
@@ -429,7 +393,7 @@ function cancel() {
           ref="input"
           v-model="query"
           class="min-h-0! min-w-0 flex-1 border-0! bg-transparent! p-0! text-[16px] text-ink shadow-none! outline-none placeholder:text-subtle"
-          placeholder="Search conversations, missions, or type a command…"
+          placeholder="Search conversations or type a command…"
           aria-label="Search"
           role="combobox"
           aria-expanded="true"

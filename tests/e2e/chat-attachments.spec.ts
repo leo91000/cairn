@@ -114,7 +114,7 @@ test('uploads images and files, previews them and preserves attachments while ed
     })
   })
   initializeRepository(workspace.projectPath)
-  await page.goto(workspacePath('/tasks'))
+  await page.goto(workspacePath('/rules'))
   await authenticateWorkspace(page)
   await expect(page.locator('.task-focus-detail')).toBeVisible()
   await page.goto(workspacePath('/chats'))

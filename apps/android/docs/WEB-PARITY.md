@@ -1,5 +1,24 @@
 # Android 0.6.0 / web parity
 
+
+## Programmations et Fil (ADR-0094)
+
+Web et Android ouvrent **Programmer un agent** depuis les Règles. Le formulaire
+choisit l’agent, le projet, le brief et un cron à cinq champs ou une date unique
+avec fuseau IANA. Android utilise les sélecteurs natifs de date et d’heure.
+Le formulaire crée une règle Horloge avec une condition de chevauchement que
+l’éditeur complet peut modifier. **Lancer maintenant** apparaît lorsque le
+serveur l’autorise et ouvre l’historique de la règle.
+
+Le Fil montre l’origine des conversations programmées, les résultats bloqués
+et les questions. **Reporter jusqu’à**, **Rétablir** et **Marquer comme lu**
+s’appliquent au compte connecté. Les écrans de missions ont été retirés. Le
+journal permet de consulter une exécution et d’ouvrir sa conversation.
+
+Les deux interfaces utilisent les mêmes opérations que le MCP public et
+`cairn_installation` pour créer une règle Horloge, la déclencher, reporter une
+conversation et la marquer lue.
+
 ## Signal Pur login and MCP OAuth consent (2026-11-26)
 
 Web and Android share the Signal Pur presentation for account sign-in and MCP OAuth

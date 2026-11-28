@@ -543,7 +543,7 @@ async fn common_questionnaires_survive_replacing_the_native_session() {
             .unwrap();
         f.service
             .store
-            .update_run_boundary_fixture(&f.run, json!({ "outcome": { "status": "needs_input" } }))
+            .update_run_boundary_fixture(&f.run, json!({ "outcome": { "status": "blocked" } }))
             .await
             .unwrap();
         f.finish().await;

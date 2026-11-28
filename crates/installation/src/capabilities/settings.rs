@@ -68,7 +68,7 @@ pub(crate) const SETTINGS_OPERATIONS: &[SettingsOperation] = &[
     SettingsOperation {
         name: "get_installation_overview",
         scope: "read",
-        description: "Count retained runs by status, agents, projects and missions, with host concurrency.",
+        description: "Count retained runs by status, agents, projects and hook rules, with host concurrency.",
     },
     SettingsOperation {
         name: "list_audit",

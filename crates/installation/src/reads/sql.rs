@@ -51,6 +51,20 @@ impl Db<'_> {
         Ok(())
     }
 
+    pub fn clear_snooze_through(
+        &self,
+        account: &str,
+        chat_id: &str,
+        finished_at: i64,
+    ) -> Result<()> {
+        self.0
+            .prepare_cached(
+                "DELETE FROM account_snoozes WHERE account_id=? AND chat_id=? AND finished_at<=?",
+            )?
+            .execute(params![account, chat_id, finished_at])?;
+        Ok(())
+    }
+
     pub fn clear_read_mark(&self, account: &str, chat_id: &str) -> Result<()> {
         self.0
             .prepare_cached("DELETE FROM account_reads WHERE account_id=? AND chat_id=?")?

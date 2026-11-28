@@ -146,27 +146,28 @@ test('a member mutation refused behind another member upload succeeds exactly on
       setInterval(() => fragment(0xFFFF0001, total, offset++, new TextEncoder().encode(' ')), 1000)
     })
 
-    await member.getByRole('link', { name: 'Missions', exact: true }).first().click()
-    await member.getByRole('button', { name: 'New mission', exact: true }).click()
-    await member.getByLabel('Mission name').fill('Large member mission')
+    await member.getByRole('link', { name: 'Rules', exact: true }).first().click()
+    await member.getByRole('button', { name: 'Schedule an agent', exact: true }).click()
+    await member.getByLabel('Name').fill('Large member schedule')
     const prompt = 'x'.repeat(20000)
-    await member.getByLabel('What should happen?').fill(prompt)
+    await member.getByLabel('Brief').fill(prompt)
     await member.evaluate(() => {
       Object.assign(window, { capacityRoutes: [] })
       window.addEventListener('cairn-transport-observation', (event) => {
         const observation = (event as CustomEvent).detail
-        if (observation.method === 'POST' && observation.path === '/tasks')
+        if (observation.method === 'POST' && observation.path === '/hook-rules')
           (window as typeof window & { capacityRoutes: string[] }).capacityRoutes.push(observation.route)
       })
     })
-    await member.getByRole('button', { name: 'Create mission', exact: true }).click()
+    await member.getByRole('button', { name: 'Create schedule', exact: true }).click()
     await expect(member.getByRole('dialog')).toHaveCount(0)
     expect(await member.evaluate(() => (window as typeof window & { capacityRoutes: string[] }).capacityRoutes)).toEqual(['relay'])
     await expect(member.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'direct')
-    const tasks = await (await member.request.get(`${url}/api/installations/${installationId}/api/tasks`)).json()
-    const created = tasks.tasks.filter((task: { name: string }) => task.name === 'Large member mission')
+    const tasks = await (await member.request.get(`${url}/api/installations/${installationId}/api/hook-rules`)).json()
+    const created = tasks.rules.filter((task: { name: string }) => task.name === 'Large member schedule')
     expect(created).toHaveLength(1)
-    expect(created[0].prompt).toBe(prompt)
+    const rule = await (await member.request.get(`${url}/api/installations/${installationId}/api/hook-rules/${created[0].id}`)).json()
+    expect(rule.definition.steps[0].then[0].action.prompt.value).toBe(prompt)
     await expect(holder.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'direct')
   }
   finally {

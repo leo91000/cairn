@@ -17,6 +17,7 @@ import { expect, test } from '@playwright/test'
 import { executeBeaconSql, expireAccountProof } from './beacon-relay-fixture'
 import { openChatDetails } from './fixtures'
 import { NativeFixture } from './native-fixture'
+import { scheduleDefinition } from './schedule-fixture'
 
 test('owner shares an installation and member works without management controls', async ({ page, browser }) => {
   test.setTimeout(120000)
@@ -150,19 +151,13 @@ test('owner shares an installation and member works without management controls'
     const commitment = {
       headers: { 'origin': url, 'x-csrf-token': memberSession.csrf },
       data: {
-        settings: {
-          name: 'Member commitment',
-          prompt: 'Shared scheduled work',
-          agentId: agents[0].id,
-          cron: '0 9 * * *',
-          timezone: 'UTC',
-          enabled: true,
-        },
+        definition: scheduleDefinition('Member commitment', agents[0].id, 'Shared scheduled work'),
+        enabled: true,
       },
     }
     // A new member uses no agent until the owner gives access from the agent page.
     expect((await (await member.request.get(`${apiRoot}/usable-agents`)).json()).agentIds).toEqual([])
-    expect((await member.request.post(`${apiRoot}/tasks`, commitment)).status()).toBe(403)
+    expect((await member.request.post(`${apiRoot}/hook-rules`, commitment)).status()).toBe(403)
     await member.goto(`${installationUrl}chats`)
     await expect(member.getByRole('note').filter({ hasText: 'No agent available to you yet' })).toBeVisible()
     await expect(member.getByRole('textbox', { name: 'Message', exact: true })).toBeDisabled()
@@ -205,10 +200,10 @@ test('owner shares an installation and member works without management controls'
     await page.reload()
     await expect(page.getByRole('list', { name: 'People who can use this agent' }).getByRole('switch', { name: `Allow ${memberEmail} to use ${agents[0].name}`, exact: true })).toBeChecked()
     expect((await (await member.request.get(`${apiRoot}/usable-agents`)).json()).agentIds).toEqual([agents[0].id])
-    const taskResponse = await member.request.post(`${apiRoot}/tasks`, commitment)
+    const taskResponse = await member.request.post(`${apiRoot}/hook-rules`, commitment)
     expect(taskResponse.status()).toBe(200)
     const task = await taskResponse.json()
-    expect(task.authorId).toBe(memberSession.account.id)
+    expect(task.creatorAccountId).toBe(memberSession.account.id)
     const ownerSession = await (await page.request.get(`${url}/api/account/session`)).json()
     const privateAgent = seed!.agent({ name: 'Private delegated agent' })
     const requestingResponse = await page.request.post(`${apiRoot}/chats`, {
@@ -280,40 +275,29 @@ test('owner shares an installation and member works without management controls'
     })
     await member.goto(`${installationUrl}runs/${cleanupRunId}`)
     await expect(member.getByRole('heading', { name: 'Private delegated work', exact: true })).toBeVisible()
-    await member.getByRole('button', { name: 'Mission brief', exact: true }).click()
+    await member.getByRole('button', { name: 'Run details', exact: true }).click()
     await expect(member.getByRole('heading', { name: 'Original instructions', exact: true })).toBeVisible()
     await expect(member.getByRole('button', { name: 'Clean up worktree', exact: true })).toHaveCount(0)
     await page.goto(`${installationUrl}runs/${cleanupRunId}`)
-    await page.getByRole('button', { name: 'Mission brief', exact: true }).click()
+    await page.getByRole('button', { name: 'Run details', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toBeVisible()
-    await member.goto(`${installationUrl}tasks?task=${task.id}`)
-    await member.getByRole('button', { name: 'Mission actions', exact: true }).click()
-    await expect(member.getByRole('menuitem', { name: 'Delete', exact: true })).toHaveCount(0)
-    await expect(member.getByRole('menuitem', { name: 'Duplicate (paused)', exact: true })).toBeVisible()
-    const ownerTaskResponse = await page.request.post(`${apiRoot}/tasks`, {
+    await member.goto(`${installationUrl}rules?rule=${task.id}`)
+    await expect(member.getByRole('heading', { name: 'Member commitment' })).toBeVisible()
+    await expect(member.getByRole('button', { name: 'Run now' })).toBeVisible()
+    const ownerTaskResponse = await page.request.post(`${apiRoot}/hook-rules`, {
       headers: { 'origin': url, 'x-csrf-token': ownerSession.csrf },
       data: {
-        settings: {
-          name: 'Owner commitment',
-          prompt: task.prompt,
-          agentId: task.agentId,
-          cron: task.cron,
-          timezone: task.timezone,
-          enabled: false,
-        },
+        definition: scheduleDefinition('Owner commitment', agents[0].id, 'Owner scheduled work'),
+        enabled: false,
       },
     })
     expect(ownerTaskResponse.status()).toBe(200)
     const ownerTask = await ownerTaskResponse.json()
-    await member.goto(`${installationUrl}tasks?task=${ownerTask.id}`)
-    await expect(member.getByRole('button', { name: 'Edit mission', exact: true })).toBeDisabled()
-    await expect(member.getByRole('button', { name: 'Resume schedule', exact: true })).toBeDisabled()
-    await expect(member.getByText('Only the author or installation owner can edit or resume this mission. Duplicate it to make your own commitment.', { exact: true })).toBeVisible()
-    await member.getByRole('button', { name: 'Mission actions', exact: true }).click()
-    await member.getByRole('menuitem', { name: 'Archive', exact: true }).click()
-    await expect(member.getByRole('menuitem', { name: 'Restore (paused)', exact: true })).toHaveCount(0)
-    await member.getByRole('button', { name: 'Mission actions', exact: true }).click()
-    await expect(member.getByRole('menuitem', { name: 'Restore (paused)', exact: true })).toBeDisabled()
+    await member.goto(`${installationUrl}rules?rule=${ownerTask.id}`)
+    await expect(member.getByRole('heading', { name: 'Owner commitment' })).toBeVisible()
+    await expect(member.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0)
+    await expect(member.getByRole('button', { name: 'Enable', exact: true })).toHaveCount(0)
+    await expect(member.getByRole('button', { name: 'Duplicate', exact: true })).toBeVisible()
     await member.goto(installationUrl)
     await member.getByRole('button', { name: 'Installation settings', exact: true }).click()
     await expect(member.getByRole('button', { name: 'Rename installation', exact: true })).toHaveCount(0)
@@ -347,11 +331,14 @@ test('owner shares an installation and member works without management controls'
     await member.reload()
     await expect(member.getByRole('heading', { name: 'Shared conversation', exact: true })).toBeVisible()
     const conversationUrl = member.url()
-    const runResponse = await member.request.post(`${apiRoot}/tasks/${task.id}/run`, {
+    const runResponse = await member.request.post(`${apiRoot}/hook-rules/${task.id}/run`, {
       headers: { 'origin': url, 'x-csrf-token': memberSession.csrf },
     })
     expect(runResponse.status()).toBe(200)
-    const runId = (await runResponse.json()).id
+    const launched = async () => (await (await member.request.get(`${apiRoot}/chats`)).json())
+      .find((chat: any) => chat.originRule?.ruleId === task.id && chat.runId)
+    await expect.poll(launched).toBeTruthy()
+    const runId = (await launched()).runId
     const report = {
       id: randomUUID(),
       runId,
@@ -419,8 +406,8 @@ test('owner shares an installation and member works without management controls'
     await expect(member.getByRole('heading', { name: 'Shared conversation renamed by member', exact: true })).toBeVisible()
     await expect(member.getByRole('textbox', { name: 'Message', exact: true })).toBeDisabled()
 
-    await page.goto(`${installationUrl}tasks?task=${task.id}`)
-    await expect(page.getByText('Schedule waiting: Its author no longer has access to this agent. It resumes once the owner gives access again.')).toBeVisible()
+    await page.goto(`${installationUrl}rules?rule=${task.id}`)
+    await expect(page.getByText('Rights lost', { exact: true }).first()).toBeVisible()
     await page.goto(`${installationUrl}agents/${agents[0].id}?section=people`)
     await page.getByRole('list', { name: 'People who can use this agent' }).getByRole('switch', { name: `Allow ${memberEmail} to use ${agents[0].name}`, exact: true }).check()
     await expect(page.getByRole('list', { name: 'People who can use this agent' }).getByText('Can use this agent', { exact: true })).toBeVisible()
@@ -456,11 +443,10 @@ test('owner shares an installation and member works without management controls'
     await page.getByRole('button', { name: `Cancel invitation to ${cancelledEmail}`, exact: true }).click()
     await expect(page.getByText('No pending invitations.', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Close sharing', exact: true }).click()
-    await page.goto(`${installationUrl}tasks?task=${task.id}`)
-    await expect(page.getByText('Schedule stopped because its author\'s access ended. Duplicate this mission to schedule it again.', { exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Resume schedule', exact: true })).toBeDisabled()
-    await page.getByRole('button', { name: 'Mission actions', exact: true }).click()
-    await expect(page.getByRole('menuitem', { name: 'Delete', exact: true })).toBeVisible()
+    await page.goto(`${installationUrl}rules?rule=${task.id}`)
+    await expect(page.getByText('Creator left', { exact: true }).first()).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Run now', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Delete', exact: true })).toBeVisible()
   }
   finally {
     await memberContext.close()

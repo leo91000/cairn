@@ -3,7 +3,6 @@ package build.cairn.app.ui
 import android.app.Application
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
@@ -53,82 +52,6 @@ class NativeUiTest {
                 ),
             projects = listOf(Project(id = "46d045dd-9bce-51e3-8a99-65aa9384efc9", name = "Cairn")),
         )
-
-    @Test
-    fun `task form prevents empty saves and restores drafts after recreation`() {
-        val vm = model()
-        val restoration = StateRestorationTester(compose)
-        restoration.setContent {
-            CairnTheme {
-                TaskEditor(
-                    vm,
-                    workspace,
-                    Task(
-                        agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
-                        projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
-                    ),
-                ) {}
-            }
-        }
-        compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
-        compose.onNodeWithText("Nom").performTextInput("Revue du projet")
-        compose
-            .onNodeWithText("Mission et critères de réussite")
-            .performTextInput("Examiner les changements et lancer les vérifications.")
-        compose.onNodeWithText("Enregistrer").assertIsEnabled()
-        restoration.emulateSavedInstanceStateRestore()
-        compose.onNodeWithText("Revue du projet").assertExists()
-        compose
-            .onNodeWithText("Examiner les changements et lancer les vérifications.")
-            .assertExists()
-        compose.onNodeWithText("Enregistrer").assertIsEnabled()
-        screenshot("task-editor")
-    }
-
-    @Test
-    fun `mission filters distinguish archived missions and prevent running them`() {
-        val vm = model()
-        compose.setContent {
-            CairnTheme {
-                MissionsScreen(
-                    vm,
-                    workspace.copy(
-                        tasks =
-                            listOf(
-                                Task(
-                                    id = "8a025d72-4937-53c0-a41d-820414dc655d",
-                                    name = "Revue quotidienne",
-                                    agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
-                                    projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
-                                    cron = "0 9 * * *",
-                                    nextRun = 1789405200000,
-                                ),
-                                Task(
-                                    id = "00eada4d-84f3-57cb-837e-3c023a643647",
-                                    name = "Ancienne mission",
-                                    agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
-                                    projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
-                                    archived = true,
-                                    enabled = false,
-                                ),
-                            )
-                    ),
-                ) {}
-            }
-        }
-        compose.onAllNodesWithText("Revue quotidienne").onFirst().assertExists()
-        compose.onNodeWithText("Ancienne mission").assertDoesNotExist()
-        // The daily cron is described in words on the card.
-        compose.onNodeWithText("Tous les jours · 09:00").assertExists()
-        screenshot("tasks")
-        compose.onNodeWithText("Archivées").performScrollTo().performClick()
-        compose.onAllNodesWithText("Ancienne mission").onFirst().assertExists()
-        compose.onNodeWithText("Revue quotidienne").assertDoesNotExist()
-        compose.onNodeWithContentDescription("Lancer Ancienne mission").assertIsNotEnabled()
-        compose.onAllNodesWithText("Ancienne mission").onFirst().performClick()
-        compose.onNodeWithTag("mission-sheet").assertIsDisplayed()
-        compose.onNodeWithText("Lancer maintenant").assertIsNotEnabled()
-    }
 
     @Test
     fun `run card exposes its real status and navigates with the run ID`() {

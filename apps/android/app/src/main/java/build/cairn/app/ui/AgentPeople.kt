@@ -117,7 +117,7 @@ internal fun PeopleSection(
 ) {
     val name = agentName.ifBlank { "cet agent" }
     Text(
-        "Les personnes que vous autorisez ici peuvent démarrer des conversations avec $name, les poursuivre et les orienter, répondre à ses questions et planifier ses missions. Tout le monde dans l’installation voit toujours chaque conversation et peut mettre en pause ou arrêter le travail.",
+        "Les personnes que vous autorisez ici peuvent démarrer des conversations avec $name, les poursuivre et les orienter, répondre à ses questions et programmer cet agent. Tout le monde dans l’installation voit toujours chaque conversation et peut mettre en pause ou arrêter le travail.",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -329,7 +329,7 @@ internal fun PeopleSection(
         }
     }
     Text(
-        "Les changements s’appliquent tout de suite ; les messages qu’un membre a déjà mis en file partent quand même, sauf s’ils en sont retirés. Un membre sans accès continue de lire les conversations ; ses missions planifiées sur cet agent sont suspendues jusqu’au retour de l’accès.",
+        "Les changements s’appliquent tout de suite ; les messages qu’un membre a déjà mis en file partent quand même, sauf s’ils en sont retirés. Un membre sans accès continue de lire les conversations ; ses programmations sur cet agent sont suspendues jusqu’au retour de l’accès.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

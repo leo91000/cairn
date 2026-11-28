@@ -22,10 +22,8 @@ export function identityColor(key: string) {
 
 export const initial = (name: string) => name.trim().match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? '?'
 
-export type FilKind = 'question' | 'failed' | 'review' | 'unread' | 'running' | 'queued' | 'waiting' | 'snoozed' | 'set-aside' | 'paused' | 'suspended' | 'recent'
+export type FilKind = 'question' | 'failed' | 'review' | 'unread' | 'running' | 'queued' | 'waiting' | 'snoozed' | 'paused' | 'suspended' | 'recent'
 
-/** Why a blocked conversation waits outside For you: on its requester or on an outside system. */
-export type SetAside = 'requester' | 'external'
 export interface FilItem {
   key: string
   kind: FilKind
@@ -53,8 +51,6 @@ export interface FilItem {
   resolved?: boolean
   /** A conversation's blocked outcome that needs review. */
   outcome?: 'blocked'
-  /** Why a blocked conversation sits in Recent rather than For you. */
-  setAside?: SetAside
   /** The conversation that delegated this one, while it still exists. */
   requester?: {
     title: string
@@ -117,7 +113,8 @@ export function filOf(
     const unread = !isSnoozed
       && !!chat.unread
       && unreadNow(`chat:${chat.id}`, chat.readAt ?? chat.finishedAt)
-      && (!chat.requestedBy || chat.pendingQuestions > 0)
+      && (!chat.requestedBy || chat.pendingQuestions > 0 || chat.outcome?.status === 'blocked')
+    const blocked = chat.status === 'succeeded' && chat.outcome?.status === 'blocked' ? chat.outcome : null
     const requester = chat.requester
       ? { title: chat.requester.title || 'New conversation', to: chatPath({ id: chat.requester.chatId }), chatId: chat.requester.chatId }
       : undefined
@@ -136,8 +133,16 @@ export function filOf(
       requester,
       originRule: chat.originRule ?? undefined,
     }
+    if (isSnoozed) {
+      waiting.push({
+        ...base,
+        kind: 'snoozed',
+        subtitle: 'Snoozed',
+        wakeAt: snoozedUntil,
+      })
+    }
     // A question only those with access to its agent may answer waits for them.
-    if (chat.pendingQuestions > 0 && !canDirectChat(usable, chat, chats)) {
+    else if (chat.pendingQuestions > 0 && !canDirectChat(usable, chat, chats)) {
       waiting.push({ ...base, kind: 'waiting', subtitle: 'Waiting for someone with access' })
     }
     else if (chat.pendingQuestions > 0) {
@@ -172,53 +177,17 @@ export function filOf(
         resolved: !!chat.wakeup.observation,
       })
     }
-    else if (isSnoozed) {
-      const blocked = chat.outcome?.status === 'blocked'
-      waiting.push({
+    else if (blocked) {
+      const item = {
         ...base,
-        kind: 'snoozed',
-        outcome: blocked ? 'blocked' : undefined,
-        subtitle: blocked ? `Snoozed · Blocked · ${chat.outcome!.reason}` : 'Snoozed',
-        wakeAt: snoozedUntil!,
-      })
-    }
-    else if (chat.status === 'succeeded' && chat.outcome?.status === 'blocked') {
-      const reason = `Blocked · ${chat.outcome.reason}`
-      if (chat.outcome.waitingOn === 'requester' && requester) {
-        recent.push({
-          ...base,
-          kind: 'set-aside',
-          outcome: 'blocked',
-          setAside: 'requester',
-          subtitle: `Waiting on ${requester.title}`,
-        })
+        at: chat.finishedAt ?? chat.updatedAt,
+        outcome: 'blocked' as const,
+        subtitle: `Blocked · ${blocked.reason}`,
       }
-      else if (chat.outcome.waitingOn === 'external') {
-        recent.push({
-          ...base,
-          kind: 'set-aside',
-          outcome: 'blocked',
-          setAside: 'external',
-          subtitle: 'Waiting on an outside check',
-        })
-      }
-      else if (base.unread) {
-        forYou.push({
-          ...base,
-          kind: 'review',
-          at: chat.finishedAt ?? chat.updatedAt,
-          outcome: 'blocked',
-          subtitle: reason,
-        })
-      }
-      else {
-        recent.push({
-          ...base,
-          kind: 'recent',
-          outcome: 'blocked',
-          subtitle: reason,
-        })
-      }
+      if (unread)
+        forYou.push({ ...item, kind: 'review' })
+      else
+        recent.push({ ...item, kind: 'recent' })
     }
     else if (base.unread) {
       forYou.push({
@@ -256,7 +225,7 @@ export function filOf(
 /** Compact reception views: acknowledging a notification never changes its execution status. */
 export function filViews(fil: Fil) {
   const all = [...fil.forYou, ...fil.live, ...fil.waiting, ...fil.recent].sort((a, b) => b.at - a.at)
-  const ongoing = all.filter(item => ['question', 'running', 'queued', 'waiting', 'snoozed', 'suspended', 'review', 'set-aside'].includes(item.kind))
+  const ongoing = all.filter(item => ['question', 'running', 'queued', 'waiting', 'snoozed', 'suspended', 'review'].includes(item.kind))
   return { unread: all.filter(isUnread), ongoing, all }
 }
 

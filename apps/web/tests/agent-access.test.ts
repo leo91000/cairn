@@ -440,7 +440,7 @@ it('lists every addition and removal of powers and grants', () => {
   granted.access.installation = true
   expect(reviewLines(saved, granted, context).map(line => line.text)).toEqual([
     'Added: exclusive reservation on gpu-box. This agent will be able to suspend other agents’ conversations on this machine.',
-    'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.',
+    'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections and conversations on your behalf.',
     'Added: 1Password “Production” — effective immediately, including in running conversations.',
   ])
   const revoked = structuredClone(granted)

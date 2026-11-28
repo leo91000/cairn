@@ -19,13 +19,13 @@ import Empty from '../components/Empty.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import RuleDetail from '../components/RuleDetail.vue'
+import ScheduleAgent from '../components/ScheduleAgent.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import { blockTitles, describeTrigger, relativeTime } from '../hook-rules'
 import { Plus, Search, Zap } from '../icons'
 
-// Rules as missions are shown: cards on the left, one rule beside them on wide screens or
-// in a sheet on phones. Every member sees every rule and its state.
+// Rules open beside the list on wide screens and in a sheet on phones.
 const route = useRoute()
 const router = useRouter()
 const rules = ref<HookRuleSummary[]>([])
@@ -66,6 +66,16 @@ const newRuleLocation = computed(() => ({ path: '/rules/new', query: { ...(typeo
 function clearScope() {
   const { agent: _agent, instance: _instance, ...query } = route.query
   void router.replace({ query })
+}
+
+function schedule(open: boolean, ruleId?: string) {
+  const { schedule: _schedule, ...query } = route.query
+  void router.replace({ query: { ...query, ...(open ? { schedule: '1' } : {}), ...(ruleId ? { rule: ruleId } : {}) } })
+}
+
+async function scheduled(rule: HookRule) {
+  schedule(false, rule.id)
+  await changed(rule)
 }
 
 const chosenId = computed(() => typeof route.query.rule === 'string' ? route.query.rule : null)
@@ -215,6 +225,13 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
+  <ScheduleAgent
+    v-if="route.query.schedule === '1' && catalog?.agents.length"
+    :catalog="catalog"
+    :preferred-agent="typeof route.query.agent === 'string' ? route.query.agent : undefined"
+    @close="schedule(false)"
+    @created="scheduled"
+  />
   <UiAlert v-if="error">
     {{ error }}
   </UiAlert>
@@ -229,6 +246,9 @@ onBeforeUnmount(() => {
             {{ loading ? 'When this happens, do that' : summary }}
           </p>
         </div>
+        <UiButton v-if="!route.query.instance" :disabled="!catalog?.agents.length" @click="schedule(true)">
+          Schedule an agent
+        </UiButton>
         <button
           class="grid size-11 shrink-0 place-items-center rounded-full bg-ink text-canvas hover:opacity-90"
           aria-label="New rule"

@@ -767,7 +767,7 @@ abstract class NodePlacementCases {
                 }
                 CairnTheme {
                     androidx.compose.runtime.CompositionLocalProvider(
-                        LocalFilSnapshot provides FilSnapshot(conversations, null)
+                        LocalFilSnapshot provides FilSnapshot(conversations)
                     ) {
                         if (state.session.authenticated) RunScreen(vm, state, run.id, openRun = {})
                     }

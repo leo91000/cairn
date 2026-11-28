@@ -132,12 +132,31 @@ internal fun JsonElement?.list(key: String): List<JsonElement> =
     ((this as? JsonObject)?.get(key) as? JsonArray).orEmpty()
 
 fun triggerKey(trigger: JsonElement?): String =
-    if (trigger.text("type") == "plugin")
-        "plugin:${trigger.text("instanceId")}:${trigger.text("hook")}"
-    else "cairn:${trigger.text("hook")}"
+    when (trigger.text("type")) {
+        "plugin" -> "plugin:${trigger.text("instanceId")}:${trigger.text("hook")}"
+        "clock" -> "clock"
+        else -> "cairn:${trigger.text("hook")}"
+    }
 
 /** Where the event comes from and what it is, for a trigger. */
 fun describeTrigger(trigger: JsonElement?, catalog: HookRuleCatalog?): Pair<String, String> {
+    if (trigger.text("type") == "clock") {
+        val timezone = trigger.text("timezone")
+        val cron = trigger.text("cron")
+        val date =
+            trigger.text("at").toLongOrNull()?.let { time ->
+                runCatching {
+                    java.time.Instant.ofEpochMilli(time)
+                        .atZone(java.time.ZoneId.of(timezone))
+                        .toLocalDateTime()
+                        .toString()
+                        .replace('T', ' ')
+                }
+                    .getOrNull()
+            }
+        val timing = cron.ifBlank { date.orEmpty() }
+        return "Cairn" to if (timing.isBlank()) "Horloge" else "Programmation · $timing ($timezone)"
+    }
     if (trigger.text("type") == "cairn")
         return "Cairn" to (cairnHookTitles[trigger.text("hook")] ?: trigger.text("hook"))
     val hook =
@@ -204,6 +223,7 @@ fun describeCondition(condition: JsonElement?): String =
         "authorStartedConversation" ->
             "${describeValue(condition.obj("author"))} a démarré ${quoted(condition.obj("key"))}"
         "conversationExists" -> "une conversation existe pour ${quoted(condition.obj("key"))}"
+        "ruleConversationWorking" -> "Une conversation démarrée par cette règle travaille"
         "authorQuota" ->
             "${describeValue(condition.obj("author"))} a déclenché moins de ${condition.text("limit")} fois"
         else -> ""

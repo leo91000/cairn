@@ -374,12 +374,12 @@ test('an outdated saved conversation shows at once and says it is updating', asy
   }
 })
 
-test('opening a mission from a conversation keeps the Fil mounted and visible', async ({ page, workspace }) => {
+test('opening a failed conversation from another conversation keeps the Fil mounted and visible', async ({ page, workspace }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
-  const run = workspace.service.store.runs().find(run => run.trigger !== 'chat')!
+  const failed = await workspace.api('/api/chats', 'POST', {})
+  workspace.service.store.put('chats', { id: failed.id, title: 'Navigation failure' })
+  const run = workspace.service.chatRun(failed.id, 'Navigation failure')
   workspace.service.store.updateRun(run.id, { status: 'failed', error: 'Navigation fixture' })
-  const mission = workspace.service.store.get('tasks', run.taskId)!
-  workspace.service.store.put('tasks', { ...mission, name: 'Navigation mission' })
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Navigation shell proof' })
   await page.goto(workspacePath(`/chats/${chat.slug}`))
@@ -391,8 +391,8 @@ test('opening a mission from a conversation keeps the Fil mounted and visible', 
   await fil.getByRole('button', { name: 'Filter the Fil', exact: true }).click()
   await fil.getByRole('textbox', { name: 'Filter conversations' }).fill('Navigation')
   const width = (await fil.boundingBox())!.width
-  await page.locator(`[data-fil-key="task:${run.taskId}"]`).getByRole('button', { name: /^Open/ }).click()
-  await expect(page).toHaveURL(workspacePath(`/fil/runs/${run.id}`))
+  await page.locator(`[data-fil-key="chat:${failed.id}"]`).getByRole('button', { name: /^Open/ }).click()
+  await expect(page).toHaveURL(workspacePath(`/chats/${failed.slug}`))
   await expect(fil).toHaveAttribute('data-navigation-probe', 'mounted')
   await expect(fil.getByRole('textbox', { name: 'Filter conversations' })).toHaveValue('Navigation')
   expect((await fil.boundingBox())!.width).toBe(width)

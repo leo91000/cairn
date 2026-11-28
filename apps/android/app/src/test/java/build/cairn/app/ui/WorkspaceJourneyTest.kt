@@ -13,8 +13,6 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
@@ -53,30 +51,13 @@ class WorkspaceJourneyTest {
     }
 
     @Test
-    fun `owner signs in creates a task and follows its execution through native screens`() {
+    fun `owner signs in and changes native settings`() {
         MockWebServer().use { server ->
             val mutations = CopyOnWriteArrayList<Pair<String, String>>()
             val obsoleteRequests = CopyOnWriteArrayList<String>()
-            var created = false
             var launched = false
-            val existingTask =
-                wireJson.encodeToString(
-                    Task(
-                        id = "00000000-0000-4000-8000-000000000098",
-                        name = "Mission précédente",
-                        prompt = "Ancienne mission",
-                        agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
-                    )
-                )
             val task =
-                wireJson.encodeToString(
-                    Task(
-                        id = "00000000-0000-4000-8000-000000000099",
-                        name = "Nouvelle mission",
-                        prompt = "Vérifier le projet",
-                        agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
-                    )
-                )
+                """{"id":"00000000-0000-4000-8000-000000000099","name":"Conversation","prompt":"Vérifier les changements","agentId":"$MAIN_AGENT_ID"}"""
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -276,12 +257,6 @@ class WorkspaceJourneyTest {
                                     """{"inactivityDays":30}"""
                                 "/api/installations/fixture/api/overview" ->
                                     """{"runsByStatus":{},"agents":1,"projects":1,"missions":0,"concurrency":1}"""
-                                "/api/installations/fixture/api/tasks" ->
-                                    if (request.method == "POST") {
-                                        created = true
-                                        task
-                                    } else if (created) """{"tasks":[$existingTask,$task]}"""
-                                    else """{"tasks":[$existingTask]}"""
                                 "/api/installations/fixture/api/tasks/00000000-0000-4000-8000-000000000099/run",
                                 "/api/installations/fixture/api/runs/run" ->
                                     """{"id":"run","taskId":"00000000-0000-4000-8000-000000000099","status":"running","snapshot":{"task":$task,"agent":${wireJson.encodeToString(newAgent().copy(name = "Reviewer"))},"project":null,"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/fixtures/cairn","origin":"","revision":"fixture","createdAt":0}]}}"""
@@ -325,86 +300,6 @@ class WorkspaceJourneyTest {
             }
             compose.onNodeWithText("Code reçu par e-mail").performTextInput("12345678")
             compose.onNodeWithText("Se connecter").performClick()
-            compose.waitUntil(10000) {
-                compose
-                    .onAllNodesWithContentDescription("Missions")
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            screenshot("overview")
-            compose.onNodeWithContentDescription("Missions").performClick()
-            compose.waitUntil(10000) {
-                compose
-                    .onAllNodes(hasContentDescription("Créer une mission") and isEnabled())
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            compose.onNodeWithContentDescription("Créer une mission").performClick()
-            compose.onNodeWithText("Nom").performTextInput("Nouvelle mission")
-            compose
-                .onNodeWithText("Mission et critères de réussite")
-                .performTextInput("Vérifier le projet")
-            compose.onNodeWithText("Enregistrer").performClick()
-            // The saved mission opens in its sheet, ready to run.
-            compose.waitUntil(10000) {
-                compose
-                    .onAllNodesWithText("Lancer maintenant")
-                    .fetchSemanticsNodes()
-                    .isNotEmpty() &&
-                    !vm.state.value.busy &&
-                    vm.state.value.tasks.any { it.id == "00000000-0000-4000-8000-000000000099" }
-            }
-            val saved =
-                wireJson
-                    .parseToJsonElement(
-                        mutations
-                            .first { it.first == "/api/installations/fixture/api/tasks" }
-                            .second
-                    )
-                    .jsonObject["settings"]!!
-                    .jsonObject
-            assertEquals("Nouvelle mission", saved["name"]?.jsonPrimitive?.content)
-            assertEquals(
-                java.time.ZoneId.systemDefault().id,
-                saved["timezone"]?.jsonPrimitive?.content,
-            )
-            assertTrue(
-                saved["projectId"] == null ||
-                    saved["projectId"] == kotlinx.serialization.json.JsonNull
-            )
-            assertTrue(
-                saved["skills"] == null || saved["skills"] == kotlinx.serialization.json.JsonNull
-            )
-            compose.onNodeWithText("Lancer maintenant").performScrollTo().performClick()
-            compose.waitUntil(10000) {
-                compose.onAllNodesWithTag("agent-working").fetchSemanticsNodes().isNotEmpty()
-            }
-            // The indicator names the command still running in the fixture.
-            compose
-                .onNodeWithTag("agent-working")
-                .assert(hasContentDescription("Exécuter les tests : ./gradlew testDebugUnitTest"))
-            // The running command is carried by the indicator; the actions keep the finished steps.
-            compose
-                .onNodeWithTag("agent-actions")
-                .assert(hasText("Suivi de l’exécution"))
-                .performClick()
-            compose.onNodeWithText("Exécuter les tests").assertDoesNotExist()
-            compose.onNodeWithText("Travail commencé").performClick()
-            compose.onNodeWithTag("agent-step-sheet").assertExists()
-            compose.onNodeWithText("Le worker démarre la mission").assertExists()
-            compose.onNodeWithContentDescription("Fermer").performClick()
-            compose.waitUntil(10000) {
-                compose.onAllNodesWithTag("agent-step-sheet").fetchSemanticsNodes().isEmpty()
-            }
-            compose.onNodeWithTag("agent-actions").performClick()
-            assertTrue(
-                mutations.any {
-                    it.first ==
-                        "/api/installations/fixture/api/tasks/00000000-0000-4000-8000-000000000099/run"
-                }
-            )
-            screenshot("run")
-            compose.onNodeWithContentDescription("Retour").performClick()
             compose.waitUntil(10000) {
                 compose
                     .onAllNodesWithContentDescription("Atelier")

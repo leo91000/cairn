@@ -58,7 +58,7 @@ internal fun TaskStorageSettings(
     Panel {
         Text("Stockage par tâche", style = MaterialTheme.typography.titleLarge)
         Text(
-            "Chaque conversation ou exécution de mission démarre avec au plus 32 Gio. Les environnements natifs peuvent grandir jusqu’à cette limite commune à l’installation. L’espace de travail et les fichiers temporaires gérés sont comptés ensemble."
+            "Chaque conversation démarre avec au plus 32 Gio. Les environnements natifs peuvent grandir jusqu’à cette limite commune à l’installation. L’espace de travail et les fichiers temporaires gérés sont comptés ensemble."
         )
         Text(
             "Les changements limitent les futurs agrandissements. L’espace déjà accordé est conservé ; les environnements plus grands ne peuvent plus grandir. Aucun fichier n’est supprimé."

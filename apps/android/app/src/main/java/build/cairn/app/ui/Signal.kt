@@ -458,7 +458,7 @@ internal data class DockItem(val route: String, val label: String, val icon: Ima
 internal val DockItems =
     listOf(
         DockItem("fil", "Fil", CairnIcons.Home),
-        DockItem("missions", "Missions", CairnIcons.Orbit),
+        DockItem("rules", "Règles", CairnIcons.Orbit),
         DockItem("atelier", "Atelier", CairnIcons.Grid),
     )
 

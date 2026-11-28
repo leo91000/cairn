@@ -513,7 +513,7 @@ pub async fn chat_run_fixture(
         .unwrap();
     let chat_id = chat["id"].as_str().unwrap().to_owned();
     installation
-        .chat_send(&chat_id, json!({ "text": prompt }))
+        .chat_send(&chat_id, json!({ "id": uuid::Uuid::new_v4(), "text": prompt }))
         .await
         .unwrap();
     installation

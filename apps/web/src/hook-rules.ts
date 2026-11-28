@@ -168,6 +168,8 @@ export const operatorTitles: Record<RuleOperator, string> = {
 export const binaryOperator = (operator: RuleOperator) => operator !== 'present' && operator !== 'absent'
 
 export function triggerKey(trigger: HookRuleTrigger) {
+  if (trigger.type === 'clock')
+    return 'clock'
   return trigger.type === 'plugin' ? `plugin:${trigger.instanceId}:${trigger.hook}` : `cairn:${trigger.hook}`
 }
 
@@ -181,6 +183,11 @@ export function catalogTool(catalog: HookRuleCatalog | null, instanceId: string,
 
 export function describeTrigger(trigger: HookRuleTrigger, catalog: HookRuleCatalog | null) {
   const hook = catalogHook(catalog, trigger)
+  if (trigger.type === 'clock') {
+    const timing = trigger.cron ?? (trigger.at == null ? '' : new Date(trigger.at).toLocaleString())
+    return { title: timing ? `Schedule · ${timing} (${trigger.timezone})` : 'Clock', source: 'Cairn', description: hook?.description ?? '' }
+  }
+
   if (trigger.type === 'cairn') {
     return { title: cairnHookTitles[trigger.hook] ?? trigger.hook, source: 'Cairn', description: hook?.description ?? '' }
   }
@@ -230,6 +237,8 @@ export function describeCondition(condition: RuleCondition): string {
       return `${describeValue(condition.author)} started ${quoted(condition.key)}`
     case 'conversationExists':
       return `a conversation exists for ${quoted(condition.key)}`
+    case 'ruleConversationWorking':
+      return 'a conversation started by this rule is working'
     case 'authorQuota':
       return `${describeValue(condition.author)} triggered fewer than ${condition.limit} times in ${duration(condition.windowMinutes * 60)}`
   }

@@ -22,6 +22,7 @@ import { replaceHookRule } from '../../../../packages/contracts/generated/replac
 import { validateHookRule } from '../../../../packages/contracts/generated/validateHookRule'
 import { api, ApiError, notify } from '../api'
 import AgentAvatar from '../components/AgentAvatar.vue'
+import ClockScheduleFields from '../components/ClockScheduleFields.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import RuleFlow from '../components/RuleFlow.vue'
@@ -30,6 +31,7 @@ import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import {
   catalogHook,
+  describeTrigger,
   emptyDefinition,
   newStep,
   nodeAt,
@@ -130,7 +132,7 @@ async function load() {
 const hookGroups = computed(() => {
   const groups = new Map<string, NonNullable<typeof catalog.value>['hooks']>()
   for (const hook of catalog.value?.hooks ?? []) {
-    const group = hook.trigger.type === 'cairn' ? 'Cairn conversations' : hook.instanceName ?? 'Plugins'
+    const group = hook.trigger.type === 'plugin' ? hook.instanceName ?? 'Plugins' : 'Cairn'
     groups.set(group, [...groups.get(group) ?? [], hook])
   }
 
@@ -544,7 +546,7 @@ onBeforeUnmount(() => {
                   @change="chooseTrigger(($event.target as HTMLSelectElement).value)"
                 >
                   <option v-if="!hook" :value="triggerKey(definition.trigger)">
-                    {{ definition.trigger.type === 'plugin' ? definition.trigger.hook : definition.trigger.hook }} (no longer available)
+                    {{ describeTrigger(definition.trigger, null).title }} (no longer available)
                   </option>
                   <optgroup v-for="[group, hooks] in hookGroups" :key="group" :label="group">
                     <option v-for="entry in hooks" :key="triggerKey(entry.trigger)" :value="triggerKey(entry.trigger)">
@@ -552,6 +554,11 @@ onBeforeUnmount(() => {
                     </option>
                   </optgroup>
                 </select>
+                <ClockScheduleFields
+                  v-if="definition.trigger.type === 'clock'"
+                  v-model="definition.trigger"
+                  class="mt-3"
+                />
                 <details v-if="payloadFields.length || hook" class="mt-1 text-xs text-muted">
                   <summary>Event fields</summary>
                   <p v-if="hook" class="m-0! my-2!">

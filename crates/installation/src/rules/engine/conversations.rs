@@ -287,7 +287,7 @@ pub(crate) fn rule_has_working_conversation(db: &Db<'_>, rule_id: &str) -> Resul
             JOIN conversations c ON c.id = h.chat_id \
             WHERE h.rule_id = ?1 AND c.lifecycle = 'active' AND ( \
                 EXISTS(SELECT 1 FROM runs r WHERE r.id = c.run_id AND r.status IN ('queued','running','waiting')) \
-                OR EXISTS(SELECT 1 FROM conversation_messages m WHERE m.chat_id = c.id AND m.status IN ('queued','sending')) \
+                OR EXISTS(SELECT 1 FROM chat_messages m WHERE m.chat_id = c.id AND m.status IN ('queued','sending')) \
                 OR EXISTS(SELECT 1 FROM durable_wakeups w WHERE w.chat_id = c.id) \
             ) \
         )",
@@ -312,26 +312,18 @@ pub(crate) fn origin_rule_for_chat(
         return Ok(None);
     };
     let origin: Json = serde_json::from_str(&origin_json).unwrap_or_default();
-    let (rule_name, schedule) = match db
-        .hook_rule(&rule_id)?
-        .and_then(|rule| db.hook_rule_version(&rule.id, rule.version).ok().flatten())
+    let rule_name = if let Some(name) = origin["ruleName"].as_str().filter(|name| !name.is_empty())
     {
-        Some(version) => (
-            version.definition.name,
-            matches!(
-                version.definition.trigger,
-                cairn_contracts::HookRuleTrigger::Clock { .. }
-            ),
-        ),
-        None => (
-            origin["ruleName"]
-                .as_str()
-                .filter(|name| !name.is_empty())
-                .unwrap_or("Deleted rule")
-                .to_owned(),
-            origin["schedule"].as_bool().unwrap_or(false),
-        ),
+        name.to_owned()
+    } else {
+        match db.hook_rule(&rule_id)? {
+            Some(rule) => db
+                .hook_rule_version(&rule.id, rule.version)?
+                .map_or_else(|| "Deleted rule".into(), |version| version.definition.name),
+            None => "Deleted rule".into(),
+        }
     };
+    let schedule = origin["schedule"].as_bool().unwrap_or(false);
     Ok(Some(cairn_contracts::ChatRuleOrigin {
         rule_id: cairn_contracts::HookRuleId(uuid),
         rule_name,

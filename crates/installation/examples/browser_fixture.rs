@@ -204,6 +204,29 @@ async fn main() -> Result<()> {
                 "put" => db.put(string(0), &arg(1))?,
                 "run" => db.run(string(0))?.unwrap_or(Value::Null),
                 "runs" => db.runs(None, None, 10000, 0, true)?.into(),
+                "chatRun" => {
+                    let chat_id = string(0);
+                    let mut chat = db
+                        .conversation(chat_id)?
+                        .ok_or_else(|| Error::bad("Fixture conversation not found."))?;
+                    let agent = db
+                        .agent_snapshot(&chat.agent_id)?
+                        .ok_or_else(|| Error::bad("Fixture agent not found."))?;
+                    let run_id = cairn_installation::config::id();
+                    let time = cairn_installation::config::now();
+                    let run = db.add_run_fixture(&json!({
+                        "id": run_id,
+                        "taskId": chat_id,
+                        "trigger": "chat",
+                        "status": "succeeded",
+                        "createdAt": time,
+                        "finishedAt": time,
+                        "snapshot": { "agent": agent, "task": { "name": string(1) }, "project": null }
+                    }), None)?;
+                    chat.run_id = Some(run_id);
+                    db.save_conversation(&chat)?;
+                    run
+                }
                 "addRun" => db.add_run_fixture(&arg(0), None)?,
                 "updateRun" => run_fixture::change_run_fixture(&db, string(0), &arg(1))?,
                 "events" => db

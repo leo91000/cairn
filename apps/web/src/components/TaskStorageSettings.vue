@@ -55,7 +55,7 @@ onMounted(load)
   <section class="panel border-b border-line settings-section mb-5.5 px-0 py-7 phone:py-5">
     <h2>Storage per task</h2>
     <p class="text-sm text-muted my-3">
-      Each conversation or mission run starts with up to 32 GiB. Native workspaces can grow as needed, up to this installation-wide limit. The workspace and managed temporary files count together.
+      Each conversation starts with up to 32 GiB. Native workspaces can grow as needed, up to this installation-wide limit. The workspace and managed temporary files count together.
     </p>
     <p class="text-sm text-muted my-3">
       Changes limit future growth. Space already granted to running or saved workspaces is preserved, and existing larger workspaces cannot grow further. No files are deleted.

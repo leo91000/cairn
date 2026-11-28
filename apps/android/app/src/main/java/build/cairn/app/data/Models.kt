@@ -2,8 +2,6 @@ package build.cairn.app.data
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.decodeFromJsonElement
-import kotlinx.serialization.json.encodeToJsonElement
 
 @Serializable
 data class Session(
@@ -44,31 +42,6 @@ typealias Agent = build.cairn.contracts.Agent
 
 typealias Project = build.cairn.contracts.Project
 
-typealias Task = build.cairn.contracts.Mission
-
-typealias ScheduleFailure = build.cairn.contracts.ScheduleFailure
-
-fun Task.settings(): build.cairn.contracts.MissionSettings =
-    build.cairn.contracts.MissionSettings(
-        name = name,
-        prompt = prompt,
-        agentId = agentId,
-        projectId = projectId,
-        skills = skills,
-        tags = tags,
-        cron = cron,
-        timezone = timezone,
-        enabled = enabled,
-        archived = archived,
-        worktree = worktree,
-    )
-
-fun Task.runTaskSnapshot(): build.cairn.contracts.RunTaskSnapshot =
-    wireJson.decodeFromJsonElement(
-        build.cairn.contracts.RunTaskSnapshot.serializer(),
-        wireJson.encodeToJsonElement(build.cairn.contracts.Mission.serializer(), this),
-    )
-
 typealias Skill = build.cairn.contracts.Skill
 
 typealias SnapshotSkill = build.cairn.contracts.RunSkill
@@ -97,8 +70,6 @@ data class Grant(
     val clientId: String = "",
 )
 
-typealias Occurrences = build.cairn.contracts.SchedulePreviewOutput
-
 @Serializable data class FileContent(val content: String)
 
 @Serializable data class TokenResult(val token: String)
@@ -116,10 +87,5 @@ data class ConsentPreview(
 @Serializable data class ConsentResult(val redirect: String)
 
 typealias TaskOutcome = build.cairn.boundary.TaskOutcome
-
-typealias RunRequester = build.cairn.contracts.RunRequester
-
-/** A dismissed outcome has no [until]; a snoozed one asks again then. */
-typealias OutcomeDismissal = build.cairn.contracts.OutcomeDismissal
 
 typealias ChatExecution = build.cairn.boundary.ChatExecution

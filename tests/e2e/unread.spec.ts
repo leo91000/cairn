@@ -9,28 +9,14 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+import { startConversation } from './schedule-fixture'
 
-// Finished work the user has not opened: a conversation turn and a mission run that succeeded,
-// beside a failed mission that still needs an answer.
+// An unopened successful turn and a failed conversation beside another result.
 async function seed(workspace: Workspace) {
-  // The account starts reading before the agents finish; earlier history counts as read.
   await workspace.api('/api/chats')
-  await workspace.api('/api/tasks/activity')
   const agent = workspace.service.agent({ name: 'Writer' })
-  const mission = (name: string, prompt: string) => workspace.service.task({
-    name,
-    prompt,
-    agentId: agent.id,
-    projectId: null,
-    skills: null,
-    worktree: false,
-    enabled: false,
-    cron: null,
-  })
-  const notes = mission('Weekly release notes', 'Summarize what shipped this week.')
-  const audit = mission('Nightly security audit', 'Audit dependencies. fixture:fail')
-  const done = await workspace.service.enqueue(notes.id)
-  const failed = await workspace.service.enqueue(audit.id)
+  const { chat: notes, run: done } = await startConversation(workspace, 'Weekly release notes', 'Summarize what shipped this week.', agent.id)
+  const { run: failed } = await startConversation(workspace, 'Nightly security audit', 'Audit dependencies. fixture:fail', agent.id)
   await expect.poll(() => workspace.service.store.run(done.id)?.status, { timeout: 30000 }).toBe('succeeded')
   await expect.poll(() => workspace.service.store.run(failed.id)?.status, { timeout: 30000 }).toBe('failed')
 
@@ -51,7 +37,7 @@ const unreadOf = async (workspace: Workspace, id: string) => (await workspace.ap
 
 test('compact tabs acknowledge results and errors on desktop and phone', async ({ page, workspace }, testInfo) => {
   test.setTimeout(150000)
-  const { chat, done, notes } = await seed(workspace)
+  const { chat, notes } = await seed(workspace)
   await useRelayForHttpMocks(page)
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.goto(workspacePath('/'))
@@ -103,44 +89,28 @@ test('compact tabs acknowledge results and errors on desktop and phone', async (
   await expect(all.locator(`[data-fil-key="chat:${chat.id}"]`)).not.toHaveAttribute('data-unread')
   await expect(all.locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('Finished')
 
-  // A failed mission is acknowledged on opening, without retrying or changing its status.
-  const failed = all.locator('[data-fil-kind="failed-mission"]').filter({ hasText: 'Nightly security audit' })
+  // A failed conversation is acknowledged on opening, without retrying or changing its status.
+  const failed = all.locator('[data-fil-kind="failed"]').filter({ hasText: 'Nightly security audit' })
   await failed.getByRole('button', { name: /^Open “/ }).click()
   await expect(failed).not.toHaveAttribute('data-unread')
-  await expect(failed).toHaveAttribute('data-fil-kind', 'failed-mission')
+  await expect(failed).toHaveAttribute('data-fil-kind', 'failed')
   await page.getByRole('button', { name: 'Mark all as read', exact: true }).click()
-  await expect.poll(async () => (await workspace.api('/api/tasks/activity')).find((run: { id: string }) => run.id === done.id)?.unread).toBe(false)
-  await expect(all.locator(`[data-fil-key="task:${notes.id}"]`)).toBeVisible()
+  await expect.poll(() => unreadOf(workspace, notes.id)).toBe(false)
+  await expect(all.locator(`[data-fil-key="chat:${notes.id}"]`)).toBeVisible()
   await page.getByRole('tab', { name: 'À lire', exact: true }).click()
   await expect(inbox.locator('[data-fil-key]')).toHaveCount(0)
   await capture(page, testInfo, 'compact-fil-all-read')
 })
 
-test('an open mission acknowledges completion from any tab after syncing', async ({ page, workspace }) => {
-  test.setTimeout(90000)
-  const { done } = await seed(workspace)
-  workspace.service.store.updateRun(done.id, { status: 'running', finishedAt: null })
-  await useRelayForHttpMocks(page)
-  await page.goto(workspacePath(`/runs/${done.id}`))
-  await authenticateWorkspace(page)
-  await page.getByRole('button', { name: /^Files/ }).click()
-  workspace.service.store.updateRun(done.id, { status: 'succeeded', finishedAt: Date.now(), summary: 'Output waiting to be read' })
-  workspace.service.store.event(done.id, 'run.completed', 'Mission completed')
-  const unread = async () => (await workspace.api('/api/tasks/activity')).find((run: { id: string }) => run.id === done.id)?.unread
-  await expect(page.getByText('Execution finished', { exact: true }).first()).toBeVisible({ timeout: 20000 })
-  await expect.poll(unread).toBe(false)
-})
-
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
   test(`conversation read checks act directly at ${viewport.width}px`, async ({ page, workspace }) => {
     test.setTimeout(150000)
-    const { chat, notes } = await seed(workspace)
+    const { chat } = await seed(workspace)
     await page.setViewportSize(viewport)
     await page.goto(workspacePath('/'))
     await authenticateWorkspace(page)
     const row = page.locator(`[data-fil-key="chat:${chat.id}"]`)
     await expect(row).toHaveAttribute('data-unread', '')
-    await expect(row.getByRole('button', { name: /^More actions/ })).toHaveCount(0)
     const check = row.getByRole('button', { name: /^Mark “.*” as read$/ })
     await check.focus()
     await expect(check).toBeVisible()
@@ -154,14 +124,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await page.getByRole('tab', { name: 'Tout', exact: true }).click()
     await expect(row).toBeVisible()
     await expect(row).not.toHaveAttribute('data-unread')
-    await expect(row.getByRole('button')).toHaveCount(1)
     await expect(row.getByRole('button', { name: /^Open “/ })).toBeVisible()
-
-    const mission = page.locator(`[data-fil-key="task:${notes.id}"]`)
-    await mission.getByRole('button', { name: /^More actions/ }).click()
-    await expect(page.getByRole('menuitem', { name: 'Mark as read', exact: true })).toBeVisible()
-    await expect(page.getByRole('menuitem', { name: 'Run again', exact: true })).toBeVisible()
-    await expect(page.getByRole('menuitem', { name: 'Archive mission', exact: true })).toBeVisible()
   })
 }
 

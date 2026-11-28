@@ -23,6 +23,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import build.cairn.contracts.HookRuleCatalog
+import build.cairn.contracts.HookRuleInput
+import build.cairn.contracts.runHookRule
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
@@ -146,6 +148,13 @@ fun RulesScreen(
         detail = saved
         selected = saved.text("id")
     }
+    var scheduling by rememberSaveable { mutableStateOf(false) }
+    val scheduleCatalog = catalog
+    if (scheduling && scheduleCatalog != null && scheduleCatalog.agents.isNotEmpty())
+        ScheduleAgentDialog(vm, state, scheduleCatalog, agentFilter, { scheduling = false }) {
+            scheduling = false
+            changed(it)
+        }
     val visible = rules.filter { rule ->
         (filter != "mine" || rule.text("creatorAccountId") == state.session.account?.id) &&
             (filter != "blocked" || rule.list("blocks").isNotEmpty()) &&
@@ -167,6 +176,13 @@ fun RulesScreen(
                             Text("+ Créer")
                         }
                     }
+                    if (instanceFilter.isBlank() || scopeCleared)
+                        OutlinedButton(
+                            onClick = { scheduling = true },
+                            enabled = catalog?.agents?.isNotEmpty() == true,
+                        ) {
+                            Text("Programmer un agent")
+                        }
                     if (
                         !scopeCleared && (agentFilter.isNotBlank() || instanceFilter.isNotBlank())
                     ) {
@@ -452,6 +468,27 @@ internal fun RuleDetailPanel(
             }
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (rule.allowed("runNow"))
+                OutlinedButton(
+                    enabled = !busy,
+                    onClick = {
+                        scope.launch {
+                            busy = true
+                            error = ""
+                            try {
+                                vm.api.runHookRule(HookRuleInput(id))
+                                tab = "history"
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                error = e.message.orEmpty()
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    },
+                ) {
+                    Text("Lancer maintenant")
+                }
             if (rule.allowed("edit"))
                 Button(onClick = { edit(id) }, enabled = !busy) { Text("Modifier") }
             val disabled = blocks.any { it.text("kind") == "disabled" }

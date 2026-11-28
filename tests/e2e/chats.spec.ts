@@ -1099,7 +1099,7 @@ test('same-provider quota resume submits the changed model default and unchanged
 // Each Chromium and WebKit journey starts with its own account read budget.
 test('starts project chats, steers, edits the queue and preserves a compact mobile composer', async ({ page, workspace }) => {
   initializeRepository(workspace.projectPath)
-  await page.goto(workspacePath('/tasks'))
+  await page.goto(workspacePath('/rules'))
   await authenticateWorkspace(page)
   await expect(page.locator('.task-focus-detail')).toBeVisible()
   await page.goto(workspacePath('/projects'))

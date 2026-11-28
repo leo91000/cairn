@@ -786,9 +786,7 @@ class ChatWaitTest {
                         wakeup = wakeup(wakeAt = 5000),
                     ),
                     Chat(id = "answered", status = "succeeded", run = done, wakeup = answered),
-                ),
-                emptyList(),
-                emptyList(),
+                )
             )
         assertEquals(listOf("chat:answered", "chat:sooner"), feed.waiting.map { it.key })
         assertEquals("2 reprises prévues", feedSummary(feed))
@@ -903,9 +901,7 @@ class ChatWaitTest {
                         paused = true,
                         wakeup = wakeup(),
                     ),
-                ),
-                emptyList(),
-                emptyList(),
+                )
             )
         assertEquals(listOf("chat:sooner", "chat:later"), feed.waiting.map { it.key })
         assertTrue(feed.forYou.isEmpty())
@@ -915,45 +911,6 @@ class ChatWaitTest {
         assertEquals(listOf("chat:later", "chat:sooner", "chat:paused"), feed.keys())
     }
 
-    @Test
-    fun `lists a mission that scheduled its continuation with waiting conversations`() {
-        val done =
-            Run(
-                id = "run",
-                status = "succeeded",
-                taskId = "",
-            )
-        val feed =
-            buildFeed(
-                listOf(
-                    Chat(
-                        id = "later",
-                        status = "succeeded",
-                        run = done,
-                        wakeup = wakeup(wakeAt = 9000),
-                    )
-                ),
-                listOf(
-                    Run(
-                        id = "watch-1",
-                        taskId = "77bb521a-0c2b-572d-b168-a7ad40ba98eb",
-                        status = "waiting",
-                        trigger = "manual",
-                        wakeup = wakeup(wakeAt = 5000),
-                    )
-                ),
-                listOf(Task("77bb521a-0c2b-572d-b168-a7ad40ba98eb", "Surveiller la CI")),
-            )
-        assertTrue(feed.running.isEmpty())
-        assertEquals(listOf("run:watch-1", "chat:later"), feed.waiting.map { it.key })
-        assertEquals(FeedKind.WAITING_TASK, feed.waiting[0].kind)
-        assertEquals("Surveiller la CI", feed.waiting[0].title)
-        assertEquals("Merger après la CI", feed.waiting[0].subtitle)
-        assertEquals(5000L, feed.waiting[0].wakeAt)
-        assertEquals("2 reprises prévues", feedSummary(feed))
-    }
-
-    // Grouped waits: several external results in one wakeup.
     private val runId = "11111111-2222-4333-8444-555555555555"
     private val runCondition = buildJsonObject {
         put("type", "run_finished")

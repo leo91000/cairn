@@ -18,28 +18,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
-import build.cairn.contracts.ResumeRunInput
 import build.cairn.contracts.RunInput
 import build.cairn.contracts.cancelRun
-import build.cairn.contracts.convertRunToChat
-import build.cairn.contracts.resumeRun
-import build.cairn.contracts.retryRun
 
 @Composable
-fun RunsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) {
+fun RunsScreen(vm: CairnViewModel, open: (String) -> Unit) {
     var runs by remember { mutableStateOf<List<Run>>(emptyList()) }
     var status by rememberSaveable { mutableStateOf("") }
     var offset by rememberSaveable { mutableIntStateOf(0) }
-    var taskId by rememberSaveable { mutableStateOf("") }
     var loading by remember { mutableStateOf(true) }
-    var filters by rememberSaveable { mutableStateOf(false) }
-    Poll("$status/$offset/$taskId", 10000) {
+    Poll("$status/$offset", 10000) {
         try {
             runs =
                 vm.api.get(
                     "/runs?limit=30&offset=$offset" +
-                        (if (status.isEmpty()) "" else "&status=${segment(status)}") +
-                        if (taskId.isEmpty()) "" else "&taskId=${segment(taskId)}"
+                        (if (status.isEmpty()) "" else "&status=${segment(status)}")
                 )
         } catch (e: Exception) {
             vm.report(e)
@@ -52,11 +45,7 @@ fun RunsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) {
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item {
-            ScreenTitle("Journal", "Toutes les exécutions, des missions comme des conversations.") {
-                RoundAction("Filtrer par mission", CairnIcons.Tune) { filters = !filters }
-            }
-        }
+        item { ScreenTitle("Journal", "Les exécutions des conversations.") }
         item {
             Row(
                 Modifier.horizontalScroll(rememberScrollState()),
@@ -83,19 +72,6 @@ fun RunsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) {
                     }
             }
         }
-        if (filters || taskId.isNotBlank())
-            item {
-                Choice(
-                    "Mission",
-                    taskId,
-                    listOf("" to "Toutes les missions") + state.tasks.map { it.id to it.name },
-                ) {
-                    taskId = it
-                    offset = 0
-                    runs = emptyList()
-                    loading = true
-                }
-            }
         if (loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
         if (runs.isEmpty() && !loading)
             item {
@@ -130,10 +106,6 @@ fun RunsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) {
     }
 }
 
-/**
- * One run. In the Fil's pager, only the [selected] page streams and owns full screen, and a mission
- * run adds a Mission tab with the mission itself.
- */
 @Composable
 fun RunScreen(
     vm: CairnViewModel,
@@ -142,31 +114,11 @@ fun RunScreen(
     openChat: (String) -> Unit = {},
     back: () -> Unit = {},
     selected: Boolean = true,
-    mission: Boolean = false,
     openRun: (String) -> Unit,
 ) {
     val live = rememberLive(vm, state, "/runs/${segment(id)}/stream", streaming = selected)
     val run = live.state?.run
     var tab by rememberSaveable(id) { mutableIntStateOf(1) }
-    // Only acknowledge output that is displayed, including a mission finishing while it is open.
-    ReadWhileOpen(
-        vm,
-        run?.takeIf {
-                selected && live.synced && !live.catchingUp && it.trigger != "chat"
-            }
-            ?.finishedAt
-            ?.let { "task:${run.taskId}" to it },
-    )
-    // Members direct only runs whose agent they may use; a conversation's run follows its
-    // conversation, including a delegated task's requester (ADR-0075).
-    val chats = LocalFilSnapshot.current?.conversations?.state?.chats.orEmpty()
-    val directable =
-        run?.let { current ->
-            chats
-                .find { it.id == current.taskId }
-                ?.let { canDirectChat(state.usableAgents, it, chats) }
-                ?: canUseAgent(state.usableAgents, current.snapshot?.agent?.id)
-        } ?: true
     // A delegated conversation can be directed through its requester, but cleanup needs
     // access to the run's own agent.
     val canCleanUpWorktree =
@@ -189,16 +141,6 @@ fun RunScreen(
             if (run?.status != "running" || currentPlan(timeline) == null) null
             else timeline.lastOrNull { it.plan != null }?.key
         }
-    val blocked = run?.takeIf {
-        it.trigger != "chat" &&
-            it.status == "succeeded" &&
-            it.outcome != null &&
-            it.outcome.status != "completed"
-    }
-    val outcomeItem = if (blocked != null) rememberOutcomeItem(vm, state, blocked.id) else null
-    val outcomeActions: (@Composable () -> Unit)? = outcomeItem?.let { item ->
-        { MissionOutcomeActions(vm, item, openChat, openRun) }
-    }
     var menu by remember { mutableStateOf(false) }
     var details by rememberSaveable(id) { mutableStateOf(false) }
     var fullscreen by rememberSaveable(id) { mutableStateOf(false) }
@@ -243,12 +185,7 @@ fun RunScreen(
         followGesture,
         lastContentIndex = timeline.lastIndex,
     )
-    val task =
-        state.tasks.find { mission && run != null && run.trigger != "chat" && it.id == run.taskId }
-    val tabs =
-        listOf(1 to "Conversation", 0 to "Résultat", 2 to "Fichiers") +
-            listOfNotNull(task?.let { 3 to "Mission" })
-    LaunchedEffect(tab, task) { if (tab == 3 && task == null && run != null) tab = 1 }
+    val tabs = listOf(1 to "Conversation", 0 to "Résultat", 2 to "Fichiers")
     ArtifactLinkHost(vm, live.state?.artifacts.orEmpty()) {
         Column(Modifier.fillMaxSize()) {
             live.error?.let { ErrorNotice(it) {} }
@@ -267,7 +204,7 @@ fun RunScreen(
                                 },
                             )
                             DropdownMenuItem(
-                                text = { Text("Mission et détails") },
+                                text = { Text("Détails de l’exécution") },
                                 leadingIcon = { Icon(Icons.Default.Info, null) },
                                 onClick = {
                                     menu = false
@@ -275,65 +212,14 @@ fun RunScreen(
                                     details = true
                                 },
                             )
-                            // A retry starts the task again on its current agent (ADR-0075).
-                            val retryable =
-                                state.tasks
-                                    .find { it.id == current.taskId }
-                                    ?.let { canUseAgent(state.usableAgents, it.agentId) }
-                                    ?: directable
-                            if (
-                                !current.active &&
-                                    current.resumeAvailable &&
-                                    current.trigger != "chat" &&
-                                    directable
+                            DropdownMenuItem(
+                                text = { Text("Ouvrir la conversation") },
+                                leadingIcon = { Icon(CairnIcons.Chat, null) },
+                                onClick = {
+                                    menu = false
+                                    openChat(current.taskId)
+                                },
                             )
-                                DropdownMenuItem(
-                                    text = { Text("Reprendre") },
-                                    enabled = !state.busy,
-                                    onClick = {
-                                        menu = false
-                                        vm.perform { api.resumeRun(ResumeRunInput(id)) }
-                                    },
-                                )
-                            if (!current.active && current.trigger != "chat" && retryable)
-                                DropdownMenuItem(
-                                    text = { Text("Relancer") },
-                                    enabled = !state.busy,
-                                    onClick = {
-                                        menu = false
-                                        vm.perform {
-                                            openRun(api.retryRun(RunInput(id)).id)
-                                        }
-                                    },
-                                )
-                            if (current.trigger == "chat")
-                                DropdownMenuItem(
-                                    text = { Text("Ouvrir le chat") },
-                                    leadingIcon = { Icon(CairnIcons.Chat, null) },
-                                    onClick = {
-                                        menu = false
-                                        openChat(current.taskId)
-                                    },
-                                )
-                            if (
-                                current.trigger != "chat" &&
-                                    directable &&
-                                    current.status == "succeeded" &&
-                                    current.sessionId != null &&
-                                    current.workspaceCleanedAt == null
-                            )
-                                DropdownMenuItem(
-                                    text = { Text("Continuer en chat") },
-                                    leadingIcon = { Icon(CairnIcons.Chat, null) },
-                                    enabled = !state.busy,
-                                    onClick = {
-                                        menu = false
-                                        vm.perform {
-                                            val chat = api.convertRunToChat(RunInput(runId = id))
-                                            openChat(chat.id)
-                                        }
-                                    },
-                                )
                         }
                     }
                 }
@@ -350,7 +236,6 @@ fun RunScreen(
                             when (tab) {
                                 0 -> "Résultat"
                                 2 -> "Fichiers"
-                                3 -> "Mission"
                                 else -> "Conversation"
                             },
                             Modifier.weight(1f).padding(start = 16.dp),
@@ -442,7 +327,6 @@ fun RunScreen(
                                     CompletionEvidence(
                                         it,
                                         current.snapshot?.agent?.name.orEmpty(),
-                                        outcomeActions,
                                     )
                                 }
                             if (live.state.artifacts.isNotEmpty())
@@ -493,7 +377,6 @@ fun RunScreen(
                                                 CompletionEvidence(
                                                     outcome,
                                                     current.snapshot?.agent?.name.orEmpty(),
-                                                    outcomeActions,
                                                 )
                                             }
                                         }
@@ -508,7 +391,7 @@ fun RunScreen(
                                         )
                                     }
                                 else if (current.status == "waiting")
-                                    item(key = "mission-waiting") {
+                                    item(key = "run-waiting") {
                                         Text(
                                             "Attente programmée · ${current.wakeup?.reason.orEmpty()}"
                                         )
@@ -542,13 +425,9 @@ fun RunScreen(
                         }
                     }
                     2 -> Page { ArtifactsPanel(vm, live.state.artifacts) }
-                    3 ->
-                        task?.let {
-                            Page { Column { MissionPanel(vm, state, it, openRun, removed = back) } }
-                        }
                 }
                 if (details)
-                    DetailSheet("Mission et détails", { details = false }) {
+                    DetailSheet("Détails de l’exécution", { details = false }) {
                         Text(
                             current.snapshot?.agent?.name.orEmpty(),
                             style = MaterialTheme.typography.titleMedium,
@@ -586,7 +465,7 @@ fun RunScreen(
                                     canCleanUpWorktree &&
                                     current.workspace != null &&
                                     !current.isolated &&
-                                    (current.snapshot?.task?.worktree == true)
+                                    current.snapshot?.project != null
                             ) {
                                 OutlinedButton(
                                     onClick = {

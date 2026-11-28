@@ -151,11 +151,10 @@ it('accepts only future canonical waits for the current resumable owner and turn
   db.exec('INSERT INTO conversations(id,slug,title,agent_id,run_id,paused,lifecycle,created_at,updated_at,revision,session_restart_requested,cancelled_by_deletion,persisted_at) VALUES(\'chat\',\'slug\',\'\',\'agent\',\'run\',0,\'active\',0,0,\'revision\',0,0,0)')
   db.prepare('INSERT INTO durable_wakeups(chat_id,id,message_id,reason,seconds,created_at,wake_at) VALUES(\'chat\',\'wait\',\'turn\',\'\',60,?,?)').run(now, now + 60000)
   db.exec(chats.match(/CREATE UNIQUE INDEX conversations_run[^;]+;/)[0])
-  for (const name of ['chat', 'mission'])
-    db.exec(waits.match(new RegExp(`CREATE UNIQUE INDEX durable_wakeups_${name}[^;]+;`))[0])
-  const plan = db.prepare(`EXPLAIN QUERY PLAN ${canonicalWaitSql}`).all('run', now, now).map(row => row.detail).join('\n')
+  db.exec(waits.match(/CREATE UNIQUE INDEX durable_wakeups_chat[^;]+;/)[0])
+  const plan = db.prepare(`EXPLAIN QUERY PLAN ${canonicalWaitSql}`).all('run', now).map(row => row.detail).join('\n')
   expect(plan).not.toMatch(/SCAN [rwc]\b/)
-  const valid = () => db.prepare(canonicalWaitSql).get('run', now, now).valid
+  const valid = () => db.prepare(canonicalWaitSql).get('run', now).valid
   expect(valid()).toBe(0)
   db.exec('UPDATE runs SET status=\'succeeded\'')
   expect(valid()).toBe(1)

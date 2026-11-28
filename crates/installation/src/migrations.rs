@@ -18,9 +18,6 @@ use std::collections::HashMap;
 pub(crate) const PRE_MISSION_SUNSET_VERSION: i64 = 38;
 pub(crate) const TARGET_VERSION: i64 = 39;
 
-const LEGACY_SUSPENDED: &str =
-    "Its author no longer has access to this agent. It resumes once the owner gives access again.";
-
 struct LegacyMission {
     id: String,
     agent_id: String,
@@ -37,12 +34,12 @@ struct LegacyMission {
     author_removed: bool,
     created_at: i64,
     updated_at: i64,
-    schedule_wait_reason: Option<String>,
     native_principals: String,
     native_authority_nodes: String,
     native_parent_run_id: Option<String>,
     native_parent_access: Option<String>,
     native_provenance_unknown: bool,
+    native_plugin_grants: Option<String>,
 }
 
 struct LegacyRun {
@@ -118,43 +115,10 @@ fn known_owner_account(tx: &Connection) -> rusqlite::Result<Option<String>> {
     .optional()
 }
 
-fn is_owner(
-    tx: &Connection,
-    author_id: &str,
-    known_owner: Option<&str>,
-    mission: &LegacyMission,
-) -> rusqlite::Result<bool> {
-    if let Some(existing) = tx
-        .query_row(
-            "SELECT creator_owner FROM hook_rules WHERE creator_account_id=? LIMIT 1",
-            [author_id],
-            |row| row.get::<_, bool>(0),
-        )
-        .optional()?
-    {
-        return Ok(existing);
-    }
-    if mission.author_removed || mission.schedule_wait_reason.as_deref() == Some(LEGACY_SUSPENDED) {
-        return Ok(false);
-    }
-    let has_member_entry: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_account_access WHERE account_id=?)",
-        [author_id],
-        |row| row.get(0),
-    )?;
-    if has_member_entry {
-        return Ok(false);
-    }
-    if let Some(owner) = known_owner {
-        return Ok(author_id == owner);
-    }
-    Ok(true)
-}
-
 fn slug_for_migrated_chat(tx: &Connection, chat_id: &str) -> rusqlite::Result<String> {
     let short: String = chat_id
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .take(8)
         .collect();
     let base = format!("schedule-{short}");
@@ -196,9 +160,9 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         let missions = {
             let mut stmt = tx.prepare(
                 "SELECT id,agent_id,project_id,name,prompt,cron,timezone,enabled,archived,next_run,\
-                 author_id,author_access_id,author_removed,created_at,updated_at,schedule_wait_reason,\
+                 author_id,author_access_id,author_removed,created_at,updated_at,\
                  native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,\
-                 native_provenance_unknown FROM missions ORDER BY created_at,id",
+                 native_provenance_unknown,native_plugin_grants FROM missions ORDER BY created_at,id",
             )?;
             stmt.query_map([], |r| {
                 Ok(LegacyMission {
@@ -217,12 +181,12 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                     author_removed: r.get(12)?,
                     created_at: r.get(13)?,
                     updated_at: r.get(14)?,
-                    schedule_wait_reason: r.get(15)?,
-                    native_principals: r.get(16)?,
-                    native_authority_nodes: r.get(17)?,
-                    native_parent_run_id: r.get(18)?,
-                    native_parent_access: r.get(19)?,
-                    native_provenance_unknown: r.get(20)?,
+                    native_principals: r.get(15)?,
+                    native_authority_nodes: r.get(16)?,
+                    native_parent_run_id: r.get(17)?,
+                    native_parent_access: r.get(18)?,
+                    native_provenance_unknown: r.get(19)?,
+                    native_plugin_grants: r.get(20)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
@@ -235,10 +199,10 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 .clone()
                 .or_else(|| known_owner.clone())
                 .unwrap_or_else(|| "owner".to_owned());
-            let creator_owner = match mission.author_id.as_deref() {
-                Some(author) => is_owner(&tx, author, known_owner.as_deref(), &mission)?,
-                None => true,
-            };
+            // The database does not record a mission author's installation role. The rules
+            // engine verifies member authority with Beacon before it acts, and reconciliation
+            // recognizes the confirmed owner and exact membership generation.
+            let membership_ended = mission.author_removed || mission.author_id.is_none();
             mission_meta.insert(
                 mission.id.clone(),
                 (
@@ -332,14 +296,14 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 id: mission.id.clone(),
                 creator_account_id: creator_account_id.clone(),
                 creator_access_id: mission.author_access_id.clone(),
-                creator_owner,
+                creator_owner: false,
                 revision: id(),
                 version: 1,
                 disabled_at: disabled.then_some(at),
                 emergency_paused_at: None,
                 budget_exhausted_at: None,
                 budget_reason: None,
-                membership_ended_at: mission.author_removed.then_some(at),
+                membership_ended_at: membership_ended.then_some(at),
                 created_at: mission.created_at,
                 updated_at: mission.updated_at.max(mission.created_at),
             };
@@ -354,6 +318,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 "nativeParentRunId": mission.native_parent_run_id,
                 "nativeParentAccess": mission.native_parent_access,
                 "nativeProvenanceUnknown": mission.native_provenance_unknown,
+                "nativePluginGrants": mission.native_plugin_grants.as_deref().map(serde_json::from_str::<Value>).transpose()?,
             });
 
             if db.hook_rule(&row.id)?.is_none() {
@@ -392,7 +357,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                     &uses,
                 )?;
                 let schedule = match &cron {
-                    Some(pattern) if !disabled && !mission.author_removed => {
+                    Some(pattern) if !disabled && !membership_ended => {
                         let next = mission.next_run.or_else(|| {
                             crate::service::next_occurrences(pattern, &timezone, at, 1)
                                 .ok()
@@ -500,8 +465,14 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             "INSERT INTO conversations(\
              id,slug,title,agent_id,live_agent_id,project_id,live_project_id,run_id,\
              paused,lifecycle,created_at,updated_at,last_activity_at,revision,\
-             session_restart_requested,cancelled_by_deletion,agent_name,project_name,persisted_at\
-            ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,'active',?9,?10,?10,?11,0,0,?12,?13,?10)",
+             session_restart_requested,cancelled_by_deletion,agent_name,project_name,persisted_at,\
+             native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,\
+             native_provenance_unknown,native_plugin_grants\
+            ) SELECT ?1,?2,?3,?4,?5,?6,?7,?8,0,'active',?9,?10,?10,?11,0,0,?12,?13,?10,\
+              json_extract(boundary,'$.nativePrincipals'),json_extract(boundary,'$.nativeAuthorityNodes'),\
+              json_extract(boundary,'$.nativeParentRunId'),json_extract(boundary,'$.nativeParentAccess'),\
+              coalesce(json_extract(boundary,'$.nativeProvenanceUnknown'),1),\
+              json_extract(boundary,'$.nativePluginGrants') FROM runs WHERE id=?8",
             params![
                 chat_id,
                 slug,
@@ -519,7 +490,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             ],
         )?;
 
-        let rule_name = meta.map(|m| m.0.clone()).unwrap_or_else(|| title.clone());
+        let rule_name = meta.map_or_else(|| title.clone(), |m| m.0.clone());
         let creator_account_id = meta
             .map(|m| m.1.clone())
             .or_else(|| known_owner.clone())
@@ -560,8 +531,17 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             params![chat_id, run.id],
         )?;
 
-        // Re-link any active durable wakeup from mission_run_id to chat_id.
+        // A legacy mission waits as a RunStatus::Waiting. A conversation holds the
+        // same continuation after a succeeded turn, tied to its saved message (if any).
         if table_exists(&tx, "durable_wakeups")? {
+            tx.execute(
+                "UPDATE runs SET status='succeeded',finished_at=coalesce(finished_at,?2), \
+                 boundary=CASE WHEN (SELECT message_id FROM durable_wakeups WHERE mission_run_id=?1) IS NOT NULL \
+                 THEN json_set(boundary,'$.chatExecution.messageId',(SELECT message_id FROM durable_wakeups WHERE mission_run_id=?1)) \
+                 ELSE boundary END \
+                 WHERE id=?1 AND status='waiting' AND EXISTS(SELECT 1 FROM durable_wakeups WHERE mission_run_id=?1)",
+                params![run.id, updated_at],
+            )?;
             tx.execute(
                 "UPDATE durable_wakeups SET chat_id=?1,mission_run_id=NULL WHERE mission_run_id=?2",
                 params![chat_id, run.id],

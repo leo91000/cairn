@@ -13,7 +13,6 @@ interface Migration {
   toBackend: 'native' | 'firecracker'
   nodes: { id: string, name: string }[]
   conversion?: boolean
-  mission?: boolean
   pending: boolean
   environmentExpired?: boolean
   reason?: string | null
@@ -156,7 +155,7 @@ async function migrate() {
         </p>
         <p>The next environment starts on the selected node with a fresh engine session and the conversation history. It waits for capacity there while that node stays authorized.</p>
         <p v-if="!state?.environmentExpired">
-          The current turn stops and open questions close. Queued messages, scheduled waits and active missions continue there; otherwise the conversation waits for your next message.
+          The current turn stops and open questions close. Queued messages and scheduled waits continue there; otherwise the conversation waits for your next message.
         </p>
         <div class="mt-4 flex justify-end gap-2">
           <UiButton :disabled="busy" @click="confirm = false">

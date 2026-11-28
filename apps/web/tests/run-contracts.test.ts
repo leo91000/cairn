@@ -5,10 +5,8 @@ import { cancelRun } from '../../../packages/contracts/generated/cancelRun'
 import { cleanupRun } from '../../../packages/contracts/generated/cleanupRun'
 import listSchema from '../../../packages/contracts/generated/ListRunsInput.json'
 import retrySchema from '../../../packages/contracts/generated/Retry.json'
-import { retryRun } from '../../../packages/contracts/generated/retryRun'
 import wire from '../../../packages/contracts/generated/run-wire.json'
 import inputSchema from '../../../packages/contracts/generated/RunInput.json'
-import { runMission } from '../../../packages/contracts/generated/runMission'
 import stateSchema from '../../../packages/contracts/generated/RunState.json'
 import corpus from '../../../tests/fixtures/run-contracts.json'
 
@@ -37,7 +35,7 @@ it('qualifies run commands, list defaults, lifecycle states and retry wire value
     expect(retry(value), JSON.stringify(retry.errors)).toBe(true)
 })
 
-it('uses distinct generated calls for admission, retry, cancel and cleanup', async () => {
+it('uses distinct generated calls for cancel and cleanup', async () => {
   const calls: unknown[] = []
   const request = async <T>(path: string, options: RequestInit): Promise<T> => {
     calls.push([path, options])
@@ -45,12 +43,9 @@ it('uses distinct generated calls for admission, retry, cancel and cleanup', asy
   }
 
   const runId = corpus.commands[0].runId
-  await runMission(request, { taskId: runId })
-  await retryRun(request, { runId })
   await cancelRun(request, { runId })
   await cleanupRun(request, { runId })
   expect(calls).toEqual([
-    [`/tasks/${runId}/run`, { method: 'POST', body: JSON.stringify({ taskId: runId }) }],
-    ...['retry', 'cancel', 'cleanup'].map(action => [`/runs/${runId}/${action}`, { method: 'POST', body: JSON.stringify({ runId }) }]),
+    ...['cancel', 'cleanup'].map(action => [`/runs/${runId}/${action}`, { method: 'POST', body: JSON.stringify({ runId }) }]),
   ])
 })

@@ -41,27 +41,15 @@ class FilPagerDeviceTest {
             id = MAIN_AGENT_ID,
             name = "Agent principal",
         )
-    private val daily =
-        Task(
-            "a05f5991-ec1e-57a2-a8e5-ec314581a110",
-            "Revue quotidienne",
-            "Relire les changements du jour.",
-            MAIN_AGENT_ID,
-            cron = "0 9 * * *",
-            nextRun = now + 3_600_000,
-        )
-    private val failed =
-        Run(
-            id = "failed-run",
-            taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
-            status = "failed",
-            trigger = "schedule",
-            startedAt = now - 7_200_000,
-            finishedAt = now - 7_000_000,
-            snapshot = Snapshot(task = daily.runTaskSnapshot(), agent = main),
-        )
     private val chats =
         listOf(
+            Chat(
+                id = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
+                title = "Revue quotidienne",
+                status = "failed",
+                agentName = "Agent principal",
+                updatedAt = now - 7_000_000,
+            ),
             Chat(
                 id = "765886cd-efa2-5d30-bdce-99340ee87a3d",
                 title = "Choisir la pagination",
@@ -123,7 +111,7 @@ class FilPagerDeviceTest {
         }
 
     @Test
-    fun missionOpensBesideConversationsAndSwipesFollowTheFil() {
+    fun failedConversationOpensBesideOtherConversationsInFilOrder() {
         MockWebServer().use { server ->
             server.dispatcher =
                 object : Dispatcher() {
@@ -143,22 +131,8 @@ class FilPagerDeviceTest {
                                         build.cairn.contracts.ListAgentsOutput(listOf(main))
                                     )
                                 )
-                            path == "/api/installations/fixture/api/tasks" ->
-                                json(
-                                    wireJson.encodeToString(
-                                        build.cairn.contracts.ListMissionsOutput(listOf(daily))
-                                    )
-                                )
-                            path == "/api/installations/fixture/api/tasks/activity" ->
-                                json(wireJson.encodeToString(listOf(failed)))
-                            path == "/api/installations/fixture/api/runs" ->
-                                json(wireJson.encodeToString(listOf(failed)))
-                            path == "/api/installations/fixture/api/schedule/preview" ->
-                                json("{\"occurrences\":[]}")
                             path == "/api/installations/fixture/api/chats/stream" ->
                                 stream(LiveState(chats = chats))
-                            path == "/api/installations/fixture/api/runs/failed-run/stream" ->
-                                stream(LiveState(run = failed))
                             path.startsWith("/api/installations/fixture/api/chats/") &&
                                 path.endsWith("/stream") ->
                                 stream(
@@ -216,13 +190,8 @@ class FilPagerDeviceTest {
                 compose.onNodeWithText("Tout").performClick()
                 waitText("Revue quotidienne")
                 compose.onNodeWithText("Revue quotidienne").performClick()
-                waitPage("run-page:failed-run")
-                compose.runOnIdle { assertEquals(PerfScreen.RUN, Performance.screen) }
-                // The mission itself is one tab away from its run.
-                waitText("Mission")
-                compose.onNodeWithText("Mission").performClick()
-                waitText("Lancer maintenant")
-                // Tout is chronological: question, running conversation, failed mission.
+                waitPage("chat-page:a05f5991-ec1e-57a2-a8e5-ec314581a110")
+                compose.runOnIdle { assertEquals(PerfScreen.CHAT, Performance.screen) }
                 swipe(left = false)
                 waitPage("chat-page:451f26a2-b83b-5559-b07e-9a031e6de7cb")
                 compose.runOnIdle { assertEquals(PerfScreen.CHAT, Performance.screen) }

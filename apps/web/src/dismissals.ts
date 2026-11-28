@@ -2,6 +2,7 @@ import type { ConversationSnoozeAction } from '../../../packages/contracts/gener
 import { reactive, watch } from 'vue'
 import { snoozeChat } from '../../../packages/contracts/generated/snoozeChat'
 import { api, notify, state } from './api'
+import { chatList } from './chat-list'
 import { clearLocalRead } from './reads'
 
 /**
@@ -10,37 +11,44 @@ import { clearLocalRead } from './reads'
  */
 export const localSnoozes = reactive<Record<string, number | null>>({})
 let generation = 0
+const requests = new Map<string, symbol>()
 watch(() => [state.accountId, state.installationId, state.authenticated, state.signingOut], () => {
   generation++
+  requests.clear()
   for (const key of Object.keys(localSnoozes))
     delete localSnoozes[key]
 }, { flush: 'sync' })
 
-export function clearLocalSnooze(chatId: string) {
-  localSnoozes[chatId] = null
-}
+watch(chatList, (chats) => {
+  for (const chat of chats) {
+    if (localSnoozes[chat.id] === (chat.snoozedUntil ?? null))
+      delete localSnoozes[chat.id]
+  }
+})
 
 async function send(chatId: string, action: ConversationSnoozeAction, until: number | null, message: string) {
   const current = generation
-  const previous = localSnoozes[chatId]
+  const request = Symbol()
+  requests.set(chatId, request)
   localSnoozes[chatId] = until
-  if (action.kind === 'restore')
-    clearLocalRead(chatId)
+  const latest = () => current === generation && requests.get(chatId) === request
   try {
-    const output = await snoozeChat(api, { chatId, action })
-    if (current === generation)
-      localSnoozes[chatId] = output.snoozedUntil
-    notify(message)
+    await snoozeChat(api, { chatId, action })
+    if (latest()) {
+      if (action.kind === 'restore')
+        clearLocalRead(chatId)
+      notify(message)
+    }
   }
   catch (error) {
-    if (current === generation) {
-      if (previous === undefined)
-        delete localSnoozes[chatId]
-      else
-        localSnoozes[chatId] = previous
+    if (latest()) {
+      delete localSnoozes[chatId]
+      notify((error as Error).message)
     }
-
-    notify((error as Error).message)
+  }
+  finally {
+    if (latest())
+      requests.delete(chatId)
   }
 }
 

@@ -95,16 +95,6 @@ watch(
   { immediate: true },
 )
 
-const taskCounts = computed(() => {
-  const counts = new Map<string, number>()
-  for (const task of state.tasks) {
-    if (task.projectId && !task.archived)
-      counts.set(task.projectId, (counts.get(task.projectId) || 0) + 1)
-  }
-
-  return counts
-})
-
 function repositoryLabel(origin?: string) {
   if (!origin)
     return 'Local project'
@@ -381,7 +371,6 @@ async function remove() {
         </div>
         <div v-else-if="'path' in item" class="flex shrink-0 items-center gap-5 pr-6 text-xs text-muted phone:mt-2 phone:gap-4 phone:pr-0">
           <span class="inline-flex max-w-36 items-center gap-1.5" :title="item.baseBranch"><Icon :name="GitBranch" :size="13" /><span class="truncate">{{ item.baseBranch }}</span></span>
-          <span class="min-w-12 tabular-nums">{{ taskCounts.get(item.id) || 0 }} {{ taskCounts.get(item.id) === 1 ? 'task' : 'tasks' }}</span>
         </div>
       </div>
       <div class="flex items-center justify-between gap-4" :class="isAgent ? 'col-span-2 border-t border-line/60 pt-3' : 'col-start-3 row-start-1 phone:col-start-2 phone:row-start-2'">

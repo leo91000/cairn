@@ -71,7 +71,7 @@ test('reviews the open workspace layout and compact chat controls across themes 
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: 'Stop response' }).click()
 
-  for (const route of ['/tasks', '/agents', '/projects', '/skills', '/runs', '/mcps', '/connections', '/settings']) {
+  for (const route of ['/rules', '/agents', '/projects', '/skills', '/runs', '/mcps', '/connections', '/settings']) {
     await page.goto(workspacePath(route))
     await expect(page.locator('.page h1').first()).toBeVisible()
     for (const theme of ['dark', 'light'] as const) {
@@ -173,8 +173,8 @@ test('reviews fresh project sources and explicit blocked outcomes', async ({ pag
   await page.emulateMedia({ reducedMotion: 'reduce' })
   // The server rate-limits each client; the previous journey spends this worker's budget.
   await workspace.restart()
-  // The latest mission run; earlier journeys in this worker also leave conversation runs.
-  const run = workspace.service.store.runs().filter(item => item.trigger !== 'chat').sort((a, b) => b.createdAt - a.createdAt)[0]!
+  // The latest completed run; earlier journeys in this worker also leave conversation runs.
+  const run = workspace.service.store.runs().filter(item => item.status === 'succeeded').sort((a, b) => b.createdAt - a.createdAt)[0]!
   workspace.service.store.updateRun(run.id, {
     status: 'succeeded',
     summary: 'Validated locally. Delivery is blocked by the missing GitHub workflow permission.',
@@ -211,7 +211,7 @@ test('reviews fresh project sources and explicit blocked outcomes', async ({ pag
     await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`blocked-outcome-${colorScheme}.png`) })
   }
 
-  // The blocked mission says so on its card, as on Android.
-  await page.goto(workspacePath('/tasks'))
-  await expect(page.locator('.mission-card').filter({ hasText: run.snapshot.task.name })).toContainText('Blocked')
+  await page.goto(workspacePath('/'))
+  await page.getByRole('tab', { name: 'Tout' }).click()
+  await expect(page.locator(`[data-fil-key="chat:${run.taskId}"]`)).toContainText('Blocked')
 })

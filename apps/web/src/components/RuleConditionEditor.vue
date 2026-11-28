@@ -70,7 +70,7 @@ function conditionPath(index: number) {
   return model.value.type === 'all' || model.value.type === 'any' ? `${props.path}/conditions/${index}` : props.path
 }
 
-function add(kind: 'compare' | 'authorIn' | 'formula' | 'group' | 'conversationExists' | 'authorStartedConversation' | 'authorQuota') {
+function add(kind: 'compare' | 'authorIn' | 'formula' | 'group' | 'conversationExists' | 'authorStartedConversation' | 'authorQuota' | 'ruleConversationWorking') {
   adding.value = false
   if (!canAddCondition.value)
     return
@@ -90,6 +90,8 @@ function add(kind: 'compare' | 'authorIn' | 'formula' | 'group' | 'conversationE
     case 'conversationExists': condition = { type: 'conversationExists', key: { type: 'template', text: '' } }
       break
     case 'authorStartedConversation': condition = { type: 'authorStartedConversation', author: { type: 'formula', expression: authorField.value }, key: { type: 'template', text: '' } }
+      break
+    case 'ruleConversationWorking': condition = { type: 'ruleConversationWorking' }
       break
     case 'authorQuota': condition = {
       type: 'authorQuota',
@@ -296,6 +298,9 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
             @update:model-value="author => update(index, { ...condition, author })"
           />
         </template>
+        <p v-else-if="condition.type === 'ruleConversationWorking'" class="m-0! text-sm">
+          A conversation started by this rule is working
+        </p>
         <template v-else-if="condition.type === 'authorQuota'">
           <p class="m-0! text-sm font-semibold">
             Limit matching events per author
@@ -405,7 +410,7 @@ function addPerson(condition: Extract<RuleCondition, { type: 'authorIn' }>, inde
           <span class="block text-sm font-semibold">A formula</span><span class="block text-xs text-muted">Any CEL expression that is true or false.</span>
         </button>
         <button
-          v-for="choice in [{ kind: 'conversationExists' as const, title: 'A conversation exists' }, { kind: 'authorStartedConversation' as const, title: 'Author of a conversation' }, { kind: 'authorQuota' as const, title: 'Per-author quota' }]"
+          v-for="choice in [{ kind: 'conversationExists' as const, title: 'A conversation exists' }, { kind: 'authorStartedConversation' as const, title: 'Author of a conversation' }, { kind: 'authorQuota' as const, title: 'Per-author quota' }, { kind: 'ruleConversationWorking' as const, title: 'A conversation started by this rule is working' }]"
           :key="choice.kind"
           type="button"
           role="menuitem"

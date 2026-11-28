@@ -324,7 +324,7 @@ fn refuse(problems: &[HookRuleProblem]) -> Error {
 fn save_version(
     db: &Db<'_>,
     row: &mut RuleRow,
-    definition: HookRuleDefinition,
+    definition: &HookRuleDefinition,
     writer: &Writer,
     instances: &Instances,
 ) -> Result<()> {
@@ -332,7 +332,7 @@ fn save_version(
     let checked = validation::check(
         db,
         &validation::Request {
-            definition: &definition,
+            definition,
             creator: &writer.creator,
             instances,
             origin: &writer.origin,
@@ -365,7 +365,7 @@ fn save_version(
         },
         &checked.uses,
     )?;
-    engine::clock::sync_schedule(db, row, &definition, trigger_changed)?;
+    engine::clock::sync_schedule(db, row, definition, trigger_changed)?;
     Ok(())
 }
 
@@ -702,7 +702,7 @@ pub(crate) async fn create(
             author.unblocked(db, &writer)?;
             fresh_identity(db, &rule)?;
             let mut row = new_row(rule.clone(), &writer, !input.enabled);
-            save_version(db, &mut row, input.definition.clone(), &writer, &instances)?;
+            save_version(db, &mut row, &input.definition, &writer, &instances)?;
             db.audit(
                 "hook_rule.created",
                 &json!({ "ruleId": row.id, "creator": row.creator_account_id }),
@@ -748,7 +748,7 @@ pub(crate) async fn replace(
                 ));
             }
             author.unblocked(db, &writer)?;
-            save_version(db, &mut row, input.definition.clone(), &writer, &instances)?;
+            save_version(db, &mut row, &input.definition, &writer, &instances)?;
             db.audit(
                 "hook_rule.replaced",
                 &json!({ "ruleId": row.id, "version": row.version }),
@@ -1014,13 +1014,7 @@ pub(crate) async fn duplicate(
             }
             // A duplicate starts disabled and belongs to whoever duplicates it.
             let mut row = new_row(copy.clone(), &writer, true);
-            save_version(
-                db,
-                &mut row,
-                version.definition.clone(),
-                &writer,
-                &instances,
-            )?;
+            save_version(db, &mut row, &version.definition, &writer, &instances)?;
             db.audit(
                 "hook_rule.duplicated",
                 &json!({ "ruleId": row.id, "sourceId": source }),
@@ -1464,12 +1458,10 @@ pub(crate) async fn install_template(
             for (index, (id, definition)) in ids.iter().zip(definitions).enumerate() {
                 fresh_identity(db, id)?;
                 let mut row = new_row(id.clone(), &writer, !input.enabled);
-                save_version(db, &mut row, definition.clone(), &writer, &known).map_err(
-                    |mut error| {
-                        error.message = format!("Rule {}: {}", index + 1, error.message);
-                        error
-                    },
-                )?;
+                save_version(db, &mut row, &definition, &writer, &known).map_err(|mut error| {
+                    error.message = format!("Rule {}: {}", index + 1, error.message);
+                    error
+                })?;
                 warn_open(db, &author, &writer, id, &definition)?;
             }
             if retry_requested {
