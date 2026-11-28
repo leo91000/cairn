@@ -147,14 +147,16 @@ contract and examples](USER-QUESTIONS.md) and [ADR-0074](adr/0074-common-agent-q
 ## Side questions
 
 While Claude Code, Codex or Antigravity works on a reply, you can ask a quick explanatory question
-without steering it. On the web, use the quote icon in an agent reply's header
-(**Ask about this reply**) or select a passage in the reply and choose **Ask about
-selection**. On Android, use the **Poser une question à côté** icon or **Demander à côté**
-in the text-selection menu. The question opens a side panel (a drawer on desktop, a
-bottom sheet on phones and Android) where the answer appears, linked back to its reply:
-**Show reply** scrolls the conversation to it (or, for a reply outside the loaded
-history, reopens the panel and says so), and each reply shows how many side
-questions it has. A card above the composer reports a pending or unread answer.
+without steering it. Use the side-question icon on the working row (**Ask a side
+question**; on Android, **Poser une question à côté**), or select a passage of an agent
+reply and choose **Ask about selection** (on Android, **Demander à côté** in the
+text-selection menu). Replies carry no ask action of their own. The question opens a
+side panel (a drawer on desktop, a bottom sheet on phones and Android) where the answer
+appears, linked back to its reply: **Show reply** scrolls the conversation to it (or,
+for a reply outside the loaded history, reopens the panel and says so). Each reply
+shows how many side questions it has; that count reopens them, and asking there is
+about the whole reply by default. The icon, on the working row or in the conversation header,
+reports a pending or unread answer.
 
 A side question never joins the queue, steers the turn, pauses or resumes it, or
 enters the conversation's history or native session. It is answered beside the

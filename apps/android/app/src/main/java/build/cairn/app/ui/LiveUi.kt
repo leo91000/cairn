@@ -420,8 +420,9 @@ fun MessageRow(
                                                 if (id != null && id in firstEvent..lastEvent) count
                                                 else 0
                                             }
-                                    // These actions come and go with the reply's state; they
-                                    // never change the line's height, so the history does not move.
+                                    // The question count comes and goes with the reply's questions;
+                                    // it never changes the line's height, so the history does not
+                                    // move.
                                     if (side != null && itemId.isNotEmpty() && asked > 0)
                                         Box(Modifier.withoutLineHeight()) {
                                             val label =
@@ -449,15 +450,6 @@ fun MessageRow(
                                                     "$asked",
                                                     style = MaterialTheme.typography.labelSmall,
                                                 )
-                                            }
-                                        }
-                                    if (side?.canAsk == true && itemId.isNotEmpty())
-                                        Box(Modifier.withoutLineHeight()) {
-                                            ActionIcon(
-                                                "Poser une question à côté",
-                                                CairnIcons.SideQuestion,
-                                            ) {
-                                                side.ask(itemId, "", firstEvent)
                                             }
                                         }
                                     Text(
