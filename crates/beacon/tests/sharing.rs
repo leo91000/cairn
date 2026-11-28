@@ -2551,6 +2551,88 @@ async fn author_policy_requires_the_current_machine_identity_and_never_browser_c
 }
 
 #[tokio::test]
+async fn authority_checks_wait_for_an_in_flight_membership_removal() {
+    use sqlx_core::{query::query, query_as::query_as};
+    use std::time::Duration;
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let identity: Value = serde_json::from_slice(
+        &tokio::fs::read(
+            relay
+                .installation
+                .config
+                .data_dir
+                .join("installation-relay/identity.json"),
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    let token = identity["token"].as_str().unwrap().to_owned();
+
+    for (endpoint, email) in [
+        ("task-authors", "removed-author@example.test"),
+        ("native-authority", "removed-native@example.test"),
+    ] {
+        let (_, session) = member(&relay, email).await;
+        let account = session["account"]["id"].as_str().unwrap();
+
+        // A removal holds the installation lock until it commits, as sharing does.
+        let mut removal = relay.app.pool.begin().await.unwrap();
+        query("SELECT id FROM installations WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .execute(&mut *removal)
+            .await
+            .unwrap();
+        query("DELETE FROM installation_members WHERE installation_id=$1 AND account_id=$2")
+            .bind(id)
+            .bind(account)
+            .execute(&mut *removal)
+            .await
+            .unwrap();
+        let (blocking_pid,): (i32,) = query_as("SELECT pg_backend_pid()")
+            .fetch_one(&mut *removal)
+            .await
+            .unwrap();
+        let check = relay
+            .app
+            .client
+            .get(format!("{}/api/relay/{id}/{endpoint}", relay.app.url))
+            .bearer_auth(&token);
+        let checking = tokio::spawn(async move { check.send().await.unwrap() });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: Option<(i32,)> = query_as(
+                    "SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) LIMIT 1",
+                )
+                .bind(blocking_pid)
+                .fetch_optional(&relay.app.pool)
+                .await
+                .unwrap();
+                if waiting.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{endpoint} did not wait on the installation lock"));
+        removal.commit().await.unwrap();
+
+        let response = checking.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{endpoint}");
+        let evidence = response.text().await.unwrap();
+        assert!(
+            !evidence.contains(account),
+            "{endpoint} returned a member removed before it answered"
+        );
+    }
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn author_removal_during_slow_preparation_prevents_late_scheduled_admission() {
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
