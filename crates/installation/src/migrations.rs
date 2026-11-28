@@ -893,19 +893,23 @@ fn link_converted_mission_runs(
         let Some(mission) = missions.get(&mission_id) else {
             continue;
         };
+        let chat_id: String = row.get(0)?;
+        let agent_id: String = row.get(1)?;
+        let created_at: i64 = row.get(2)?;
+        let run_id: String = row.get(3)?;
         let origin = json!({
             "hook": "clock",
             "ruleName": mission.name,
             "schedule": true,
         });
         insert.execute(params![
-            row.get_ref(0)?,
+            chat_id,
             mission.creator,
-            row.get_ref(1)?,
+            agent_id,
             mission.rule_id,
             origin.to_string(),
-            row.get_ref(3)?,
-            row.get_ref(2)?,
+            run_id,
+            created_at,
         ])?;
     }
     Ok(())
