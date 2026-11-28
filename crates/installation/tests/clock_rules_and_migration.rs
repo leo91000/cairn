@@ -1577,6 +1577,7 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     drop(conn);
 
     // Open through Store::open to run the v38 -> v39 migration.
+    let upgrade_started = now();
     let store = Store::open(&config.data_dir).unwrap();
     drop(store);
 
@@ -2053,6 +2054,16 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         )
         .unwrap();
     assert_eq!(ordinary_read, t0);
+    let retention_started: i64 = migrated.query_row(
+        "SELECT json_extract(origin,'$.retentionStartedAt') FROM hook_rule_conversations WHERE run_id=?",
+        [&later_blocked_run], |row| row.get(0),
+    ).unwrap();
+    assert!(retention_started >= upgrade_started && retention_started <= now());
+    let converted_retention: Option<i64> = migrated.query_row(
+        "SELECT json_extract(origin,'$.retentionStartedAt') FROM hook_rule_conversations WHERE run_id=?",
+        [&converted_run], |row| row.get(0),
+    ).unwrap();
+    assert!(converted_retention.is_none());
 
     for retired in [&retirement_run_id, &resuming_retirement_run_id] {
         let provisional: Option<String> = migrated.query_row(
@@ -2234,7 +2245,6 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
                 error: Some(Some("Recovery could not retain the native session".into())),
                 recovery_pending: Some(false),
                 finished_at: Some(Some(now())),
-                wakeup: Some(None),
                 ..Default::default()
             },
         )
@@ -2245,6 +2255,33 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     assert!(service.store.run(&failed_wait_run_id).await.unwrap()["wakeup"].is_null());
     assert_eq!(
         failed_occurrence["error"],
+        "Recovery could not retain the native session"
+    );
+    service
+        .chat_send(
+            text(&failed_wait, "taskId"),
+            json!({ "id": id(), "text": "Investigate the failure", "mode": "queue" }),
+        )
+        .await
+        .unwrap();
+    service
+        .store
+        .change_run(
+            &failed_wait_run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                finished_at: Some(Some(now())),
+                summary: Some("Follow-up completed".into()),
+                error: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let preserved_failure = get(&owner, &failed_history_path).await;
+    assert_eq!(preserved_failure["status"], "failed");
+    assert_eq!(
+        preserved_failure["error"],
         "Recovery could not retain the native session"
     );
     let superseded_run = service.store.run(&superseded_wait_run_id).await.unwrap();

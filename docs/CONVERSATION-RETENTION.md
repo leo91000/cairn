@@ -18,7 +18,9 @@ Previously deleted conversations cannot be recovered by this policy change.
 
 Inactivity starts at `lastActivityAt` or the last run's `finishedAt`, whichever is
 later. Reading does not extend the delay. New conversations initialize their
-activity at creation. Queued/running agents, pending input,
+activity at creation. For newly migrated mission workspaces, the upload and
+run history retain their original dates and inactivity starts at the upgrade
+or later activity. Queued/running agents, pending input,
 open questions (including nonblocking questions), scheduled wakeups, recovery,
 node movement, backend migration, coding-agent switches, run preparation and
 worker finalization protect the environment. Pausing alone does not protect it.

@@ -681,6 +681,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 "hook": "clock",
                 "ruleName": rule_name,
                 "schedule": true,
+                "retentionStartedAt": at,
                 "legacyRun": {
                     "status": finished.then_some(&run.status),
                     "finishedAt": run.finished_at,

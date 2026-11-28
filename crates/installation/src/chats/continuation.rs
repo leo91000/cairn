@@ -133,7 +133,19 @@ impl Service {
         }
 
         let id = id.to_owned();
-        self.store.write(move |db| cancel(db, &id)).await
+        self.store
+            .transaction(move |db| {
+                let run_id = required(db.conversation(&id)?, "Chat not found")?.run_id;
+                cancel(db, &id)?;
+                if let Some(run_id) = run_id
+                    && let Some(state) = db.run_state(&run_id)?
+                    && matches!(state.status, RunStatus::Failed | RunStatus::Interrupted)
+                {
+                    db.record_migrated_settlement(&state)?;
+                }
+                Ok(())
+            })
+            .await
     }
 }
 

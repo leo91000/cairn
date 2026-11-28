@@ -43,6 +43,21 @@ fn inactive_due(chat: &Conversation, cutoff: Option<i64>) -> bool {
             .is_some_and(|(cutoff, activity)| activity <= cutoff)
 }
 
+fn expiration_due(db: &Db<'_>, chat: &Conversation, cutoff: Option<i64>) -> Result<bool> {
+    let Some(cutoff) = cutoff.filter(|_| inactive_due(chat, cutoff)) else {
+        return Ok(false);
+    };
+    // Missions were outside conversation retention in v38. Preserve their
+    // activity timestamp and let retention start at the upgrade instead.
+    let migrated_recently: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hook_rule_conversations WHERE chat_id=?1
+         AND json_extract(origin,'$.retentionStartedAt')>?2)",
+        rusqlite::params![chat.id, cutoff],
+        |row| row.get(0),
+    )?;
+    Ok(!migrated_recently)
+}
+
 pub use cairn_contracts::ConversationLifecycle as Lifecycle;
 
 string_enum! {
@@ -459,7 +474,7 @@ fn expire_inactive(db: &Db<'_>, id: &str) -> Result<bool> {
         return Ok(false);
     };
     let cutoff = cutoff(&retention(db)?);
-    if !inactive_due(&chat, cutoff) {
+    if !expiration_due(db, &chat, cutoff)? {
         return Ok(false);
     }
     let run_id = chat.run_id.as_deref().unwrap_or("");
@@ -506,16 +521,22 @@ impl Service {
         let Ok(_guard) = self.conversation_storage_lock.try_lock() else {
             return Ok(());
         };
-        let (mut chats, cutoff) = self
+        let mut chats = self
             .store
-            .read(|db| Ok((db.conversations()?, cutoff(&retention(db)?))))
+            .read(|db| {
+                let cutoff = cutoff(&retention(db)?);
+                let mut due = Vec::new();
+                for chat in db.conversations()? {
+                    if purge_due(&chat) || expiration_due(db, &chat, cutoff)? {
+                        due.push(chat);
+                    }
+                }
+                Ok(due)
+            })
             .await?;
         chats.sort_by_key(|chat| chat.retry_after.unwrap_or(0));
         let mut expired = false;
-        for chat in chats
-            .iter()
-            .filter(|chat| purge_due(chat) || inactive_due(chat, cutoff))
-        {
+        for chat in &chats {
             // Preparation can create run files before execution is registered as active.
             let preparation = self
                 .worker
@@ -761,5 +782,31 @@ mod tests {
             Some(100)
         ));
         assert!(!inactive_due(&json!({ "createdAt": 1 }), Some(100)));
+    }
+
+    #[tokio::test]
+    async fn inactivity_for_a_migrated_mission_starts_at_the_upgrade() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            let chat = crate::config::id();
+            let upgrade = now();
+            let activity = upgrade - 8 * DAY;
+            db.save_conversation_boundary(&json!({ "id": chat, "lastActivityAt": activity }))?;
+            db.0.execute(
+                "INSERT INTO hook_rule_conversations(chat_id,creator_account_id,agent_id,rule_id,origin,created_at)
+                 VALUES(?1,'fixture-owner',?2,?3,?4,?5)",
+                rusqlite::params![chat, crate::config::MAIN_AGENT_ID, crate::config::id(),
+                    json!({ "retentionStartedAt": upgrade }).to_string(), activity],
+            )?;
+            assert!(!expire_inactive(db, &chat)?);
+            assert_eq!(db.conversation(&chat)?.unwrap().last_activity_at, Some(activity));
+            db.0.execute(
+                "UPDATE hook_rule_conversations SET origin=json_set(origin,'$.retentionStartedAt',?2) WHERE chat_id=?1",
+                rusqlite::params![chat, activity],
+            )?;
+            assert!(expire_inactive(db, &chat)?);
+            Ok(())
+        }).await.unwrap();
     }
 }

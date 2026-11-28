@@ -560,15 +560,6 @@ impl Db<'_> {
                 self.write_run_state(&state)?;
             }
             if let Some(wakeup) = wakeup {
-                // Old failure transitions could request removal of a mission
-                // wait. Its migrated continuation now belongs to the chat.
-                if wakeup.is_none()
-                    && matches!(state.status, RunStatus::Failed | RunStatus::Interrupted)
-                    && !state.recovery_pending
-                    && !crate::environment_expiration::pending(self, id)?
-                {
-                    crate::chats::continuation::cancel_failed_migrated_wait(self, &state)?;
-                }
                 self.save_wakeup(false, id, wakeup.as_ref())?;
             }
             if let Some(boundary) = boundary {
@@ -610,6 +601,13 @@ impl Db<'_> {
         }) else {
             return Ok(());
         };
+        // A definitive failure ends the original occurrence and its wait. Keep
+        // a wait still owned by an environment retirement until that settles.
+        if matches!(state.status, RunStatus::Failed | RunStatus::Interrupted)
+            && !crate::environment_expiration::pending(self, &state.id)?
+        {
+            crate::chats::continuation::cancel_failed_migrated_wait(self, state)?;
+        }
         self.0
             .prepare_cached(
                 "UPDATE hook_rule_conversations
