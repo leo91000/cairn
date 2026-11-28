@@ -398,32 +398,36 @@ fn detach_pending_in(db: &Db<'_>, run_id: &str) -> Result<()> {
     let mut expiration = pending.expiration;
     if pending.cancelled {
         expiration.continue_turn = false;
-    } else if current["trigger"] != "chat" && pending.environment["wakeup"].is_object() {
-        // Expiration interrupts the worker, whose ordinary cancellation settlement
-        // clears its wait. Restore that continuation once this worker has stopped.
-        db.change_run(
-            run_id,
-            crate::runs::RunChanges {
-                status: Some(RunStatus::Waiting),
-                wakeup: Some(Some(serde_json::from_value(
-                    pending.environment["wakeup"].clone(),
-                )?)),
-                cancel_requested_at: Some(None),
-                ..Default::default()
-            },
-        )?;
-    } else if db
-        .conversation_for_run(run_id)?
-        .is_some_and(|chat| chat.wakeup.is_some())
-    {
-        db.change_run(
-            run_id,
-            crate::runs::RunChanges {
-                status: Some(RunStatus::Succeeded),
-                cancel_requested_at: Some(None),
-                ..Default::default()
-            },
-        )?;
+    } else if let Some(mut chat) = db.conversation_for_run(run_id)? {
+        if chat.wakeup.is_none()
+            && pending.environment["trigger"]
+                .as_str()
+                .is_some_and(|trigger| trigger != "chat")
+            && pending.environment["wakeup"].is_object()
+        {
+            // A v38 mission's cancellation settlement may have removed its
+            // wait after the retirement saved the original execution snapshot.
+            let mut wakeup: cairn_contracts::ChatWakeup =
+                serde_json::from_value(pending.environment["wakeup"].clone())?;
+            if let Some(turn) = current["chatExecution"]["messageId"].as_str() {
+                wakeup.message_id = Some(turn.to_owned());
+            }
+            chat.wakeup = Some(wakeup);
+            db.save_conversation(&chat)?;
+        }
+        if chat.wakeup.is_some() {
+            db.change_run(
+                run_id,
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Succeeded),
+                    finished_at: current["finishedAt"]
+                        .is_null()
+                        .then_some(Some(pending.expired_at)),
+                    cancel_requested_at: Some(None),
+                    ..Default::default()
+                },
+            )?;
+        }
     }
     expiration.destination = current["targetNodeId"].as_str().map(str::to_owned);
     detach_environment_in(
@@ -1086,6 +1090,66 @@ fn save_progress(
 mod tests {
     use super::*;
     use crate::run_fixture::DbRunFixture;
+
+    #[tokio::test]
+    async fn migrated_pending_retirement_restores_the_wait_cleared_by_fencing() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                for cancelled in [false, true] {
+                    let (run, chat, turn) = (id(), id(), id());
+                    let mut environment = db.add_run_fixture(&json!({
+                    "id": run,
+                    "taskId": chat,
+                    "status": "cancelled",
+                    "trigger": "chat",
+                    "createdAt": 1,
+                    "chatExecution": { "messageId": turn, "text": "Continue", "attachments": [] },
+                }), None)?;
+                    db.save_conversation_boundary(&json!({ "id": chat, "runId": run }))?;
+                    environment["trigger"] = "schedule".into();
+                    environment["status"] = "waiting".into();
+                    environment["wakeup"] = json!({
+                        "id": "kept-wake",
+                        "messageId": "old-turn",
+                        "reason": "Wait before checking again",
+                        "seconds": 60,
+                        "createdAt": 1,
+                        "wakeAt": 60_001,
+                    });
+                    db.put(
+                        PENDING,
+                        &serde_json::to_value(Pending {
+                            id: run.clone(),
+                            run_id: run.clone(),
+                            expired_at: 42,
+                            expiration: Expiration::new(Cause::NodeChange),
+                            environment,
+                            cancelled,
+                        })?,
+                    )?;
+
+                    detach_pending_in(db, &run)?;
+
+                    let detached = db.run(&run)?.unwrap();
+                    let wake = db.conversation(&chat)?.unwrap().wakeup;
+                    if cancelled {
+                        assert_eq!(detached["status"], "cancelled");
+                        assert!(wake.is_none());
+                    } else {
+                        assert_eq!(detached["status"], "succeeded");
+                        assert_eq!(detached["finishedAt"], 42);
+                        let wake = wake.unwrap();
+                        assert_eq!(wake.id, "kept-wake");
+                        assert_eq!(wake.message_id.as_deref(), Some(turn.as_str()));
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn an_older_retirement_cannot_replace_or_clear_the_new_environments_error() {

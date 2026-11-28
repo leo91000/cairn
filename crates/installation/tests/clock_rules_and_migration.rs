@@ -444,33 +444,34 @@ async fn clock_cron_rule_catches_up_once_guards_overlap_and_runs_now() {
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // 5. While the first conversation has a queued message (working), run_now hits
-    //    !ruleConversationWorking == false and does NOT start a second conversation.
-    let (status, run_now) = app
-        .request(
-            &app.owner,
-            "POST",
-            &format!("/api/hook-rules/{rule_id}/run"),
-            Value::Null,
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{run_now}");
-    cairn_installation::rules::engine::tick(&app.service)
-        .await
-        .unwrap();
-    let (_, chats) = app
-        .request(&app.owner, "GET", "/api/chats", Value::Null)
-        .await;
-    let count = chats
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|c| c["originRule"]["ruleId"] == rule_id)
-        .count();
-    assert_eq!(
-        count, 1,
-        "overlap guard must prevent second chat while working"
-    );
+    let run_now_and_count = async || {
+        let (status, triggering) = app
+            .request(
+                &app.owner,
+                "POST",
+                &format!("/api/hook-rules/{rule_id}/run"),
+                Value::Null,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{triggering}");
+        cairn_installation::rules::engine::tick(&app.service)
+            .await
+            .unwrap();
+        let (status, chats) = app
+            .request(&app.owner, "GET", "/api/chats", Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{chats}");
+        chats
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|chat| chat["originRule"]["ruleId"] == rule_id)
+            .count()
+    };
+
+    // A pause holds queued input, so the overlap guard still sees the first chat.
+    app.service.chat_pause(&first_chat_id, true).await.unwrap();
+    assert_eq!(run_now_and_count().await, 1);
 
     // 6. Once the first conversation finishes its turn — even with an unanswered pending
     //    question — RuleConversationWorking is false, so run_now starts a second chat!
@@ -498,6 +499,15 @@ async fn clock_cron_rule_catches_up_once_guards_overlap_and_runs_now() {
                 "UPDATE conversations SET run_id=?1 WHERE id=?2",
                 params![run_id, first_chat_db],
             )?;
+            let wakeup = serde_json::from_value(json!({
+                "id": "scheduled-review",
+                "messageId": null,
+                "reason": "Wait for the CI result",
+                "seconds": 60,
+                "createdAt": now(),
+                "wakeAt": now() + 60_000,
+            }))?;
+            db.save_wakeup(true, &first_chat_db, Some(&wakeup))?;
             db.save_question(&serde_json::from_value(json!({
                 "id": id(),
                 "chatId": first_chat_db,
@@ -513,29 +523,19 @@ async fn clock_cron_rule_catches_up_once_guards_overlap_and_runs_now() {
         .await
         .unwrap();
 
-    let (status, run_now) = app
-        .request(
-            &app.owner,
-            "POST",
-            &format!("/api/hook-rules/{rule_id}/run"),
-            Value::Null,
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{run_now}");
-    cairn_installation::rules::engine::tick(&app.service)
+    assert_eq!(
+        run_now_and_count().await,
+        1,
+        "a paused wakeup still holds overlap"
+    );
+    app.service
+        .store
+        .write(move |db| db.save_wakeup(true, &first_chat_id, None))
         .await
         .unwrap();
-    let (_, chats) = app
-        .request(&app.owner, "GET", "/api/chats", Value::Null)
-        .await;
-    let count = chats
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|c| c["originRule"]["ruleId"] == rule_id)
-        .count();
     assert_eq!(
-        count, 2,
+        run_now_and_count().await,
+        2,
         "unanswered question must not block overlap guard once turn finished"
     );
 }

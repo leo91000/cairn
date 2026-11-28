@@ -2509,11 +2509,8 @@ async fn conversation_wait_releases_attempt_on_restart_even_when_cancelled() {
         assert_eq!(current["recoveryPending"], false);
         assert_eq!(
             current["status"],
-            if cancel && queued {
-                "cancelled"
-            } else {
-                "succeeded"
-            }
+            if cancel { "cancelled" } else { "succeeded" },
+            "cancel={cancel}, remote={remote}, queued={queued}"
         );
         let chat = service.chat_detail(&chat_id).await.unwrap();
         if cancel {
