@@ -307,6 +307,60 @@ async fn the_next_chat_turn_waits_for_old_native_cleanup_after_the_deadline() {
 }
 
 #[tokio::test]
+async fn stopping_a_queued_native_resume_keeps_observing_the_old_disk() {
+    let (_root, service, chat_id, run, _) = fixture().await;
+    let id = run.clone();
+    service
+        .store
+        .transaction(move |db| {
+            crate::run_fixture::change_run_fixture(
+                db,
+                &id,
+                &json!({
+                    "status": RunStatus::Queued, "trigger": "chat",
+                    "recoveryPending": true, "sessionId": "saved-session",
+                }),
+            )?;
+            let attempt = crate::config::id();
+            RunCheckpoint::from_value(json!({
+                "runnerId": attempt, "turnPending": true,
+                "prepared": { "backend": "native", "isolated": true },
+                "pendingNativeCleanup": {
+                    "attempt": attempt, "state": "awaitingRetirement", "until": 0,
+                    "message": "Disk cleanup pending",
+                },
+            }))?
+            .store_in(db, &id)
+        })
+        .await
+        .unwrap();
+
+    service
+        .worker
+        .stop_chat_authorized(&service, &chat_id, |_| Ok(()))
+        .await
+        .unwrap();
+    let queued = service.store.run(&run).await.unwrap();
+    assert_eq!(RunStatus::of(&queued), Some(RunStatus::Queued));
+    assert!(queued["cancelRequestedAt"].is_number());
+    assert!(!recover(&service, &queued).await.unwrap());
+
+    let cancelled = service.store.run_state(&run).await.unwrap();
+    assert_eq!(cancelled.status, RunStatus::Cancelled);
+    assert!(!cancelled.recovery_pending);
+    let saved = RunCheckpoint::load(&service.store, &run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        saved
+            .pending_native_cleanup()
+            .unwrap()
+            .awaiting_retirement()
+    );
+}
+
+#[tokio::test]
 async fn stop_and_run_cancellation_settle_a_deferred_reply_without_returning_later_messages() {
     for stop_chat in [true, false] {
         let (_root, service, chat, run, _) = fixture().await;

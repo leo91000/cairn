@@ -267,7 +267,8 @@ pub(crate) async fn fence_attempt(
 }
 
 pub(crate) enum FenceDisposition {
-    Complete,
+    Fenced,
+    /// Settlement of a completed chat belongs to the durable native observer.
     DeferredNativeCleanup,
 }
 
@@ -359,7 +360,7 @@ async fn fence_attempt_authorized(
             let expected = expected.cloned();
             let observed_pending = pending.cloned();
             let cleanup_authorize = authorize.clone();
-            let released = s
+            let disposition = s
                 .store
                 .transaction(move |db| {
                     cleanup_authorize.check_local(db)?;
@@ -370,25 +371,27 @@ async fn fence_attempt_authorized(
                         ));
                     }
                     let Some(saved) = &mut current else {
-                        return Ok(false);
+                        return Ok(None);
                     };
                     if saved.runner_id() != Some(attempt.as_str())
                         || saved.pending_native_cleanup() != observed_pending.as_ref()
                     {
-                        return Ok(false);
+                        return Ok(None);
                     }
                     let cleanup = match cleanup {
-                        FencedCleanup::Clear => return Ok(false),
+                        FencedCleanup::Clear => return Ok(None),
                         FencedCleanup::Failed(result) => result,
                         FencedCleanup::Deferred(pending) => {
+                            let settles_completed_turn = db.run_state(&id)?.is_some_and(|state| {
+                                state.trigger == "chat"
+                                    && state.status == RunStatus::Succeeded
+                                    && state.recovery_pending
+                            });
                             let eligible = observed_pending.is_some()
                                 || (saved
                                     .settled()
                                     .is_some_and(|turn| turn.status == RunStatus::Succeeded)
-                                    && db.run_state(&id)?.is_some_and(|state| {
-                                        state.status == RunStatus::Succeeded
-                                            && state.recovery_pending
-                                    }));
+                                    && settles_completed_turn);
                             if eligible {
                                 if observed_pending.is_none() {
                                     // A prepared follow-up must re-read the environment
@@ -402,7 +405,14 @@ async fn fence_attempt_authorized(
                                 saved.process = None;
                                 saved.store_in(db, &id)?;
                                 crate::nodes::placement::release_in(db, &attempt)?;
-                                return Ok(true);
+                                // A following turn can retain the fence as workspace evidence.
+                                // Its launch or cancellation still belongs to ordinary recovery.
+                                let disposition = if settles_completed_turn {
+                                    FenceDisposition::DeferredNativeCleanup
+                                } else {
+                                    FenceDisposition::Fenced
+                                };
+                                return Ok(Some(disposition));
                             }
                             pending.failure()
                         }
@@ -422,11 +432,11 @@ async fn fence_attempt_authorized(
                         saved.record_controller_result(db, &id, &attempt, Some(cleanup))?;
                         saved.store_in(db, &id)?;
                     }
-                    Ok(false)
+                    Ok(None)
                 })
                 .await?;
-            if released {
-                return Ok(FenceDisposition::DeferredNativeCleanup);
+            if let Some(disposition) = disposition {
+                return Ok(disposition);
             }
         }
     }
@@ -461,7 +471,7 @@ async fn fence_attempt_authorized(
             if let Some(attempt) = release {
                 crate::nodes::placement::release_in(db, &attempt)?;
             }
-            Ok(FenceDisposition::Complete)
+            Ok(FenceDisposition::Fenced)
         })
         .await
 }

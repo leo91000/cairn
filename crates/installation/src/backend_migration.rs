@@ -222,13 +222,20 @@ fn change_expired_backend(
     required_tags: &Value,
 ) -> Result<()> {
     let run_id = text(&chat, "runId");
-    if crate::environment_expiration::pending(db, run_id)?
-        && crate::worker::checkpoint::RunCheckpoint::load_in(db, run_id)?
-            .is_some_and(|saved| saved.pending_native_cleanup().is_some())
-    {
-        return Err(Error::conflict(
-            "The working environment is already being retired.",
-        ));
+    if crate::environment_expiration::pending(db, run_id)? {
+        let run = required(db.run_state(run_id)?, "Run not found")?;
+        let completing_chat = run.trigger == "chat"
+            && run.status == crate::run_status::RunStatus::Succeeded
+            && run.recovery_pending;
+        if crate::worker::checkpoint::RunCheckpoint::finishing_native_turn_in(
+            db,
+            run_id,
+            completing_chat,
+        )? {
+            return Err(Error::conflict(
+                "The working environment is already being retired.",
+            ));
+        }
     }
     let mut boundary = json!({
         "requiredRuntime": node["runtimeId"],
@@ -605,17 +612,12 @@ mod tests {
                     None,
                 )?;
                 let attempt = id();
-                db.save_checkpoint_boundary(
-                    &run,
-                    &json!({
-                        "runnerId": attempt,
-                        "prepared": { "backend": "native", "isolated": true },
-                        "pendingNativeCleanup": {
-                            "attempt": attempt, "state": "observing", "until": now() + 5_000,
-                            "message": "Cleanup in progress"
-                        },
-                    }),
-                )?;
+                let mut checkpoint = json!({
+                    "runnerId": attempt,
+                    "prepared": { "backend": "native", "isolated": true },
+                    "settled": { "status": "succeeded", "finishedAt": 42 },
+                });
+                db.save_checkpoint_boundary(&run, &checkpoint)?;
                 crate::environment_expiration::request_in(
                     db,
                     &run,
@@ -624,16 +626,25 @@ mod tests {
                     ),
                     true,
                 )?;
-                let error = change_expired_backend(
-                    db,
-                    json!({ "runId": run }),
-                    &Value::Null,
-                    &Value::Null,
-                    &Value::Null,
-                )
-                .unwrap_err();
-                assert!(error.is_conflict());
-                assert!(db.run_state(&run)?.unwrap().recovery_pending);
+                for receipt_recorded in [false, true] {
+                    if receipt_recorded {
+                        checkpoint["pendingNativeCleanup"] = json!({
+                            "attempt": attempt, "state": "observing", "until": now() + 5_000,
+                            "message": "Cleanup in progress",
+                        });
+                        db.save_checkpoint_boundary(&run, &checkpoint)?;
+                    }
+                    let error = change_expired_backend(
+                        db,
+                        json!({ "runId": run }),
+                        &Value::Null,
+                        &Value::Null,
+                        &Value::Null,
+                    )
+                    .unwrap_err();
+                    assert!(error.is_conflict(), "receipt recorded: {receipt_recorded}");
+                    assert!(db.run_state(&run)?.unwrap().recovery_pending);
+                }
                 Ok(())
             })
             .await
