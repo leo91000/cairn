@@ -232,7 +232,8 @@ test('switching conversations never shows the previous one and reopens saved one
   await page.getByRole('tab', { name: 'Tout', exact: true }).click()
   await expect(page.locator('.activity-message').getByText('First conversation message', { exact: true }).first()).toBeVisible({ timeout: 30000 })
   const fil = page.getByRole('complementary', { name: 'Fil' })
-  await expect(fil.locator('[data-fil-key^="chat:"]')).toHaveCount(2)
+  for (const chat of [first, second])
+    await expect(fil.locator(`[data-fil-key="chat:${chat.id}"]`)).toBeVisible()
   const switches = [
     ['Beta conversation', 'Second conversation message', 'First conversation message', 'first visit'],
     ['Alpha conversation', 'First conversation message', 'Second conversation message', 'saved'],

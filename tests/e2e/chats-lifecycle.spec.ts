@@ -640,10 +640,8 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   // independent flow with a fresh limiter while preserving the seeded data.
   await workspace.restart()
   initializeRepository(workspace.projectPath)
-  await page.goto(workspacePath('/rules'))
-  await authenticateWorkspace(page)
-  await expect(page.locator('.task-focus-detail')).toBeVisible()
   await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Plan the navigation refresh. fixture:cairn-question')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Answer pending questions' })).toBeVisible()

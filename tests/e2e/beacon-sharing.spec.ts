@@ -11,7 +11,7 @@ import {
 } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 import { executeBeaconSql, expireAccountProof } from './beacon-relay-fixture'
@@ -90,7 +90,11 @@ test('owner shares an installation and member works without management controls'
     await expect(page.getByRole('heading', { name: 'No installations yet' })).toBeVisible()
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const code = await page.getByLabel('Installation claim code').inputValue()
-    await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
+    const codexHome = join(root, 'home', '.codex')
+    await Promise.all([mkdir(join(root, 'data')), mkdir(codexHome, { recursive: true })])
+    await writeFile(join(codexHome, 'auth.json'), JSON.stringify({
+      tokens: { access_token: 'synthetic-browser-access', refresh_token: 'synthetic-browser-refresh', account_id: 'fixture' },
+    }), { mode: 0o600 })
     seed = new NativeFixture({
       dataDir: join(root, 'data'),
       home: join(root, 'home'),
@@ -102,7 +106,8 @@ test('owner shares an installation and member works without management controls'
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
       WORKSPACE_ROOTS: root,
-      WORKER_ENABLED: 'false',
+      WORKER_ENABLED: 'true',
+      CODEX_BIN: resolve('tests/fixtures/codex.mjs'),
       NODE_ENV: 'test',
       PORT: '0',
       CAIRN_BEACON_ORIGIN: url,
@@ -157,7 +162,11 @@ test('owner shares an installation and member works without management controls'
     }
     // A new member uses no agent until the owner gives access from the agent page.
     expect((await (await member.request.get(`${apiRoot}/usable-agents`)).json()).agentIds).toEqual([])
-    expect((await member.request.post(`${apiRoot}/hook-rules`, commitment)).status()).toBe(403)
+    const rejected = await member.request.post(`${apiRoot}/hook-rules`, commitment)
+    const refused = await rejected.json()
+    expect(rejected.status(), refused.error).toBe(400)
+    expect(refused.error).toContain('You don\'t have access to this agent.')
+    expect(refused.error).toContain('[/executionAgentId]')
     await member.goto(`${installationUrl}chats`)
     await expect(member.getByRole('note').filter({ hasText: 'No agent available to you yet' })).toBeVisible()
     await expect(member.getByRole('textbox', { name: 'Message', exact: true })).toBeDisabled()

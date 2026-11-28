@@ -144,8 +144,9 @@ test('a durable condition wait follows a dependency across restart and queue pau
   workspace.service.store.set('deployment-lease', 'condition-wait-fixture', Date.now() + 120000)
   try {
     const dependency = await workspace.api('/api/chats', 'POST', { agentId: agent.id })
-    const target = workspace.service.chatRun(dependency.id, 'Condition dependency')
-    workspace.service.store.updateRun(target.id, { status: 'queued', finishedAt: null })
+    await workspace.api(`/api/chats/${dependency.id}/messages`, 'POST', { id: randomUUID(), text: 'Condition dependency' })
+    await expect.poll(async () => (await workspace.api(`/api/chats/${dependency.id}`)).run?.status).toBe('queued')
+    const target = (await workspace.api(`/api/chats/${dependency.id}`)).run
     const wakeup = {
       id: randomUUID(),
       messageId: detail.run.chatExecution.messageId,

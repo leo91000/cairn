@@ -468,7 +468,7 @@ test('new rules keep the agent whose page requested them', async ({ page, worksp
   await page.goto(workspacePath(`/rules/new?agent=${agent.id}`))
   await signIn(page)
   await expect(page.getByRole('combobox', { name: 'Execution agent', exact: true })).toHaveValue(agent.id)
-  await expect(page.getByRole('combobox', { name: 'Hook', exact: true })).toHaveValue(/^cairn:/)
+  await expect(page.getByRole('combobox', { name: 'Hook', exact: true })).toHaveValue('clock')
 })
 
 test('a catalog load failure explains disabled creation and can be retried', async ({ page, workspace }) => {

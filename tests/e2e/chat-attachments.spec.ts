@@ -114,10 +114,8 @@ test('uploads images and files, previews them and preserves attachments while ed
     })
   })
   initializeRepository(workspace.projectPath)
-  await page.goto(workspacePath('/rules'))
-  await authenticateWorkspace(page)
-  await expect(page.locator('.task-focus-detail')).toBeVisible()
   await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
   const image = { name: 'design.png', mimeType: 'image/png', buffer: readFileSync('docs/screenshots/overview-desktop.png') }
   const notes = { name: 'review-notes.md', mimeType: 'text/markdown', buffer: Buffer.from('# Design review\nMake the controls easier to reach on mobile.') }
   await page.getByLabel('Attach files', { exact: true }).setInputFiles([image])

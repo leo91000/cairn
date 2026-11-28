@@ -1,5 +1,6 @@
 import type { BrowserContext, Page } from '@playwright/test'
 import type { RunEvent } from '../../packages/contracts/contracts'
+import type { Workspace } from './fixtures'
 import { createHash, randomUUID } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -21,9 +22,14 @@ function historyNoise(id: string) {
   return Array.from({ length: 128 }, (_, index) => createHash('sha256').update(`${id}:${index}`).digest('hex')).join('')
 }
 
+async function timelineRun(workspace: Workspace, title: string) {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  return { chat, run: workspace.service.chatRun(chat.id, title) }
+}
+
 test('large timeline answers load completely through bounded content chunks', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
-  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  const { run } = await timelineRun(workspace, 'Large timeline answer')
   const answer = `${'bounded fragment '.repeat(18_000)}end of large answer`
   workspace.service.store.event(run.id, 'item.completed', '', {
     item: { id: 'large-answer', type: 'agent_message', text: answer },
@@ -104,7 +110,7 @@ test('agent diagnostics preserve embedded JSON as terminal text', async ({ page,
 
 test('markdown tables wrap prose and keep wide columns reachable within the conversation', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
-  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  const { run } = await timelineRun(workspace, 'Markdown tables')
   const description = 'Missing or running required checks keep waiting; required failure wakes the agent. Optional checks do not block. Push a new commit or close the PR and the old wait should report that change.'
   const longPath = `https://example.test/${'long-path-segment/'.repeat(20)}`
   const columns = Array.from({ length: 12 }, (_, i) => `Column ${i + 1}`)
@@ -162,6 +168,7 @@ test('markdown tables wrap prose and keep wide columns reachable within the conv
       expect(headerLines).toBeLessThanOrEqual(2)
       const scroll = await wideTable.evaluate((table) => {
         const container = table.parentElement!
+        container.scrollIntoView({ block: 'center', inline: 'nearest' })
         container.scrollLeft = container.scrollWidth
         return { left: container.scrollLeft, overflow: container.scrollWidth - container.clientWidth }
       })
@@ -175,20 +182,12 @@ test('markdown tables wrap prose and keep wide columns reachable within the conv
   }
 })
 
-for (const kind of ['chat', 'task'] as const) {
+for (const kind of ['chat', 'run'] as const) {
   test(`${kind} automatically fills folded history without a click or scroll`, async ({ page, workspace }) => {
     await useRelayForHttpMocks(page)
     await page.setViewportSize(kind === 'chat' ? { width: 390, height: 844 } : { width: 1440, height: 1100 })
-    let run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
-    let path = `/runs/${run.id}`
-    if (kind === 'chat') {
-      const chat = await workspace.api('/api/chats', 'POST', {})
-      await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Short history fixture' })
-      await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
-      const detail = await workspace.api(`/api/chats/${chat.id}`)
-      run = workspace.service.store.run(detail.run.id)!
-      path = `/chats/${chat.id}`
-    }
+    const { chat, run } = await timelineRun(workspace, 'Folded history')
+    const path = kind === 'chat' ? `/chats/${chat.id}` : `/runs/${run.id}`
 
     for (let i = 0; i < 100; i++) {
       const text = `Buffered message ${i}: earlier conversation context.`
@@ -234,7 +233,7 @@ for (const kind of ['chat', 'task'] as const) {
 
 test('an older page preserves expanded newer tools and their open detail sheet', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
-  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  const { run } = await timelineRun(workspace, 'Earlier timeline page')
   workspace.service.store.event(run.id, 'turn.started', '')
   for (let i = 0; i < 260; i++) {
     workspace.service.store.event(run.id, 'item.completed', '', {
@@ -243,6 +242,7 @@ test('an older page preserves expanded newer tools and their open detail sheet',
         type: 'command_execution',
         command: `echo inspect-${i}`,
         exit_code: 0,
+        aggregated_output: historyNoise(`inspect-${i}`),
       },
     })
   }
@@ -287,7 +287,7 @@ test('an older page preserves expanded newer tools and their open detail sheet',
 
 test('automatic history pauses on errors and resumes only after retry', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
-  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  const { run } = await timelineRun(workspace, 'Retrying history')
   for (let i = 0; i < 220; i++) {
     workspace.service.store.event(run.id, 'item.completed', 'Checked a file', {
       item: {

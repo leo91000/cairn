@@ -88,6 +88,11 @@ test('sign in, author skills, schedule work, inspect results, and sign out', asy
   const rule = (await workspace.api('/api/hook-rules')).rules.find((entry: any) => entry.name === 'Weekly dependency review')
   const chat = await runSchedule(workspace, rule)
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).status).toBe('succeeded')
+  await page.goto(workspacePath(`/chats/${chat.slug}`))
+  await expect(page.getByText('Ready for the next step.', { exact: true })).toBeVisible()
+  await page.reload()
+  await expect(page.getByText('Ready for the next step.', { exact: true })).toBeVisible()
+  await page.goto(workspacePath(`/rules?rule=${rule.id}`))
   await page.getByRole('button', { name: 'Disable', exact: true }).click()
   await expect(page.getByText('Disabled', { exact: true }).first()).toBeVisible()
   await page.setViewportSize({ width: 1440, height: 1000 })
@@ -109,6 +114,9 @@ test('sign in, author skills, schedule work, inspect results, and sign out', asy
     fullPage: true,
     animations: 'disabled',
   })
+  const ruleSheet = page.getByRole('dialog', { name: 'Weekly dependency review', exact: true })
+  await ruleSheet.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(ruleSheet).toHaveCount(0)
   await page.getByRole('link', { name: 'Atelier', exact: true }).click()
   await page.getByRole('button', { name: 'Sign out', exact: true }).click()
   await expect(
