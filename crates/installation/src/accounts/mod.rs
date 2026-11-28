@@ -726,27 +726,30 @@ impl Accounts {
         let _guard = self.lock(id).await;
         let (id, model) = (id.to_owned(), model.to_owned());
         s.store
-            .transaction(move |db| Self::exhausted_in(db, &id, &model, now()))
+            .transaction(move |db| {
+                let account = required(db.coding_account(&id)?, "Account not found.")?;
+                let exhaustion = Exhaustion {
+                    at: now(),
+                    model,
+                    usage: account.usage.clone(),
+                };
+                Self::save_exhaustion_in(db, account, exhaustion)
+            })
             .await
     }
 
     /// Records exhaustion as part of an existing transaction under the account lock.
-    fn exhausted_in(db: &Db<'_>, id: &str, model: &str, at: i64) -> Result<()> {
-        let mut account = required(db.coding_account(id)?, "Account not found.")?;
+    fn save_exhaustion_in(db: &Db<'_>, mut account: Account, exhaustion: Exhaustion) -> Result<()> {
         if account
             .exhausted
             .as_ref()
-            .is_some_and(|previous| previous.at >= at)
+            .is_some_and(|previous| previous.at >= exhaustion.at)
         {
             return Ok(());
         }
-        account.exhausted = Some(Exhaustion {
-            at,
-            model: model.to_owned(),
-            usage: account.usage.clone(),
-        });
+        account.exhausted = Some(exhaustion);
         db.save_coding_account(&account)?;
-        db.audit("account.exhausted", &json!({ "id": id }))
+        db.audit("account.exhausted", &json!({ "id": account.id }))
     }
 
     pub async fn poll(&self, s: &Service, only_due: bool) -> Result<()> {

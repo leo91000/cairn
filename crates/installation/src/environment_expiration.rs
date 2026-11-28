@@ -626,6 +626,7 @@ fn detach_environment_in(
     };
     let mut fresh = RunCheckpoint {
         completed: Some(true),
+        managed_quota_failure: checkpoint.managed_quota_failure.clone(),
         ..Default::default()
     };
     if mission {
@@ -980,6 +981,10 @@ impl Service {
         if !retirement.local {
             let run = retirement.run_id.clone();
             crate::conversation_deletion::retired::detach(self, &run, &retirement.id).await?;
+            let account_guard = match self.accounts.lease(self, &run).await? {
+                Some(lease) => Some(self.accounts.lock(&lease.account_id).await),
+                None => None,
+            };
             let mut detached = retirement.clone();
             *retirement = self
                 .store
@@ -1002,6 +1007,7 @@ impl Service {
                     Ok(detached)
                 })
                 .await?;
+            drop(account_guard);
             // This commit opens admission, independently of physical cleanup.
             self.worker.notify();
             self.worker.notify_retirement();
@@ -1143,6 +1149,93 @@ mod tests {
             assert!(queued.attempts_on_node(&id()).is_empty());
             Ok(())
         }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retiring_an_environment_preserves_pending_account_quota() {
+        use crate::accounts::{Account, AccountState, Lease, usage::Usage};
+        use crate::provider::Provider;
+        use crate::worker::checkpoint::{Checkpoint, EventChanges};
+
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        let run = id();
+        let mut account = Account::new(Provider::Codex, "Quota fixture", AccountState::Ready);
+        account.usage = Some(Usage::from_value(&json!({
+            "allowed": true, "checkedAt": now() - 1000,
+            "windows": [{ "id": "primary", "usedPercent": 99 }]
+        })));
+        let lease = Lease {
+            account_id: account.id.clone(),
+            provider: Provider::Codex,
+            run_id: run.clone(),
+            model: "fixture-model".into(),
+            home: root.path().join("account"),
+        };
+        let saved = RunCheckpoint {
+            runner_id: Some(Some(id())),
+            ..RunCheckpoint::default()
+        };
+        let (initial_lease, initial_checkpoint) = (lease.clone(), saved.clone());
+        store.transaction(move |db| {
+            let run = &initial_lease.run_id;
+            db.add_run_fixture(&json!({ "id": run, "taskId": "chat", "trigger": "chat", "status": "running", "sessionId": "saved-session" }), None)?;
+            db.save_conversation_boundary(&json!({ "id": "chat", "runId": run }))?;
+            db.save_coding_account(&account)?;
+            db.reserve_account_lease(&initial_lease)?;
+            initial_checkpoint.store_in(db, run)
+        }).await.unwrap();
+
+        let checkpoint = Checkpoint::new(store.clone(), run.clone(), saved);
+        checkpoint
+            .record_event(
+                EventKind::TurnFailed,
+                "Usage limit reached".into(),
+                json!({"type":"turn.failed"}),
+                EventChanges {
+                    run: None,
+                    failure: Some(("Usage limit reached".into(), None, true)),
+                    managed_quota: true,
+                    antigravity_probe_failed: false,
+                    completed: false,
+                    progress_complete: true,
+                    last_message: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .transaction(move |db| {
+                assert!(db.pending_quota_accounts()?.contains(&lease.account_id));
+                let mut account = db.coding_account(&lease.account_id)?.unwrap();
+                account.usage = Some(Usage::from_value(&json!({
+                    "allowed": true, "checkedAt": now() + 1,
+                    "windows": [{ "id": "primary", "usedPercent": 0 }]
+                })));
+                db.save_coding_account(&account)?;
+                request_in(db, &run, &Expiration::new(Cause::NodeChange), false)?;
+                assert!(db.run_state(&run)?.unwrap().session_id.is_none());
+                assert!(
+                    RunCheckpoint::load_in(db, &run)?
+                        .unwrap()
+                        .runner_id()
+                        .is_none()
+                );
+
+                let mut next = lease;
+                next.run_id = id();
+                assert!(db.reserve_account_lease(&next).unwrap_err().is_conflict());
+                db.remove_account_lease(&run)?;
+                let mut account = db.coding_account(&next.account_id)?.unwrap();
+                assert_eq!(account.exhausted.as_ref().unwrap().model, next.model);
+                assert!(db.reserve_account_lease(&next).unwrap_err().is_conflict());
+                crate::accounts::replenish(&mut account, Provider::Codex.driver());
+                assert!(account.exhausted.is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

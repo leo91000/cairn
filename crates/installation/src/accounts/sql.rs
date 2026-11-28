@@ -77,8 +77,8 @@ const COLUMNS: &str = "id,provider,name,enabled,email,plan,identity,created_at,c
 const PENDING_QUOTA_JOIN: &str = "FROM account_leases lease
      JOIN run_checkpoints checkpoint ON checkpoint.run_id=lease.run_id
      WHERE json_extract(checkpoint.state,'$.managedQuotaFailure.accountId')=lease.account_id
-     AND json_extract(checkpoint.state,'$.managedQuotaFailure.model')=lease.model
-     AND json_type(checkpoint.state,'$.managedQuotaFailure.at')='integer'";
+     AND json_extract(checkpoint.state,'$.managedQuotaFailure.exhaustion.model')=lease.model
+     AND json_type(checkpoint.state,'$.managedQuotaFailure.exhaustion.at')='integer'";
 
 fn account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
     let provider: String = row.get(1)?;
@@ -407,16 +407,17 @@ impl Db<'_> {
     }
 
     pub fn remove_account_lease(&self, run: &str) -> Result<()> {
-        let pending: Option<(String, String, i64)> = self
+        let pending: Option<(String, String)> = self
             .0
             .prepare_cached(&format!(
-                "SELECT lease.account_id,lease.model,json_extract(checkpoint.state,'$.managedQuotaFailure.at')
+                "SELECT lease.account_id,json_extract(checkpoint.state,'$.managedQuotaFailure.exhaustion')
                  {PENDING_QUOTA_JOIN} AND lease.run_id=?"
             ))?
-            .query_row([run], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .query_row([run], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
-        if let Some((account, model, at)) = pending {
-            Accounts::exhausted_in(self, &account, &model, at)?;
+        if let Some((id, exhaustion)) = pending {
+            let account = crate::error::required(self.coding_account(&id)?, "Account not found.")?;
+            Accounts::save_exhaustion_in(self, account, serde_json::from_str(&exhaustion)?)?;
             self.0.execute(
                 "UPDATE run_checkpoints SET state=json_remove(state,'$.managedQuotaFailure') WHERE run_id=?",
                 [run],

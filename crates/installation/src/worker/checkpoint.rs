@@ -2,6 +2,7 @@
 mod terminal_tests;
 
 use crate::{
+    accounts::Exhaustion,
     config::now,
     error::Result,
     recovery::ProcessIdentity,
@@ -34,8 +35,7 @@ pub(crate) struct AntigravityProbeRetry {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ManagedQuotaFailure {
     pub account_id: String,
-    pub model: String,
-    pub at: i64,
+    pub exhaustion: Exhaustion,
 }
 
 /// Restart state persisted once in `run_checkpoints`, serialized from this type.
@@ -1186,11 +1186,15 @@ impl Checkpoint {
                         && run.session_id.is_some()
                         && run.cancel_requested_at.is_none()
                         && let Some(lease) = db.account_lease(&id)?
+                        && let Some(account) = db.coding_account(&lease.account_id)?
                     {
                         saved.managed_quota_failure = Some(ManagedQuotaFailure {
                             account_id: lease.account_id,
-                            model: lease.model,
-                            at: now(),
+                            exhaustion: Exhaustion {
+                                model: lease.model,
+                                at: now(),
+                                usage: account.usage,
+                            },
                         });
                     }
                     saved.store_in(db, &id)?;
