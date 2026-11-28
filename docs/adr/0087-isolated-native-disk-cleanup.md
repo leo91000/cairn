@@ -68,10 +68,14 @@ interrupted cleanup observation and commits its diagnostic with publication.
 The recorded execution failure continues to block automatic replay because
 the workload's exit status remains unknown.
 After DELETE has acknowledged a pending cleanup, the manager gives an already
-settled successful turn a bounded window to observe retirement. It preserves
-that outcome only after DELETE returns the attempt-bound
-`NativeCleanupRetired` receipt, which also checks the conversation's current
-quarantine.
+settled successful turn a short window to observe retirement. When that
+window expires with an acknowledged workload fence, the manager releases the
+execution reservation and durably defers settlement for up to another five
+minutes. The completed-environment recovery loop rechecks the fence across
+manager restarts. It settles the saved reply only when DELETE returns the
+attempt-bound `NativeCleanupRetired` receipt, which also checks the current
+conversation quarantine. A missing proof at the deadline publishes the original
+cleanup failure.
 The live manager checkpoint serializes fencing and reloads its durable evidence
 before heartbeat or output persistence can overwrite it; placement lease renewal
 continues independently while the fence waits.
@@ -79,8 +83,9 @@ continues independently while the fence waits.
 The native marker advances to `ublk-rootless-v3` before a mounted disk is
 handed to execution. This reader accepts v1/v2 and upgrades only its marker;
 v2 controllers reject v3 rather than ignoring the cleanup quarantine.
-The manager stores the bounded cause in its existing last-error checkpoint field,
-so no new checkpoint schema is needed. A run
+The manager records a published failure in the checkpoint's existing last-error
+field. A deferred settlement also preserves the pending diagnostic and deadline
+in the checkpoint until it can settle. A run
 interrupted before its first v3 mount has no new pending physical close state.
 No journal format change or automatic migration of disk content is introduced.
 The cleanup record is additive controller state and is removed only after verified

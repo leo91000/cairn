@@ -123,7 +123,14 @@ async fn delete_cleanup_evidence_survives_live_checkpoint_persistence() {
 #[tokio::test]
 async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
     use axum::{Json, Router, http::Request, routing::any};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Retirement {
+        WithinGrace,
+        Deferred,
+        Expired,
+    }
 
     let attempt = crate::config::id();
     let receipt = json!({
@@ -135,21 +142,32 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
             "message": "Native disk cleanup is still in progress."
         }
     });
-    for (final_stop, cleared) in [
+    for (final_stop, cleared, retirement) in [
         (
             json!({ "NativeCleanupRetired": { "attemptId": attempt } }),
             true,
+            Retirement::WithinGrace,
         ),
-        (json!({}), false),
-        (receipt.clone(), false),
+        (json!({}), false, Retirement::WithinGrace),
+        (receipt.clone(), false, Retirement::WithinGrace),
         (
             json!({ "NativeCleanupRetired": { "attemptId": crate::config::id() } }),
             false,
+            Retirement::WithinGrace,
         ),
+        (
+            json!({ "NativeCleanupRetired": { "attemptId": attempt } }),
+            true,
+            Retirement::Deferred,
+        ),
+        (json!({}), true, Retirement::Expired),
     ] {
+        let after_grace = retirement != Retirement::WithinGrace;
         let pending = receipt.clone();
         let stops = Arc::new(AtomicUsize::new(0));
         let observations = Arc::new(AtomicUsize::new(0));
+        let retired_after_grace = Arc::new(AtomicBool::new(false));
+        let route_retired = retired_after_grace.clone();
         let route_stops = stops.clone();
         let route_observations = observations.clone();
         let url = format!("/runs/{attempt}");
@@ -158,7 +176,8 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
             match request.method().as_str() {
                 "DELETE" => {
                     assert_eq!(request.uri().path(), url);
-                    if route_stops.fetch_add(1, Ordering::Relaxed) > 0 {
+                    let previous = route_stops.fetch_add(1, Ordering::Relaxed);
+                    if previous > 0 && (!after_grace || route_retired.load(Ordering::Relaxed)) {
                         result = final_stop.clone();
                     }
                 }
@@ -168,7 +187,8 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                         request.uri().query(),
                         Some(crate::runner::NATIVE_CLEANUP_RETIREMENT_QUERY)
                     );
-                    if route_observations.fetch_add(1, Ordering::Relaxed) > 0 {
+                    let observed = route_observations.fetch_add(1, Ordering::Relaxed);
+                    if (!after_grace && observed > 0) || route_retired.load(Ordering::Relaxed) {
                         result["NativeCleanup"]["retired"] = true.into();
                     }
                 }
@@ -186,7 +206,8 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                 db.add_run_fixture(
                     &json!({
                         "id": fixture_id, "taskId": fixture_id, "trigger": "chat",
-                        "status": "succeeded", "summary": "Completed reply", "isolated": true
+                        "status": "succeeded", "summary": "Completed reply", "isolated": true,
+                        "recoveryPending": after_grace, "finishedAt": 42
                     }),
                     None,
                 )?;
@@ -219,8 +240,57 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                 Some("Native disk cleanup is still in progress.")
             );
         }
-        assert_eq!(observations.load(Ordering::Relaxed), 2);
-        assert_eq!(stops.load(Ordering::Relaxed), 2);
+        if after_grace {
+            assert!(state.recovery_pending);
+            assert_eq!(state.finished_at, Some(42));
+            assert!(observations.load(Ordering::Relaxed) > 2);
+            assert_eq!(stops.load(Ordering::Relaxed), 1);
+            super::super::schedule::recover_completed_environments(&service)
+                .await
+                .unwrap();
+            let still_pending = service.store.run_state(&id).await.unwrap();
+            assert_eq!(still_pending.status, RunStatus::Succeeded);
+            assert!(still_pending.recovery_pending);
+            assert_eq!(stops.load(Ordering::Relaxed), 1);
+
+            if retirement == Retirement::Expired {
+                let saved = RunCheckpoint::load(&service.store, &id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut saved = serde_json::to_value(saved).unwrap();
+                saved["pendingNativeCleanup"]["until"] = json!(0);
+                RunCheckpoint::from_value(saved)
+                    .unwrap()
+                    .store(&service.store, &id)
+                    .await
+                    .unwrap();
+                // A malformed receipt is not proof of retirement.
+            }
+            retired_after_grace.store(true, Ordering::Relaxed);
+
+            super::super::schedule::recover_completed_environments(&service)
+                .await
+                .unwrap();
+            let settled = service.store.run_state(&id).await.unwrap();
+            if retirement == Retirement::Expired {
+                assert_eq!(settled.status, RunStatus::Failed);
+                assert_eq!(
+                    settled.error.as_deref(),
+                    Some("Native disk cleanup is still in progress.")
+                );
+            } else {
+                assert_eq!(settled.status, RunStatus::Succeeded);
+                assert_eq!(settled.summary, "Completed reply");
+                assert_eq!(settled.finished_at, Some(42));
+                assert!(settled.error.is_none());
+            }
+            assert!(!settled.recovery_pending);
+            assert_eq!(stops.load(Ordering::Relaxed), 2);
+        } else {
+            assert_eq!(observations.load(Ordering::Relaxed), 2);
+            assert_eq!(stops.load(Ordering::Relaxed), 2);
+        }
         service.shutdown.cancel();
         server.abort();
     }

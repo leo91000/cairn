@@ -955,6 +955,12 @@ pub(super) fn finish_recovery(
             )?;
             return Ok(false);
         }
+        if checkpoint.pending_native_cleanup.is_some()
+            && current.status == RunStatus::Succeeded
+            && current.recovery_pending
+        {
+            return Ok(false);
+        }
         if let Some(settled) = checkpoint.settled() {
             let mut patch = settled.run_changes();
             if settled.status == RunStatus::Waiting {

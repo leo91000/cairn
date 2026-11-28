@@ -307,18 +307,77 @@ async fn fence_attempt_authorized(
             .and_then(RunCheckpoint::settled)
             .map(|outcome| outcome.status)
             .filter(|status| matches!(status, RunStatus::Succeeded | RunStatus::Failed));
+        let may_defer = settled_status == Some(RunStatus::Succeeded)
+            && run["trigger"] == "chat"
+            && run["status"] == RunStatus::Succeeded
+            && run["recoveryPending"] == true
+            && run["cancelRequestedAt"].is_null()
+            && checkpoint
+                .as_ref()
+                .and_then(RunCheckpoint::prepared)
+                .is_some_and(|plan| plan["backend"] == "native");
+        let pending = checkpoint
+            .as_ref()
+            .and_then(|saved| saved.pending_native_cleanup.as_ref());
         authorize.recheck().await?;
-        if let Some(result) =
-            fence_runner(s, &runner_url, attempt, &authorize, settled_status).await?
-        {
+        let cleanup = match pending {
+            Some(pending) if may_defer => {
+                observe_deferred_cleanup(s, &runner_url, attempt, &authorize, pending).await
+            }
+            _ => {
+                fence_runner(
+                    s,
+                    &runner_url,
+                    attempt,
+                    &authorize,
+                    settled_status,
+                    may_defer,
+                )
+                .await?
+            }
+        };
+        if pending.is_some() || !matches!(cleanup, FencedCleanup::Clear) {
             let id = run_id.to_owned();
             let attempt = attempt.to_owned();
+            let expected = expected.cloned();
             let cleanup_authorize = authorize.clone();
             s.store
                 .transaction(move |db| {
                     cleanup_authorize.check_local(db)?;
-                    if let Some(mut saved) = RunCheckpoint::load_in(db, &id)?
-                        && saved.runner_id() == Some(attempt.as_str())
+                    let mut current = RunCheckpoint::load_in(db, &id)?;
+                    if !same_execution(current.as_ref(), expected.as_ref()) {
+                        return Err(Error::conflict(
+                            "Execution attempt changed during recovery.",
+                        ));
+                    }
+                    let Some(saved) = &mut current else {
+                        return Ok(());
+                    };
+                    if saved.runner_id() != Some(attempt.as_str()) {
+                        return Ok(());
+                    }
+                    let cleanup = match cleanup {
+                        FencedCleanup::Clear => None,
+                        FencedCleanup::Failed(result) => Some(result),
+                        FencedCleanup::Pending(pending) => {
+                            let state = db.run_state(&id)?;
+                            if saved
+                                .settled()
+                                .is_some_and(|turn| turn.status == RunStatus::Succeeded)
+                                && state.is_some_and(|state| {
+                                    state.status == RunStatus::Succeeded
+                                        && state.recovery_pending
+                                        && state.cancel_requested_at.is_none()
+                                })
+                            {
+                                saved.pending_native_cleanup = Some(pending);
+                                return saved.store_in(db, &id);
+                            }
+                            Some(pending.failure())
+                        }
+                    };
+                    saved.pending_native_cleanup = None;
+                    if let Some(result) = cleanup
                         && !(result.finalization_failed
                             && result.native_cleanup.is_none()
                             && saved.acknowledged_finalization_failure_attempt.as_deref()
@@ -332,9 +391,8 @@ async fn fence_attempt_authorized(
                                 .is_some_and(|plan| plan["backend"] == "native"))
                     {
                         saved.record_controller_result(db, &id, &attempt, Some(result))?;
-                        saved.store_in(db, &id)?;
                     }
-                    Ok(())
+                    saved.store_in(db, &id)
                 })
                 .await?;
         }
@@ -400,6 +458,7 @@ pub(crate) async fn fence_retired(
             attempt,
             &crate::authorization::Authorization::default(),
             None,
+            false,
         )
         .await?;
     }
@@ -409,13 +468,72 @@ pub(crate) async fn fence_retired(
         .await
 }
 
+// Once the workload is fenced, observe delayed disk retirement on the normal
+// completed-environment recovery loop without retaining the execution slot.
+const NATIVE_CLEANUP_FOLLOW_UP_MS: i64 = 5 * 60 * 1_000;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PendingNativeCleanup {
+    until: i64,
+    message: String,
+}
+
+impl PendingNativeCleanup {
+    fn failure(self) -> crate::runner::ControllerResult {
+        crate::runner::ControllerResult {
+            code: crate::runner::CONTROLLER_FAILED,
+            finalization_failed: true,
+            physical_finalized: false,
+            terminal_reason: None,
+            native_cleanup: Some(self.message),
+        }
+    }
+}
+
+enum FencedCleanup {
+    Clear,
+    Failed(crate::runner::ControllerResult),
+    Pending(PendingNativeCleanup),
+}
+
+async fn observe_deferred_cleanup(
+    s: &Service,
+    runner_url: &str,
+    attempt: &str,
+    authorize: &crate::authorization::Authorization,
+    pending: &PendingNativeCleanup,
+) -> FencedCleanup {
+    let observe = async {
+        let credential = secret(&s.config.data_dir, "runner-secret").await?;
+        let url = format!("{runner_url}/runs/{attempt}");
+        let result = crate::runner::observe_cleanup_retirement(&s.http, &url, &credential).await?;
+        if !result.physical_finalized || result.native_cleanup.is_none() {
+            return Ok(false);
+        }
+        confirm_native_retirement(s, &url, attempt, &credential, authorize).await
+    };
+    let retired = tokio::select! {
+        () = s.shutdown.cancelled() => false,
+        result = tokio::time::timeout(Duration::from_secs(2), observe) => matches!(result, Ok(Ok(true))),
+    };
+    if retired {
+        return FencedCleanup::Clear;
+    }
+    if now() >= pending.until && !s.shutdown.is_cancelled() {
+        return FencedCleanup::Failed(pending.clone().failure());
+    }
+    FencedCleanup::Pending(pending.clone())
+}
+
 async fn fence_runner(
     s: &Service,
     runner_url: &str,
     attempt: &str,
     authorize: &crate::authorization::Authorization,
     settled_status: Option<RunStatus>,
-) -> Result<Option<crate::runner::ControllerResult>> {
+    may_defer: bool,
+) -> Result<FencedCleanup> {
     authorize.recheck().await?;
     if runner_url.is_empty() {
         return Err(Error::unavailable(
@@ -441,13 +559,21 @@ async fn fence_runner(
                     cleanup = crate::runner::plain_finalization_failure(&value);
                 }
             }
-            if cleanup
+            if let Some(message) = cleanup
                 .as_ref()
-                .is_some_and(|result| result.native_cleanup.is_some())
+                .and_then(|result| result.native_cleanup.as_ref())
                 && settled_status == Some(RunStatus::Succeeded)
-                && confirm_late_native_cleanup(s, &url, attempt, &credential, authorize).await
             {
-                cleanup = None;
+                match confirm_late_native_cleanup(s, &url, attempt, &credential, authorize).await {
+                    Some(true) => return Ok(FencedCleanup::Clear),
+                    None if may_defer => {
+                        return Ok(FencedCleanup::Pending(PendingNativeCleanup {
+                            until: now() + NATIVE_CLEANUP_FOLLOW_UP_MS,
+                            message: message.clone(),
+                        }));
+                    }
+                    _ => {}
+                }
             } else if cleanup.is_none() && settled_status.is_some() {
                 // Both controllers expose explicit flush failures through the
                 // terminal result. DELETE may only acknowledge that they stopped.
@@ -471,7 +597,7 @@ async fn fence_runner(
             "Waiting for the previous VM execution lease to expire.",
         ));
     }
-    Ok(cleanup)
+    Ok(cleanup.map_or(FencedCleanup::Clear, FencedCleanup::Failed))
 }
 
 /// Keep an acknowledged fence while giving a successful turn's close a short
@@ -483,7 +609,7 @@ async fn confirm_late_native_cleanup(
     attempt: &str,
     credential: &str,
     authorize: &crate::authorization::Authorization,
-) -> bool {
+) -> Option<bool> {
     let observe = async {
         loop {
             let result =
@@ -496,26 +622,36 @@ async fn confirm_late_native_cleanup(
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        authorize.recheck().await?;
-        let response = s
-            .http
-            .delete(url)
-            .bearer_auth(credential)
-            .send()
-            .await
-            .map_err(Error::internal)?;
-        if !response.status().is_success() {
-            return Ok(false);
-        }
-        let result = response.json::<Value>().await.map_err(Error::internal)?;
-        Ok::<_, Error>(result["NativeCleanupRetired"]["attemptId"].as_str() == Some(attempt))
+        confirm_native_retirement(s, url, attempt, credential, authorize).await
     };
     tokio::select! {
-        () = s.shutdown.cancelled() => false,
+        () = s.shutdown.cancelled() => None,
         result = tokio::time::timeout(Duration::from_secs(7), observe) => {
-            matches!(result, Ok(Ok(true)))
+            result.ok().map(|result| matches!(result, Ok(true)))
         }
     }
+}
+
+async fn confirm_native_retirement(
+    s: &Service,
+    url: &str,
+    attempt: &str,
+    credential: &str,
+    authorize: &crate::authorization::Authorization,
+) -> Result<bool> {
+    authorize.recheck().await?;
+    let response = s
+        .http
+        .delete(url)
+        .bearer_auth(credential)
+        .send()
+        .await
+        .map_err(Error::internal)?;
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+    let result = response.json::<Value>().await.map_err(Error::internal)?;
+    Ok(result["NativeCleanupRetired"]["attemptId"].as_str() == Some(attempt))
 }
 
 /// An unreachable runner is only presumed stopped once its node lease has lapsed.
