@@ -108,6 +108,7 @@ impl Worker {
         self.tasks.spawn(clean_conversations(s.clone()));
         self.tasks.spawn(detach_environments(s.clone()));
         self.tasks.spawn(retire_environments(s.clone()));
+        self.tasks.spawn(observe_native_cleanup(s.clone()));
         self.tasks.spawn(schedule_tasks(s.clone()));
         self.tasks.spawn(observe_background_jobs(s.clone()));
         self.tasks.spawn(self.clone().run_forever(s));
@@ -448,6 +449,25 @@ async fn detach_environments(s: Arc<Service>) {
                     audit(&s.store, "environment.detachment_failed", json!({ "message": error.message })).await;
                 }
             },
+        }
+    }
+}
+
+async fn observe_native_cleanup(s: Arc<Service>) {
+    let mut timer = tokio::time::interval(Duration::from_secs(5));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = s.shutdown.cancelled() => return,
+            _ = timer.tick() => {},
+        }
+        tokio::select! {
+            () = s.shutdown.cancelled() => return,
+            result = schedule::observe_native_cleanup(&s) => {
+                if let Err(error) = result {
+                    tracing::warn!(error = %error, "Could not schedule native cleanup observations");
+                }
+            }
         }
     }
 }

@@ -135,13 +135,12 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
 
     async fn wait_for_observer(service: &Service) {
         tokio::time::timeout(Duration::from_secs(10), async {
-            while !service
+            while service
                 .worker
                 .deferred_cleanup_observers
                 .lock()
                 .await
-                .in_flight
-                .is_empty()
+                .is_observing()
             {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -287,7 +286,7 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                 assert!(observations.load(Ordering::Relaxed) > 2);
             }
             assert_eq!(stops.load(Ordering::Relaxed), 1);
-            super::super::schedule::recover_completed_environments(&service)
+            super::super::schedule::observe_native_cleanup(&service)
                 .await
                 .unwrap();
             wait_for_observer(&service).await;
@@ -336,9 +335,11 @@ async fn late_native_flush_preserves_settled_success_when_quarantine_clears() {
                     .await
                     .unwrap();
             } else {
+                let preparation = service.worker.run_preparation_lock(&id).await;
+                let _preparation = preparation.lock().await;
                 tokio::time::timeout(
                     Duration::from_secs(1),
-                    super::super::schedule::recover_completed_environments(&service),
+                    super::super::schedule::observe_native_cleanup(&service),
                 )
                 .await
                 .unwrap()

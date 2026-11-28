@@ -222,6 +222,11 @@ fn change_expired_backend(
     required_tags: &Value,
 ) -> Result<()> {
     let run_id = text(&chat, "runId");
+    if crate::environment_expiration::pending(db, run_id)? {
+        return Err(Error::conflict(
+            "The working environment is already being retired.",
+        ));
+    }
     let mut boundary = json!({
         "requiredRuntime": node["runtimeId"],
         "environmentAdmissionRevision": crate::config::id(),
@@ -581,6 +586,44 @@ mod tests {
         run_fixture::DbRunFixture,
         run_status::RunStatus,
     };
+
+    #[tokio::test]
+    async fn expired_backend_selection_waits_for_detachment() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let run = id();
+                db.add_run_fixture(
+                    &json!({
+                        "id": run, "taskId": run, "trigger": "chat", "status": "succeeded",
+                        "recoveryPending": true
+                    }),
+                    None,
+                )?;
+                crate::environment_expiration::request_in(
+                    db,
+                    &run,
+                    &crate::environment_expiration::Expiration::new(
+                        cairn_contracts::EnvironmentExpirationCause::NodeChange,
+                    ),
+                    true,
+                )?;
+                let error = change_expired_backend(
+                    db,
+                    json!({ "runId": run }),
+                    &Value::Null,
+                    &Value::Null,
+                    &Value::Null,
+                )
+                .unwrap_err();
+                assert!(error.is_conflict());
+                assert!(db.run_state(&run)?.unwrap().recovery_pending);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn delegated_migration_keeps_historical_principals_and_parent_bounds() {

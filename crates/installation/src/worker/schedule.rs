@@ -459,41 +459,110 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
 
 const MAX_DEFERRED_CLEANUP_OBSERVERS: usize = 16;
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CleanupObservation {
+    run_id: String,
+    attempt: String,
+}
+
 #[derive(Default)]
 pub(super) struct DeferredCleanupObservers {
-    pub(super) in_flight: HashSet<String>,
-    waiting: VecDeque<String>,
+    in_flight: HashSet<CleanupObservation>,
+    waiting: VecDeque<CleanupObservation>,
 }
 
 impl DeferredCleanupObservers {
-    fn admit(&mut self, candidates: Vec<(String, RunCheckpoint)>) -> Vec<(String, RunCheckpoint)> {
-        let eligible: HashSet<&str> = candidates.iter().map(|(id, _)| id.as_str()).collect();
+    fn admit(
+        &mut self,
+        candidates: Vec<(CleanupObservation, RunCheckpoint)>,
+    ) -> Vec<(CleanupObservation, RunCheckpoint)> {
+        let eligible: HashSet<_> = candidates.iter().map(|(key, _)| key).collect();
         self.waiting
-            .retain(|id| eligible.contains(id.as_str()) && !self.in_flight.contains(id));
+            .retain(|key| eligible.contains(key) && !self.in_flight.contains(key));
 
-        let mut waiting: HashSet<String> = self.waiting.iter().cloned().collect();
-        for (id, _) in &candidates {
-            if !self.in_flight.contains(id) && waiting.insert(id.clone()) {
-                self.waiting.push_back(id.clone());
+        let mut waiting: HashSet<_> = self.waiting.iter().cloned().collect();
+        for (key, _) in &candidates {
+            if !self.in_flight.contains(key) && waiting.insert(key.clone()) {
+                self.waiting.push_back(key.clone());
             }
         }
 
         let slots = MAX_DEFERRED_CLEANUP_OBSERVERS.saturating_sub(self.in_flight.len());
         let mut candidates: HashMap<_, _> = candidates.into_iter().collect();
         let mut admitted = Vec::new();
-        for id in self.waiting.drain(..self.waiting.len().min(slots)) {
-            if let Some(saved) = candidates.remove(&id) {
-                self.in_flight.insert(id.clone());
-                admitted.push((id, saved));
+        for key in self.waiting.drain(..self.waiting.len().min(slots)) {
+            if let Some(saved) = candidates.remove(&key) {
+                self.in_flight.insert(key.clone());
+                admitted.push((key, saved));
             }
         }
         admitted
     }
+
+    #[cfg(test)]
+    pub(super) fn is_observing(&self) -> bool {
+        !self.in_flight.is_empty()
+    }
+}
+
+/// Find and observe durable fences without waiting for ordinary recovery RPCs.
+pub(super) async fn observe_native_cleanup(s: &Arc<Service>) -> Result<()> {
+    let mut ready = s
+        .store
+        .read(|db| {
+            let mut ready = Vec::new();
+            for run_id in db.completed_recovery_ids()? {
+                let Some(saved) = RunCheckpoint::load_in(db, &run_id)? else {
+                    continue;
+                };
+                let Some(pending) = saved
+                    .pending_native_cleanup()
+                    .filter(|p| p.needs_observation())
+                else {
+                    continue;
+                };
+                if crate::environment_expiration::pending(db, &run_id)?
+                    || db
+                        .run_state(&run_id)?
+                        .is_none_or(|run| run.cancel_requested_at.is_some())
+                {
+                    continue;
+                }
+                let key = CleanupObservation {
+                    run_id,
+                    attempt: pending.attempt.clone(),
+                };
+                ready.push((key, saved));
+            }
+            Ok(ready)
+        })
+        .await?;
+    {
+        // A live worker can still be persisting its own copy of the checkpoint.
+        let active = s.worker.active.lock().await;
+        ready.retain(|(key, _)| !active.contains_key(&key.run_id));
+    }
+    let admitted = s
+        .worker
+        .deferred_cleanup_observers
+        .lock()
+        .await
+        .admit(ready);
+    for (key, saved) in admitted {
+        let service = s.clone();
+        s.worker.spawn_recovery(async move {
+            let result = recovery::observe_pending_native_cleanup(&service, &key.run_id, saved).await;
+            service.worker.deferred_cleanup_observers.lock().await.in_flight.remove(&key);
+            if let Err(error) = result {
+                tracing::warn!(run_id = key.run_id, message = %error.message, "Native cleanup observation failed");
+            }
+        });
+    }
+    Ok(())
 }
 
 /// A lost controller must not delay unrelated sends while completed chats fence.
 pub(super) async fn recover_completed_environments(s: &Arc<Service>) -> Result<()> {
-    let mut ready = Vec::new();
     for id in s.store.read(|db| db.completed_recovery_ids()).await? {
         if s.shutdown.is_cancelled() {
             break;
@@ -520,27 +589,10 @@ pub(super) async fn recover_completed_environments(s: &Arc<Service>) -> Result<(
                 .pending_native_cleanup()
                 .is_some_and(crate::recovery::PendingNativeCleanup::needs_observation)
         {
-            ready.push((id, saved));
             continue;
         }
         recover_or_wait(s, &run).await?;
         s.worker.notify();
-    }
-    let admitted = s
-        .worker
-        .deferred_cleanup_observers
-        .lock()
-        .await
-        .admit(ready);
-    for (id, saved) in admitted {
-        let service = s.clone();
-        s.worker.spawn_recovery(async move {
-            let result = recovery::observe_pending_native_cleanup(&service, &id, saved).await;
-            service.worker.deferred_cleanup_observers.lock().await.in_flight.remove(&id);
-            if let Err(error) = result {
-                tracing::warn!(run_id = id, message = %error.message, "Native cleanup observation failed");
-            }
-        });
     }
     Ok(())
 }

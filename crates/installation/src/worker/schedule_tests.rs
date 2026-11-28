@@ -9,7 +9,15 @@ fn waiting_native_cleanup_gets_the_next_available_observer() {
     let mut observers = DeferredCleanupObservers::default();
     let eligible = || {
         (0..=MAX_DEFERRED_CLEANUP_OBSERVERS)
-            .map(|index| (index.to_string(), RunCheckpoint::default()))
+            .map(|index| {
+                (
+                    CleanupObservation {
+                        run_id: index.to_string(),
+                        attempt: format!("attempt-{index}"),
+                    },
+                    RunCheckpoint::default(),
+                )
+            })
             .collect()
     };
     let first = observers.admit(eligible());
@@ -20,12 +28,34 @@ fn waiting_native_cleanup_gets_the_next_available_observer() {
     observers.in_flight.remove(&first[0].0);
     let next = observers.admit(eligible());
     assert_eq!(next.len(), 1);
-    assert_eq!(next[0].0, MAX_DEFERRED_CLEANUP_OBSERVERS.to_string());
+    assert_eq!(next[0].0.run_id, MAX_DEFERRED_CLEANUP_OBSERVERS.to_string());
 
     observers.in_flight.remove(&next[0].0);
     let retried = observers.admit(eligible());
     assert_eq!(retried.len(), 1);
     assert_eq!(retried[0].0, first[0].0);
+}
+
+#[test]
+fn a_replacement_attempt_can_observe_while_the_old_attempt_is_in_flight() {
+    let mut observers = DeferredCleanupObservers::default();
+    let old = CleanupObservation {
+        run_id: "same-run".into(),
+        attempt: "old-attempt".into(),
+    };
+    let new = CleanupObservation {
+        attempt: "new-attempt".into(),
+        ..old.clone()
+    };
+    assert_eq!(
+        observers.admit(vec![(old.clone(), RunCheckpoint::default())])[0].0,
+        old
+    );
+    assert_eq!(
+        observers.admit(vec![(new.clone(), RunCheckpoint::default())])[0].0,
+        new
+    );
+    assert_eq!(observers.in_flight.len(), 2);
 }
 
 #[tokio::test]

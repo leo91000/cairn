@@ -71,16 +71,18 @@ After DELETE has acknowledged a pending cleanup, the manager gives an already
 settled successful turn a short window to observe retirement. If that
 observation cannot confirm retirement, the manager releases the execution
 reservation and durably defers settlement with a five-minute deadline.
-The completed-environment recovery loop schedules bounded, attempt-specific
-observations across manager restarts. Slow responses run outside that loop.
-Waiting attempts receive a slot before earlier attempts retry. It settles the saved reply only when DELETE returns the
+The manager resumes bounded observations across restarts on a timer independent
+of ordinary recovery. Observations are tracked by execution attempt. Waiting
+attempts receive a slot before earlier attempts retry. The manager settles the
+saved reply only when DELETE returns the
 attempt-bound `NativeCleanupRetired` receipt, which also checks the current
 conversation quarantine. A missing proof at the deadline publishes the original
 cleanup failure. The manager stores the verdict with its fence until it commits
 the run result. That publication retains the original turn end so later messages
 stay queued for the next turn. Environment detachment settles the saved verdict
 before replacing the execution checkpoint. Without proof it publishes the
-original cleanup diagnostic.
+original cleanup diagnostic. Expiring a fenced environment preserves an
+explicit Stop and does not create a new one.
 The live manager checkpoint serializes fencing and reloads its durable evidence
 before heartbeat or output persistence can overwrite it; placement lease renewal
 continues independently while the fence waits.

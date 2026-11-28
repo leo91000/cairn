@@ -293,13 +293,14 @@ fn retirements(db: &Db<'_>, run: &str) -> Result<Vec<Retirement>> {
 }
 
 /// Detaches the environment immediately. A live worker retains its execution
-/// checkpoint solely to finish stopping; admission waits for that fence.
+/// checkpoint solely to finish stopping; admission waits for that fence. Returns
+/// whether the caller must signal a live worker to stop.
 pub(crate) fn request_in(
     db: &Db<'_>,
     run_id: &str,
     expiration: &Expiration,
     live: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let run = crate::error::required(db.run(run_id)?, "Run not found")?;
     if db.get(PENDING, run_id)?.is_some() {
         return Err(Error::conflict(
@@ -336,9 +337,12 @@ pub(crate) fn request_in(
         && (expiration.continue_turn
             || run["trigger"] != "chat" && executing && !run["wakeup"].is_object());
     if !live {
-        return detach_in(db, run_id, &expiration, expired_at);
+        detach_in(db, run_id, &expiration, expired_at)?;
+        return Ok(false);
     }
-    if run["cancelRequestedAt"].is_null() {
+    let fenced = RunCheckpoint::load_in(db, run_id)?
+        .is_some_and(|saved| saved.pending_native_cleanup().is_some());
+    if !stopped && !fenced {
         db.change_run(
             run_id,
             crate::runs::RunChanges {
@@ -385,7 +389,7 @@ pub(crate) fn request_in(
         },
     )?;
     db.put(PENDING, &serde_json::to_value(pending)?)?;
-    Ok(())
+    Ok(!fenced)
 }
 
 /// Applies an expiration recorded while its execution was still live.
@@ -761,13 +765,14 @@ impl Service {
         let active = self.worker.active.lock().await;
         let live = idle.is_none() || active.contains_key(run);
         let owner = run.to_owned();
-        self.store
+        let interrupt = self
+            .store
             .transaction(move |db| {
                 authorize(db)?;
                 request_in(db, &owner, &expiration, live)
             })
             .await?;
-        if let Some(cancel) = active.get(run) {
+        if interrupt && let Some(cancel) = active.get(run) {
             cancel.cancel();
         }
         drop(active);
@@ -1105,17 +1110,20 @@ mod tests {
     {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
-        for (verdict, status) in [
-            ("observing", RunStatus::Failed),
-            ("unconfirmed", RunStatus::Failed),
-            ("retired", RunStatus::Succeeded),
+        for (live, explicit_stop, verdict, status) in [
+            (false, false, "observing", RunStatus::Failed),
+            (false, false, "unconfirmed", RunStatus::Failed),
+            (false, false, "retired", RunStatus::Succeeded),
+            (true, false, "unconfirmed", RunStatus::Failed),
+            (true, false, "retired", RunStatus::Succeeded),
+            (true, true, "retired", RunStatus::Cancelled),
         ] {
             store.transaction(move |db| {
                 let (run, attempt) = (id(), id());
                 db.add_run_fixture(&json!({
                     "id": run, "taskId": run, "trigger": "chat", "status": "succeeded",
                     "summary": "Provider result", "finishedAt": 42, "isolated": true,
-                    "recoveryPending": true,
+                    "recoveryPending": true, "cancelRequestedAt": explicit_stop.then_some(43),
                 }), None)?;
                 db.save_checkpoint_boundary(&run, &json!({
                     "runnerId": attempt,
@@ -1126,13 +1134,22 @@ mod tests {
                         "message": "Native cleanup is still pending",
                     }
                 }))?;
-                request_in(db, &run, &Expiration {
+                let interrupt = request_in(db, &run, &Expiration {
                     cause: Cause::NodeChange, destination: Some(id()), continue_turn: false,
-                }, false)?;
+                }, live)?;
+                assert!(!interrupt);
+                if live {
+                    let stopping = db.run_state(&run)?.unwrap();
+                    assert_eq!(stopping.cancel_requested_at, explicit_stop.then_some(43));
+                    assert!(stopping.recovery_pending);
+                    detach_pending_in(db, &run)?;
+                }
 
                 let changed = db.run_state(&run)?.unwrap();
                 assert_eq!(changed.status, status);
-                assert_eq!(changed.finished_at, Some(42));
+                if !explicit_stop {
+                    assert_eq!(changed.finished_at, Some(42));
+                }
                 assert!(!changed.recovery_pending);
                 assert_eq!(changed.error.as_deref(),
                     (status == RunStatus::Failed).then_some("Native cleanup is still pending"));
