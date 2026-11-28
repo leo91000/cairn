@@ -24,7 +24,7 @@ async fn preparation_fixture(root: &Path) -> (Arc<Service>, Value) {
         .unwrap();
     let id = crate::config::id();
     let record = json!({
-        "id": id, "taskId": id, "status": "running",
+        "id": id, "taskId": id, "status": "running", "trigger": "chat",
         "snapshot": { "agent": agent, "task": { "id": id }, "projects": [] },
     });
     let run = service
@@ -131,9 +131,16 @@ async fn ready_job_wakeup_prevents_idle_close_before_scheduler_adoption() {
         move |db| {
             db.change_run(&id, crate::runs::RunChanges { status: Some(RunStatus::Succeeded), ..Default::default() })?;
             db.save_wakeup(true, &id, Some(&serde_json::from_value(json!({
-                "id":"wake","messageId":null,"reason":"job","seconds":60,
-                "createdAt":now(),"wakeAt":now()+60_000,
-                "condition":{"type":"job_finished","jobId":"77d595dc-97b7-4c13-923d-e163baf49ea8"}
+                "id": "wake",
+                "messageId": null,
+                "reason": "job",
+                "seconds": 60,
+                "createdAt": now(),
+                "wakeAt": now() + 60_000,
+                "condition": {
+                    "type": "job_finished",
+                    "jobId": "77d595dc-97b7-4c13-923d-e163baf49ea8",
+                },
             }))?))?;
             db.0.execute("INSERT INTO background_jobs VALUES('request',?,'attempt','77d595dc-97b7-4c13-923d-e163baf49ea8','hash',?)",
                 rusqlite::params![id, serde_json::to_string(&crate::background_jobs::Outcome::Finished { receipt: crate::background_jobs::Receipt { exit_code:Some(0),signal:None,elapsed_ms:1,stopped:false,timed_out:false,log_tail:"done".into(),log_truncated:false } })?])?;

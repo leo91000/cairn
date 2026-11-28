@@ -164,6 +164,7 @@ impl Checker {
     }
 
     fn tree(&mut self, definition: &HookRuleDefinition, payload: Option<&Value>) {
+        self.clock = matches!(definition.trigger, HookRuleTrigger::Clock { .. });
         let mut scope = Scope::default();
         for name in RESERVED {
             scope.names.insert((*name).to_owned());
@@ -632,6 +633,7 @@ struct Checker {
     problems: Vec<HookRuleProblem>,
     ids: BTreeSet<String>,
     nodes: usize,
+    clock: bool,
 }
 
 impl Checker {
@@ -785,13 +787,24 @@ impl Checker {
                     self.value(prompt, &prompt_path, scope);
                 }
                 if let Some(key) = key {
-                    self.key(key, &format!("{path}/key"), scope);
+                    let key_path = format!("{path}/key");
+                    if self.clock {
+                        self.problem(
+                            &key_path,
+                            "Clock rules start a new conversation without a key.",
+                        );
+                    } else {
+                        self.key(key, &key_path, scope);
+                    }
                 }
                 if let Some(author) = author {
                     self.author(author, &format!("{path}/author"), scope);
                 }
             }
             RuleAction::SteerConversation { key, message } => {
+                if self.clock {
+                    self.problem(path, "Clock rules cannot steer an existing conversation.");
+                }
                 self.key(key, &format!("{path}/key"), scope);
                 self.value(message, &format!("{path}/message"), scope);
             }

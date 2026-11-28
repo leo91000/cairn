@@ -1910,7 +1910,7 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
         )
         .await
         .unwrap();
-    s.chat_trash(&trashed_id, true).await.unwrap();
+    s.chat_trash(trashed_id, true).await.unwrap();
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();

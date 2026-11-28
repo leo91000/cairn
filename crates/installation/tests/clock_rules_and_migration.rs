@@ -12,7 +12,7 @@ use cairn_installation::{
 use common::{RelayContext, relay_fixture::router, run_fixture::DbRunFixture};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{os::unix::fs::PermissionsExt, sync::Arc};
 use tempfile::TempDir;
 
 struct App {
@@ -108,6 +108,47 @@ async fn clock_rejects_dates_outside_the_rfc3339_year_range() {
             "/api/hook-rules",
             json!({ "definition": schedule_rule_definition("Invalid date", &trigger) }),
         )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+}
+
+#[tokio::test]
+async fn clock_rules_cannot_bind_or_steer_a_conversation_for_reuse() {
+    let app = App::new().await;
+    let mut definition = schedule_rule_definition(
+        "Fresh daily conversation",
+        &json!({ "type": "clock", "cron": "0 9 * * *", "timezone": "UTC" }),
+    );
+    let key = json!({ "type": "literal", "value": "daily" });
+    definition["steps"][0]["then"][0]["action"]["key"] = key.clone();
+    definition["steps"].as_array_mut().unwrap().push(json!({
+        "type": "action",
+        "id": "steer_daily",
+        "action": {
+            "type": "steerConversation",
+            "key": key,
+            "message": { "type": "literal", "value": "Review the updates." },
+        },
+    }));
+    let input = json!({ "definition": definition });
+    let (status, validation) = app
+        .request(
+            &app.owner,
+            "POST",
+            "/api/hook-rules/validate",
+            input.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{validation}");
+    let problems = validation["problems"].as_array().unwrap();
+    for path in ["/steps/0/then/0/action/key", "/steps/1/action"] {
+        assert!(
+            problems.iter().any(|problem| problem["path"] == path),
+            "{validation}"
+        );
+    }
+    let (status, result) = app
+        .request(&app.owner, "POST", "/api/hook-rules", input)
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
 }
@@ -1253,7 +1294,6 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         json!({ "origin": origin, "installationId": id(), "token": "fixture-only" }).to_string(),
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&identity, std::fs::Permissions::from_mode(0o600)).unwrap();
     let admission_bound = std::time::Duration::from_secs(3);
     tokio::time::timeout(

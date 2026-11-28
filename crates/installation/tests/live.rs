@@ -550,7 +550,8 @@ async fn cached_resume_drains_backlog_without_waiting_between_live_batches() {
 async fn following_viewer_resumes_a_long_backlog_on_the_recent_window() {
     let f = Fixture::new().await;
     f.acknowledge_prompt().await;
-    let path = format!("/api/chats/{}/stream", f.chat);
+    let chat_id = &f.chat;
+    let path = format!("/api/chats/{chat_id}/stream");
     let mut initial = f.open_path(&format!("{path}?window=1"), None).await;
     let (cursor, batch) = initial.batch().await;
     let history = batch["history"].as_str().unwrap().to_owned();

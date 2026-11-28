@@ -443,6 +443,8 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         }
     }
 
+    link_converted_mission_runs(&tx, &mission_meta)?;
+
     // Read full snapshots in bounded batches. Only the small read-mark and
     // dismissal mapping survives a batch.
     let mut migrated_chats_by_mission: HashMap<String, Vec<MigratedRun>> = HashMap::new();
@@ -675,30 +677,6 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         [],
     )?;
 
-    // A conversation created by the old conversion already owns its run. Give
-    // it the same schedule origin without replacing its messages or identity.
-    for (mission_id, mission) in &mission_meta {
-        let origin = json!({
-            "hook": "clock",
-            "ruleName": mission.name,
-            "schedule": true,
-        });
-        tx.execute(
-            "INSERT INTO hook_rule_conversations( \
-                chat_id,creator_account_id,agent_id,rule_id,origin,run_id,created_at) \
-             SELECT c.id,?2,c.agent_id,?3,?4,r.id,c.created_at FROM conversations c \
-             JOIN runs r ON r.id=c.run_id \
-             WHERE r.trigger='chat' AND json_extract(r.boundary,'$.sourceTaskId')=?1 \
-             ON CONFLICT(chat_id) DO NOTHING",
-            params![
-                mission_id,
-                mission.creator,
-                mission.rule_id,
-                origin.to_string()
-            ],
-        )?;
-    }
-
     // Include conversations the old converter had already created. Their saved
     // direct preparation cannot become the working directory of another turn.
     tx.execute_batch(
@@ -886,5 +864,49 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
 
     tx.pragma_update(None, "user_version", TARGET_VERSION)?;
     tx.commit()?;
+    Ok(())
+}
+
+/// Link legacy conversions before changing any additional run's trigger. The
+/// scan touches the existing conversation histories once regardless of how
+/// many missions the installation has.
+fn link_converted_mission_runs(
+    tx: &Connection,
+    missions: &HashMap<String, MigratedMission>,
+) -> Result<()> {
+    if missions.is_empty() {
+        return Ok(());
+    }
+    let mut converted = tx.prepare(
+        "SELECT c.id,c.agent_id,c.created_at,r.id,json_extract(r.boundary,'$.sourceTaskId') \
+         FROM conversations c JOIN runs r ON r.id=c.run_id \
+         WHERE r.trigger='chat' AND json_type(r.boundary,'$.sourceTaskId')='text'",
+    )?;
+    let mut rows = converted.query([])?;
+    let mut insert = tx.prepare(
+        "INSERT INTO hook_rule_conversations( \
+             chat_id,creator_account_id,agent_id,rule_id,origin,run_id,created_at) \
+         VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(chat_id) DO NOTHING",
+    )?;
+    while let Some(row) = rows.next()? {
+        let mission_id: String = row.get(4)?;
+        let Some(mission) = missions.get(&mission_id) else {
+            continue;
+        };
+        let origin = json!({
+            "hook": "clock",
+            "ruleName": mission.name,
+            "schedule": true,
+        });
+        insert.execute(params![
+            row.get_ref(0)?,
+            mission.creator,
+            row.get_ref(1)?,
+            mission.rule_id,
+            origin.to_string(),
+            row.get_ref(3)?,
+            row.get_ref(2)?,
+        ])?;
+    }
     Ok(())
 }

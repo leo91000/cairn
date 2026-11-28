@@ -196,7 +196,7 @@ async fn work_finished_before_an_account_first_reads_is_not_unread() {
 }
 
 #[tokio::test]
-async fn plugin_conversations_answer_in_their_channel_and_only_remind_when_requested() {
+async fn plugin_conversations_answer_in_their_channel_and_surface_reminders_and_blocked_outcomes() {
     let app = App::new().await;
     app.get(&app.owner, "/api/chats").await;
     let chat = app.finished_chat().await;
@@ -228,7 +228,28 @@ async fn plugin_conversations_answer_in_their_channel_and_only_remind_when_reque
         .await;
     assert_eq!(status, StatusCode::OK, "{result}");
     let listed = app.get(&app.owner, "/api/chats").await;
-    assert_eq!(find(&listed, "id", chat_id)["unread"], true);
+    let reminder = find(&listed, "id", chat_id);
+    assert_eq!(reminder["unread"], true);
+    let (status, marked) = app
+        .read(&app.owner, &[chat_read(chat_id, &reminder["readAt"])])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{marked}");
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    app.service
+        .store
+        .change_run_fixture(
+            text(reminder, "runId"),
+            json!({
+                "finishedAt": now(),
+                "outcome": { "status": "blocked", "reason": "Needs a person." },
+            }),
+        )
+        .await
+        .unwrap();
+    let listed = app.get(&app.owner, "/api/chats").await;
+    let blocked = find(&listed, "id", chat_id);
+    assert_eq!(blocked["unread"], true);
+    assert!(blocked["snoozedUntil"].is_null());
 }
 
 #[tokio::test]

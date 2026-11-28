@@ -126,8 +126,9 @@ impl Reads {
     /// Marks conversations the account has not acknowledged since their latest relevant
     /// activity, and attaches snooze deadlines until their reminder is acknowledged.
     ///
-    /// A plugin's conversations answer in their own channel, so their replies wait on
-    /// nobody here. A rule-started conversation without human participation only asks
+    /// A plugin's ordinary replies stay in its own channel. Blocked outcomes
+    /// and explicit reminders still reach the account. A rule-started conversation
+    /// without human participation only asks
     /// for attention on a pending question, a failure or a `blocked` outcome (ADR-0094).
     pub(crate) fn chats(&self, db: &Db<'_>, chats: &mut [Value]) -> Result<()> {
         let at = now();
@@ -174,9 +175,10 @@ impl Reads {
             }
 
             let reminder_due = expired_snooze_at.is_some();
-            let ordinary_attention =
-                wants_attention && db.kv(&format!("plugin-conversation:{id}"))?.is_none();
-            let unread = (reminder_due || ordinary_attention)
+            let attention = blocked
+                || reminder_due
+                || (wants_attention && db.kv(&format!("plugin-conversation:{id}"))?.is_none());
+            let unread = attention
                 && self.unread(
                     &id,
                     effective_at,

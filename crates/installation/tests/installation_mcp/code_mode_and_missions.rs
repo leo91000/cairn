@@ -652,9 +652,13 @@ async fn scheduled_conversation_wakeups_are_visible_and_cancellable_through_both
         s.store
             .update_run_boundary(
                 run_id,
-                json!({ "chatExecution": {
-                    "messageId": message, "text": "Check CI", "attachments": [],
-                }}),
+                json!({
+                    "chatExecution": {
+                        "messageId": message,
+                        "text": "Check CI",
+                        "attachments": [],
+                    },
+                }),
             )
             .await
             .unwrap();
