@@ -303,7 +303,10 @@ test('owner shares an installation and member works without management controls'
     await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toHaveCount(0)
     seed!.store.updateRun(cleanupRunId, {
       workspaces: null,
-      snapshot: { project: { id: randomUUID(), name: 'Older project' } },
+      snapshot: {
+        ...seed!.store.run(cleanupRunId)?.snapshot,
+        project: { id: randomUUID(), name: 'Older project' },
+      },
     })
     await page.reload()
     await page.getByRole('button', { name: 'Run details', exact: true }).click()
