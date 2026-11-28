@@ -77,7 +77,7 @@ async fn parent_node_grant_reductions_revoke_existing_native_delegation() {
     let mut parent = f.run();
     parent["snapshot"]["agent"] = agent.clone();
     parent["status"] = "running".into();
-    common::add_run(&f.service.store, &parent).await;
+    add_conversation_run_fixture(&f.service.store, &mut parent).await;
     let configuration = f
         .service
         .mcps
@@ -154,7 +154,7 @@ async fn a_vm_coordinator_directed_by_unrelated_parents_loses_native_delegation(
     parent_b["id"] = id().into();
     parent_b["taskId"] = id().into();
     parent_b["snapshot"]["agent"] = parent_b_agent.clone();
-    common::add_run(&f.service.store, &parent_b).await;
+    add_conversation_run_fixture(&f.service.store, &mut parent_b).await;
     let coordinator = f
         .service
         .agent_fixture(
@@ -366,13 +366,60 @@ async fn changing_the_parent_permission_or_node_ceiling_revokes_descendants() {
 }
 
 #[tokio::test]
-async fn scheduled_native_placement_rechecks_the_retained_author_even_on_older_provenance() {
+async fn scheduled_native_conversations_recheck_the_rule_creators_node_access() {
     let f = Fixture::new().await;
-    let mut run = f.run();
-    run["trigger"] = "schedule".into();
-    run["snapshot"]["task"] = json!({ "authorId": OTHER });
-    common::add_run(&f.service.store, &run).await;
+    let date = now() + 3_600_000;
+    let definition = json!({
+        "name": "Scheduled native work",
+        "description": "Verify the creator retains native access",
+        "executionAgentId": f.agent["id"],
+        "trigger": { "type": "clock", "at": date, "timezone": "UTC" },
+        "limits": cairn_contracts::HookRuleLimits::default(),
+        "steps": [{
+            "type": "action",
+            "id": "start_agent",
+            "action": {
+                "type": "startAgent",
+                "agentId": f.agent["id"],
+                "prompt": { "type": "literal", "value": "Run on the native node." },
+            },
+        }],
+    });
+    let (status, rule) = f
+        .call(
+            &f.trusted,
+            "POST",
+            "/api/hook-rules",
+            json!({ "definition": definition }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{rule}");
+    assert_eq!(rule["nativeAuthority"], true, "{rule}");
+    let run_now = format!("/api/hook-rules/{}/run", text(&rule, "id"));
+    let (status, queued) = f.call(&f.trusted, "POST", &run_now, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{queued}");
+    cairn_installation::rules::engine::tick(&f.service)
+        .await
+        .unwrap();
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
+    let chats = f.service.chat_list().await.unwrap();
+    assert_eq!(chats.len(), 1, "{chats:?}");
+    assert_eq!(chats[0]["originRule"]["schedule"], true);
+    let run = f.service.store.run(text(&chats[0], "runId")).await.unwrap();
+    assert_eq!(run["nativePrincipals"], json!([TRUSTED]));
+    placement::check(&f.service, &run).await.unwrap();
+
+    let mut node = f.node.clone();
+    node["nativeAccounts"] = json!([]);
+    f.service.store.put_node_fixture(node).await.unwrap();
     assert!(placement::check(&f.service, &run).await.is_err());
+    let (status, queued) = f.call(&f.trusted, "POST", &run_now, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{queued}");
+    cairn_installation::rules::engine::tick(&f.service)
+        .await
+        .unwrap();
+    let chats = f.service.chat_list().await.unwrap();
+    assert_eq!(chats.len(), 1, "{chats:?}");
 }
 
 #[tokio::test]

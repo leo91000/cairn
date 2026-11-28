@@ -8,7 +8,7 @@ use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 use common::AgentFixture;
 use common::McpFixture;
 use common::ProjectFixture;
-use common::run_fixture::RunFixture;
+use common::run_fixture::{RunFixture, add_conversation_run_fixture};
 
 mod common;
 
@@ -29,21 +29,21 @@ async fn service(root: &TempDir) -> Arc<Service> {
 }
 
 async fn active_run(s: &Service, agent: &Value) -> (Value, Value) {
+    let chat = cairn_installation::config::id();
     let mut run = s
         .snapshot(
             json!({
-                "id": cairn_installation::config::id(),
+                "id": chat,
                 "name": "Inspect Cairn",
                 "prompt": "Inspect runs",
                 "agentId": agent["id"],
-                "worktree": false,
             }),
             "chat",
         )
         .await
         .unwrap();
     run["status"] = json!(RunStatus::Running);
-    common::add_run(&s.store, &run).await;
+    add_conversation_run_fixture(&s.store, &mut run).await;
     let run = s.store.run(text(&run, "id")).await.unwrap();
     let configuration = s.mcps.run_configuration(s, &run).await.unwrap();
     (run, configuration)

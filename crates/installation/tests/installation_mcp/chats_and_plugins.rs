@@ -257,12 +257,7 @@ async fn both_mcp_endpoints_list_current_chat_account_waits() {
     let s = service(&root).await;
     let main = enabled_main(&s).await;
     let (target, configuration) = active_run(&s, &main).await;
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = target["id"].clone();
-    s.store
-        .save_conversation_boundary(chat.clone())
-        .await
-        .unwrap();
+    let chat_id = text(&target, "taskId");
     for required in [None, Some(cairn_contracts::AgentProvider::Codex)] {
         s.store
             .change_run(
@@ -277,7 +272,7 @@ async fn both_mcp_endpoints_list_current_chat_account_waits() {
             )
             .await
             .unwrap();
-        let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+        let detail = s.chat_detail(chat_id).await.unwrap();
         for internal in [false, true] {
             let response = if internal {
                 call(&s, &configuration, "list_chats", json!({})).await
@@ -307,7 +302,7 @@ async fn both_mcp_endpoints_list_current_chat_account_waits() {
         )
         .await
         .unwrap();
-    let cleared = s.chat_detail(text(&chat, "id")).await.unwrap();
+    let cleared = s.chat_detail(chat_id).await.unwrap();
     assert!(cleared["accountWaitReason"].is_null());
     assert!(cleared["accountRequired"].is_null());
 }
@@ -636,11 +631,7 @@ async fn chat_file_tools_read_private_artifacts_and_attachments_in_bounded_chunk
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
     let (target, _) = active_run(&s, &main).await;
-    let chat = s.chat_create(json!({})).await.unwrap();
-    let chat_id = chat["id"].as_str().unwrap();
-    let mut chat = chat.clone();
-    chat["runId"] = target["id"].clone();
-    s.store.save_conversation_boundary(chat).await.unwrap();
+    let chat_id = text(&target, "taskId");
     let artifact_id = uuid::Uuid::new_v4().to_string();
     let data = (0..220_000).map(|i| (i % 251) as u8).collect::<Vec<_>>();
     let digest = {
@@ -870,10 +861,7 @@ async fn chat_questions_redact_private_answers_and_content_chunks_detect_changes
     let main = enabled_main(&s).await;
     let (_, configuration) = active_run(&s, &main).await;
     let (target, _) = active_run(&s, &main).await;
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = target["id"].clone();
-    let chat_id = chat["id"].as_str().unwrap().to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
+    let chat_id = text(&target, "taskId").to_owned();
     let question_id = "a".repeat(64);
     s.question_receive(
         target["id"].as_str().unwrap(),
@@ -1015,10 +1003,7 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
         .save_checkpoint_boundary(run_id, json!({ "launched": true }))
         .await
         .unwrap();
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = target["id"].clone();
-    let chat_id = chat["id"].as_str().unwrap().to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
+    let chat_id = text(&target, "taskId").to_owned();
     let denied = call(
         &s,
         &configuration,
@@ -1101,10 +1086,7 @@ async fn trashed_conversations_reject_timeline_content_on_both_mcp_surfaces() {
         )
         .await
         .unwrap();
-    let mut chat = s.chat_create(json!({})).await.unwrap();
-    chat["runId"] = target["id"].clone();
-    let chat_id = chat["id"].as_str().unwrap().to_owned();
-    s.store.save_conversation_boundary(chat).await.unwrap();
+    let chat_id = text(&target, "taskId").to_owned();
 
     let timeline = call(
         &s,

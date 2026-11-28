@@ -278,7 +278,7 @@ async fn side_questions_check_native_access_without_changing_execution_provenanc
     parent["snapshot"]["agent"] = director;
     parent["status"] = "running".into();
     parent["nativePrincipals"] = json!([OTHER]);
-    common::add_run(&f.service.store, &parent).await;
+    add_conversation_run_fixture(&f.service.store, &mut parent).await;
     let configuration = f
         .service
         .mcps
@@ -434,7 +434,7 @@ async fn rejected_native_mutations_do_not_become_historical_directors() {
     parent["snapshot"]["agent"] = director;
     parent["status"] = "running".into();
     parent["nativePrincipals"] = json!([OTHER]);
-    common::add_run(&f.service.store, &parent).await;
+    add_conversation_run_fixture(&f.service.store, &mut parent).await;
     let configuration = f
         .service
         .mcps

@@ -78,6 +78,36 @@ pub fn complete_placement_fixture(value: &mut Value) {
     }
 }
 
+/// Insert a controlled conversation run and its conversation together.
+pub async fn add_conversation_run_fixture(store: &Store, record: &mut Value) {
+    let chat_id = record["taskId"].as_str().unwrap().to_owned();
+    record["trigger"] = "chat".into();
+    if record.get("nativeProvenanceUnknown").is_none() {
+        record["nativeProvenanceUnknown"] = true.into();
+    }
+    let record = record.clone();
+    store
+        .transaction(move |db| {
+            let record = db.add_run_fixture(&record, None)?;
+            let agent = &record["snapshot"]["agent"];
+            db.save_conversation_boundary(&serde_json::json!({
+                "id": chat_id,
+                "title": record["snapshot"]["task"]["name"].as_str().unwrap_or("Fixture"),
+                "runId": record["id"],
+                "agentId": agent["id"],
+                "projectId": record["projectId"].as_str().filter(|project| !project.is_empty()),
+                "nativePrincipals": record["nativePrincipals"],
+                "nativeAuthorityNodes": record["nativeAuthorityNodes"],
+                "nativeParentRunId": record["nativeParentRunId"],
+                "nativeParentAccess": record["nativeParentAccess"],
+                "nativeProvenanceUnknown": record["nativeProvenanceUnknown"],
+            }))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 pub trait DbRunFixture {
     fn update_run_boundary_fixture(&self, id: &str, patch: &Value) -> Result<Value>;
 

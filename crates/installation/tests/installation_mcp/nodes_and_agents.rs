@@ -1230,7 +1230,7 @@ async fn installation_access_is_opt_in_and_complete_profile_replacements_preserv
 }
 
 #[tokio::test]
-async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
+async fn installation_catalog_exposes_clock_rules_and_conversation_controls() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let main = enabled_main(&s).await;

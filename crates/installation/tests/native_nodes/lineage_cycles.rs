@@ -601,7 +601,7 @@ async fn directing_authority_keeps_the_sixteen_scope_depth_bound_on_both_backend
             run["status"] = "running".into();
             run["nativeParentRunId"] = previous;
             run["nativeParentAccess"] = "installation".into();
-            common::add_run(&f.service.store, &run).await;
+            add_conversation_run_fixture(&f.service.store, &mut run).await;
             previous = run["id"].clone();
             last = run;
         }
@@ -633,7 +633,7 @@ async fn directing_authority_keeps_the_sixteen_scope_depth_bound_on_both_backend
         extra["status"] = "running".into();
         extra["nativeParentRunId"] = caller.run["id"].clone();
         extra["nativeParentAccess"] = "installation".into();
-        common::add_run(&f.service.store, &extra).await;
+        add_conversation_run_fixture(&f.service.store, &mut extra).await;
         let configuration = f
             .service
             .mcps
@@ -684,14 +684,14 @@ async fn a_rejected_message_rolls_back_an_otherwise_valid_prospective_parent() {
 }
 
 #[tokio::test]
-async fn a_child_cannot_create_a_cycle_when_resuming_its_mission_origin() {
+async fn a_child_cannot_create_a_cycle_when_resuming_its_conversation_origin() {
     let f = fixture("native").await;
-    let mission = saved_native_mission(&f).await;
+    let conversation = saved_native_conversation(&f).await;
     let current = f
         .service
         .store
         .change_run(
-            text(&mission, "id"),
+            text(&conversation, "id"),
             cairn_installation::runs::RunChanges {
                 status: Some(cairn_contracts::RunStatus::Running),
                 ..Default::default()
@@ -707,7 +707,11 @@ async fn a_child_cannot_create_a_cycle_when_resuming_its_mission_origin() {
         .await
         .unwrap();
     let origin = Actor {
-        chat: Value::Null,
+        chat: f
+            .service
+            .conversation_boundary(text(&run, "taskId"))
+            .await
+            .unwrap(),
         run,
         configuration,
     };
@@ -715,7 +719,7 @@ async fn a_child_cannot_create_a_cycle_when_resuming_its_mission_origin() {
     f.service
         .store
         .change_run(
-            text(&mission, "id"),
+            text(&conversation, "id"),
             cairn_installation::runs::RunChanges {
                 status: Some(cairn_contracts::RunStatus::Failed),
                 ..Default::default()
@@ -723,13 +727,18 @@ async fn a_child_cannot_create_a_cycle_when_resuming_its_mission_origin() {
         )
         .await
         .unwrap();
-    let before = f.service.store.run(text(&mission, "id")).await.unwrap();
+    let before = f
+        .service
+        .store
+        .run(text(&conversation, "id"))
+        .await
+        .unwrap();
     assert!(allowed(&f, &child).await);
     let response = delegated_call(
         &f,
         &child.configuration,
         "resume_run",
-        json!({ "runId": mission["id"] }),
+        json!({ "runId": conversation["id"] }),
     )
     .await;
     assert_eq!(response["result"]["isError"], true, "{response}");
@@ -740,7 +749,11 @@ async fn a_child_cannot_create_a_cycle_when_resuming_its_mission_origin() {
         "The native grant check must reject this resume before its effect: {response}"
     );
     assert_eq!(
-        f.service.store.run(text(&mission, "id")).await.unwrap(),
+        f.service
+            .store
+            .run(text(&conversation, "id"))
+            .await
+            .unwrap(),
         before
     );
     assert!(allowed(&f, &child).await);

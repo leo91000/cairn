@@ -144,9 +144,17 @@ impl Fixture {
     }
 
     async fn target(&self) -> Value {
+        self.target_for(MAIN_AGENT_ID).await
+    }
+
+    async fn target_for(&self, agent_id: &str) -> Value {
         let (_, run) = self
             .s
-            .chat_run_fixture(MAIN_AGENT_ID, None, "Check result")
+            .chat_run_fixture(agent_id, None, "Check result")
+            .await
+            .unwrap();
+        self.s
+            .chat_acknowledge(text(&run, "id"), text(&run["chatExecution"], "messageId"))
             .await
             .unwrap();
         run
@@ -250,10 +258,7 @@ async fn installation_access_can_wait_for_another_agents_run() {
         f.s.agent_fixture(json!({ "name": "Delegated worker" }), None)
             .await
             .unwrap();
-    let (_, target) =
-        f.s.chat_run_fixture(text(&agent, "id"), None, "Check result")
-            .await
-            .unwrap();
+    let target = f.target_for(text(&agent, "id")).await;
     let wait = f
         .schedule(json!({ "type": "run_finished", "runId": target["id"] }))
         .await;

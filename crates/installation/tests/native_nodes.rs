@@ -3,7 +3,7 @@ use common::node_fixture::*;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
-use crate::common::run_fixture::RunFixture;
+use crate::common::run_fixture::{RunFixture, add_conversation_run_fixture};
 use common::AgentFixture;
 use common::StoreAgentFixture;
 
@@ -473,7 +473,7 @@ async fn delegate(f: &Fixture, provenance: bool) -> (Value, Value) {
     if !provenance {
         parent["nativeProvenanceUnknown"] = true.into();
     }
-    common::add_run(&f.service.store, &parent).await;
+    add_conversation_run_fixture(&f.service.store, &mut parent).await;
     let configuration = f
         .service
         .mcps
@@ -588,12 +588,15 @@ async fn unplaced_administrator_preview(backend: &str) {
     assert_eq!(pending["node"]["nativeModeStatus"], "pending");
 }
 
-async fn saved_native_mission(f: &Fixture) -> Value {
+async fn saved_native_conversation(f: &Fixture) -> Value {
     let mut run = f.run();
     run["status"] = "failed".into();
     run["resumeAvailable"] = true.into();
     run["sessionId"] = "retained-session".into();
-    common::add_run(&f.service.store, &run).await;
+    run["chatExecution"] = json!({
+        "messageId": id(), "text": "Continue the native work", "attachments": [],
+    });
+    add_conversation_run_fixture(&f.service.store, &mut run).await;
     common::set_checkpoint(
         &f.service.store,
         text(&run, "id"),
@@ -620,7 +623,7 @@ async fn resume_coordinator(f: &Fixture, traced: bool) -> (Value, Value) {
     caller["snapshot"]["agent"] = agent;
     caller["status"] = "running".into();
     caller["nativeProvenanceUnknown"] = (!traced).into();
-    common::add_run(&f.service.store, &caller).await;
+    add_conversation_run_fixture(&f.service.store, &mut caller).await;
     let configuration = f
         .service
         .mcps
