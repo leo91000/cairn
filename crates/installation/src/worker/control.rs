@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 impl Worker {
     pub async fn cancel(&self, s: &Service, id: &str) -> Result<()> {
@@ -1000,11 +1000,30 @@ async fn verify_worktree_history(target: &str, env: &Environment) -> Result<()> 
             "Save this worktree's private Git references before cleaning it up.",
         ));
     }
-    let history_args = ["-C", target, "reflog", "show", "--format=%H", "HEAD"].map(str::to_owned);
-    let mut history = command("git", &history_args, env, None)
-        .stderr(Stdio::null())
-        .spawn()?;
-    let pipe: Stdio = history.stdout.take().unwrap().try_into()?;
+    let format = git(
+        &[
+            "-C",
+            target,
+            "config",
+            "--local",
+            "--get",
+            "extensions.refStorage",
+        ],
+        env,
+    )
+    .await?;
+    if format.exit_code != Some(1) && !(format.success && format.stdout.trim() == "files") {
+        return Err(Error::conflict(
+            "Git could not verify this worktree's reference storage format. Preserve the workspace before cleanup.",
+        ));
+    }
+    let log = git(&["-C", target, "rev-parse", "--git-path", "logs/HEAD"], env).await?;
+    if !log.success || log.stdout.trim_end().is_empty() {
+        return Err(Error::conflict(
+            "Git could not locate this worktree's HEAD log.",
+        ));
+    }
+    let log = Path::new(target).join(log.stdout.trim_end());
     let revisions = [
         "-C",
         target,
@@ -1017,27 +1036,67 @@ async fn verify_worktree_history(target: &str, env: &Environment) -> Result<()> 
         "--stdin",
     ]
     .map(str::to_owned);
-    let mut check = command("git", &revisions, env, None);
-    check.stdin(pipe);
-    let budget = Duration::from_secs(10);
-    let (history_status, unique_commits) = tokio::time::timeout(budget, async {
+    let mut check = command("git", &revisions, env, None)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdin = check.stdin.take().unwrap();
+    let mut stdout = check.stdout.take().unwrap();
+    let ((), unique_commits, status) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::try_join! {
-            async { Ok::<_, Error>(history.wait().await?) },
-            bounded_output(check, budget, 100_000),
+            write_worktree_reflog(&log, stdin),
+            async { Ok::<_, Error>(stdout.read(&mut [0]).await? != 0) },
+            async { Ok::<_, Error>(check.wait().await?) },
         }
     })
     .await
     .map_err(|_| Error::conflict("Git could not verify this worktree's history in time."))??;
-    if !history_status.success() {
-        return Err(Error::conflict(
-            "Git could not verify this worktree's history.",
-        ));
-    }
-    if !unique_commits.success || !unique_commits.stdout.is_empty() {
+    if !status.success() || unique_commits {
         return Err(Error::conflict(
             "Save this worktree's commits on a shared branch before cleaning it up.",
         ));
     }
+    Ok(())
+}
+
+async fn write_worktree_reflog(log: &Path, mut stdin: tokio::process::ChildStdin) -> Result<()> {
+    let log = match tokio::fs::File::open(log).await {
+        Ok(log) => log,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut history = BufReader::new(log);
+    let mut entry = Vec::new();
+    while (&mut history)
+        .take(256 * 1024)
+        .read_until(b'\n', &mut entry)
+        .await?
+        != 0
+    {
+        if entry.last() != Some(&b'\n') {
+            return Err(Error::conflict(
+                "Git could not verify an entry in this worktree's HEAD log.",
+            ));
+        }
+        let mut fields = entry.splitn(3, |byte| *byte == b' ');
+        // Git's formatted reflog lists the new commit only. The old commit can
+        // remain the sole reference after a reflog expiration without rewriting.
+        for endpoint in [fields.next(), fields.next()] {
+            let Some(oid) = endpoint.filter(|oid| {
+                matches!(oid.len(), 40 | 64) && oid.iter().all(u8::is_ascii_hexdigit)
+            }) else {
+                return Err(Error::conflict(
+                    "Git could not verify an entry in this worktree's HEAD log.",
+                ));
+            };
+            if oid.iter().any(|byte| *byte != b'0') {
+                stdin.write_all(oid).await?;
+                stdin.write_all(b"\n").await?;
+            }
+        }
+        entry.clear();
+    }
+    stdin.shutdown().await?;
     Ok(())
 }
 
@@ -1800,6 +1859,51 @@ mod tests {
             .await
             .unwrap_err();
         assert!(reflog_only.message.contains("shared branch"));
+        let current = git(&["-C", target, "rev-parse", "HEAD"], &env)
+            .await
+            .unwrap();
+        let current = current.stdout.trim();
+        let detached_oid = detached_tip.stdout.trim();
+        let log = git(
+            &["-C", target, "rev-parse", "--git-path", "logs/HEAD"],
+            &env,
+        )
+        .await
+        .unwrap();
+        let log = Path::new(target).join(log.stdout.trim());
+        let entries = format!(
+            "{current} {detached_oid} Fixture <fixture@example.test> 1700000000 +0000\tcommit\n\
+             {detached_oid} {current} Fixture <fixture@example.test> 1750000000 +0000\treset\n"
+        );
+        tokio::fs::write(&log, entries).await.unwrap();
+        assert!(
+            git(
+                &[
+                    "-C",
+                    target,
+                    "reflog",
+                    "expire",
+                    "--expire=2024-01-01",
+                    "--expire-unreachable=never",
+                    "HEAD",
+                ],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let remaining = git(
+            &["-C", target, "reflog", "show", "--format=%H", "HEAD"],
+            &env,
+        )
+        .await
+        .unwrap();
+        assert_eq!(remaining.stdout.trim(), current);
+        let old_endpoint = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(old_endpoint.message.contains("shared branch"));
         assert!(
             git(
                 &[

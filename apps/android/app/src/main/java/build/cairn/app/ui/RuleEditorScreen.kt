@@ -106,6 +106,7 @@ fun RuleEditorScreen(
     var draft by retained.draft
     var original by retained.original
     var revision by rememberSaveable(cacheScope, ruleId) { mutableStateOf("") }
+    var clockFieldsGeneration by rememberSaveable(cacheScope, ruleId) { mutableIntStateOf(0) }
     var loadedVersion by rememberSaveable(cacheScope, ruleId) { mutableIntStateOf(0) }
     var conflict by remember(cacheScope, ruleId) { mutableStateOf<JsonObject?>(null) }
     var comparingConflict by remember { mutableStateOf(false) }
@@ -389,6 +390,7 @@ fun RuleEditorScreen(
                         original = draft
                         revision = latest.text("revision")
                         loadedVersion = latest.text("version").toIntOrNull() ?: 0
+                        clockFieldsGeneration++
                         conflict = null
                         selected = ""
                     }
@@ -518,7 +520,7 @@ fun RuleEditorScreen(
                             val clock =
                                 definition.obj("trigger")?.takeIf { it.text("type") == "clock" }
                             if (clock != null)
-                                key(original, revision) {
+                                key(original, clockFieldsGeneration) {
                                     ClockScheduleFields(
                                         wireJson.decodeFromJsonElement<HookRuleTrigger.C>(clock)
                                     ) {

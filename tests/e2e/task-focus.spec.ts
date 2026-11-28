@@ -92,3 +92,49 @@ for (const savedCron of ['30 13 * * MON', '0 9 * * *']) {
     })
   })
 }
+
+test('accepting a completed save discards Clock changes made while it was in flight', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const agent = workspace.service.agent({ name: 'Scheduler' })
+  const definition = scheduleDefinition('Clock in flight', agent.id, 'Review work.')
+  const rule = await workspace.api('/api/hook-rules', 'POST', { definition, enabled: false })
+  await page.goto(workspacePath(`/rules/${rule.id}/edit`))
+  await signIn(page)
+  const cron = page.getByLabel('Cron (five fields)', { exact: true })
+  await expect(cron).toHaveValue('0 9 * * *')
+
+  let held = false
+  let confirmSaved!: () => void
+  let releaseResponse!: () => void
+  const saved = new Promise<void>(resolve => confirmSaved = resolve)
+  const release = new Promise<void>(resolve => releaseResponse = resolve)
+  await page.route(`**/api/hook-rules/${rule.id}`, async (route) => {
+    if (held || route.request().method() !== 'PUT')
+      return route.continue()
+
+    held = true
+    const response = await route.fetch()
+    confirmSaved()
+    await release
+    await route.fulfill({ response })
+  })
+
+  try {
+    await page.getByRole('button', { name: 'Save version' }).click()
+    await saved
+    await cron.fill('15 10 * * *')
+  }
+  finally {
+    releaseResponse()
+  }
+
+  await page.getByRole('button', { name: 'Use the saved version' }).click()
+  await expect(cron).toHaveValue('0 9 * * *')
+  await page.getByLabel('Time zone').fill('UTC')
+  await page.getByRole('button', { name: 'Save version' }).click()
+  await expect.poll(async () => (await workspace.api(`/api/hook-rules/${rule.id}`)).definition.trigger).toEqual({
+    type: 'clock',
+    cron: '0 9 * * *',
+    timezone: 'UTC',
+  })
+})

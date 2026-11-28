@@ -19,6 +19,8 @@ import build.cairn.contracts.RuleCatalogAgent
 import build.cairn.contracts.RuleCatalogLimits
 import build.cairn.contracts.RuleCatalogTool
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
@@ -659,14 +661,20 @@ abstract class RulesCreationCases {
     fun acceptingAnIdenticalSavedDefinitionResetsTheClockFields() =
         recoverCreation(false, replace = true, sameDefinitionConflict = true)
 
+    @Test
+    fun acceptingTheCompletedSaveResetsClockEditsMadeWhileSaving() =
+        recoverCreation(false, replace = true, sameDefinitionConflict = true, delaySave = true)
+
     private fun recoverCreation(
         restore: Boolean,
         reject: Boolean = false,
         replace: Boolean = false,
         sameDefinitionConflict: Boolean = false,
+        delaySave: Boolean = false,
     ) {
         val id = "da2dd0ad-91ce-4566-b426-77c03628f59e"
         val unavailable = AtomicBoolean(true)
+        val releaseSave = CountDownLatch(1)
         val failureMessage =
             if (reject) "Creation rejected"
             else if (replace) "Uncertain replacement" else "Uncertain creation"
@@ -725,12 +733,22 @@ abstract class RulesCreationCases {
                                     wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
                                 writes += "PUT" to body
                                 if (sameDefinitionConflict && unavailable.getAndSet(false)) {
+                                    if (delaySave) {
+                                        stored.set(record(body.obj("definition")!!, 2))
+                                        if (!releaseSave.await(20, TimeUnit.SECONDS))
+                                            return json(
+                                                """{"error":"Pending save timed out"}""",
+                                                504,
+                                            )
+                                        return json(stored.get().toString())
+                                    }
                                     stored.set(record(stored.get().obj("definition")!!, 2))
                                     return json("""{"error":"Revision conflict"}""", 409)
                                 }
                                 if (body.text("revision") != stored.get().text("revision"))
                                     return json("""{"error":"Revision conflict"}""", 409)
-                                stored.set(record(body.obj("definition")!!, 2))
+                                val nextVersion = stored.get().text("version").toInt() + 1
+                                stored.set(record(body.obj("definition")!!, nextVersion))
                                 if (replace && unavailable.get())
                                     return json("""{"error":"$failureMessage"}""", 503)
                             }
@@ -791,11 +809,20 @@ abstract class RulesCreationCases {
                     compose.onAllNodesWithText("Nom de la règle").fetchSemanticsNodes().isNotEmpty()
                 }
                 if (sameDefinitionConflict) {
+                    compose
+                        .onNodeWithText("Modifier le déclencheur et l’agent")
+                        .performScrollTo()
+                        .performClick()
                     val cron = compose.onNodeWithText("Cron (cinq champs)")
-                    cron.performScrollTo().performTextReplacement("15 10 * * *")
+                    if (!delaySave) cron.performScrollTo().performTextReplacement("15 10 * * *")
                     val save = hasText("Enregistrer") and isEnabled()
                     waitFor { compose.onAllNodes(save).fetchSemanticsNodes().isNotEmpty() }
                     compose.onNode(save).performClick()
+                    if (delaySave) {
+                        waitFor { writes.isNotEmpty() }
+                        cron.performScrollTo().performTextReplacement("15 10 * * *")
+                        releaseSave.countDown()
+                    }
                     val latest = "Utiliser la version enregistrée"
                     waitFor {
                         compose.onAllNodesWithText(latest).fetchSemanticsNodes().isNotEmpty()
@@ -918,6 +945,7 @@ abstract class RulesCreationCases {
                 assertEquals("Latest draft", update.obj("definition").text("name"))
                 assertEquals(2, stored.get()!!["version"]!!.jsonPrimitive.int)
             } finally {
+                releaseSave.countDown()
                 compose.runOnUiThread { mounted = false }
                 compose.waitForIdle()
                 compose.runOnUiThread { models.clear() }

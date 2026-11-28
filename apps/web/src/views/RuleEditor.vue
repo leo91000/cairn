@@ -78,6 +78,7 @@ const onWide = () => wide.value = wideQuery.matches
 const creationId = crypto.randomUUID()
 const creationDefinition = ref<HookRuleDefinition | null>(null)
 const loadedDefinition = ref('')
+const clockFieldsGeneration = ref(0)
 const validated = ref(false)
 const validationError = ref('')
 let disposed = false
@@ -408,6 +409,7 @@ function useLatest() {
   rule.value = conflict.value
   definition.value = JSON.parse(JSON.stringify(conflict.value.definition))
   loadedDefinition.value = JSON.stringify(definition.value)
+  clockFieldsGeneration.value++
   conflict.value = null
   selected.value = null
 }
@@ -556,7 +558,7 @@ onBeforeUnmount(() => {
                 </select>
                 <ClockScheduleFields
                   v-if="definition.trigger.type === 'clock'"
-                  :key="`${rule?.revision ?? ''}:${loadedDefinition}`"
+                  :key="`${rule?.id ?? ''}:${clockFieldsGeneration}:${loadedDefinition}`"
                   v-model="definition.trigger"
                   class="mt-3"
                 />
