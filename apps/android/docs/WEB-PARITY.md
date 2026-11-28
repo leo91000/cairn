@@ -453,14 +453,12 @@ current membership. Loading, empty and unavailable states match; the overview ro
 shows a « Vous seul » / “Only you”, « Partagé » / “Shared” or « Indisponible » /
 “Unavailable” chip with the member count and the first allowed members' emails, and
 says it is checking the members while access loads. A new agent is the owner's alone.
-Members see only the agents they may use when starting a conversation or a mission.
-A new mission keeps its draft with Save disabled when no agent is available,
-including while access loads or after the last grant is revoked, and becomes
-saveable when access returns. Android keeps incomplete input in a native editor
-draft and constructs the validated mission contract only on save; web keeps its
-reactive form. An existing mission keeps its agent and requires access before
-edits can be saved. `MissionAuthorityCases` covers these native editor transitions
-and prevented writes on JVM and device.
+Members see the agents they may use when starting or scheduling a conversation.
+The Clock editor uses the same creator and agent checks as other hook rules.
+Membership or agent access changes are checked when saving a rule and launching it.
+The browser sharing journey covers member schedule creation, access changes and
+launching a creator's schedule. `RulesCreationCases` covers the native editor on JVM
+and Android devices.
 A conversation they cannot direct shows a read-only notice, a disabled composer and
 questions waiting for someone with access. Asking a side question and implementing a proposed plan also require access, including when access is removed while the view is open; retained side-question answers stay readable. Attachments and the assistant picker are
 disabled there too. Context compaction is unavailable in the header and conversation
@@ -857,9 +855,9 @@ No platform difference or client error mapping changes; HTTP, both management
 tools and plugin imports share the reservation writer.
 
 Personal read state and installation settings (B4, #419): both apps mark Fil items
-read and set blocked mission outcomes aside with the generated `markRead` and
-`setOutcomeAside` calls; read marks keep the finish of the work seen and each account
-keeps its own state. Settings and the audit list use `getInstallationSettings` and
+read and snooze conversations with the generated `markRead` and `snoozeChat` calls.
+Read marks keep the finish of the work seen and each account keeps its own state.
+Settings and the audit list use `getInstallationSettings` and
 `listAudit`. Web keeps English copy and Android French Material controls; the web
 audit list shows 20 actions while Android shows the 100 returned entries with their
 details, as before. Personal state follows the account that authorized a public

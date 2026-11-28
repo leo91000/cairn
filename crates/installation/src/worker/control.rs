@@ -299,10 +299,7 @@ impl Worker {
             .await?;
         let mut removed = false;
         for workspace in &managed {
-            let removal = match authorize.recheck().await {
-                Ok(()) => remove_workspace(&run, workspace, &root, &env).await,
-                Err(error) => Err(WorktreeRemovalError::Refused(error)),
-            };
+            let removal = remove_workspace(&run, workspace, &root, &env, &authorize).await;
             match removal {
                 Ok(deleted) => removed |= deleted,
                 Err(WorktreeRemovalError::Refused(error)) if !removed => {
@@ -868,6 +865,7 @@ async fn remove_workspace(
     workspace: &Value,
     root: &PathBuf,
     env: &Environment,
+    authorize: &crate::authorization::Authorization,
 ) -> std::result::Result<bool, WorktreeRemovalError> {
     ensure_clean(workspace, root, env)
         .await
@@ -882,6 +880,10 @@ async fn remove_workspace(
         Ok(_) => {}
     }
     let project = cleanup_project_path(run, workspace).map_err(WorktreeRemovalError::Refused)?;
+    authorize
+        .recheck()
+        .await
+        .map_err(WorktreeRemovalError::Refused)?;
     let output = git(
         &[
             "-C",
@@ -977,10 +979,10 @@ async fn ensure_removable_worktree(
             "This worktree has initialized submodules. Preserve their files before cleaning up.",
         ));
     }
-    verify_worktree_history(target, env).await
+    verify_worktree_history(target, &directory, env).await
 }
 
-async fn verify_worktree_history(target: &str, env: &Environment) -> Result<()> {
+async fn verify_worktree_history(target: &str, directory: &Path, env: &Environment) -> Result<()> {
     // These refs disappear with the linked checkout. Shared branches and tags remain.
     let local = git(
         &[
@@ -999,6 +1001,36 @@ async fn verify_worktree_history(target: &str, env: &Environment) -> Result<()> 
         return Err(Error::conflict(
             "Save this worktree's private Git references before cleaning it up.",
         ));
+    }
+    let mut entries = tokio::fs::read_dir(directory).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let name = name.as_encoded_bytes();
+        let private_ref = !matches!(
+            name,
+            b"HEAD" | b"ORIG_HEAD" | b"COMMIT_EDITMSG" | b"TAG_EDITMSG"
+        ) && name
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_');
+        if private_ref || matches!(name, b"rebase-apply" | b"rebase-merge" | b"sequencer") {
+            return Err(Error::conflict(
+                "Save or finish the worktree's Git operation before cleaning it up.",
+            ));
+        }
+    }
+    let mut logs = match tokio::fs::read_dir(directory.join("logs")).await {
+        Ok(logs) => Some(logs),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(logs) = &mut logs {
+        while let Some(entry) = logs.next_entry().await? {
+            if entry.file_name() != "HEAD" {
+                return Err(Error::conflict(
+                    "Save this worktree's private Git logs before cleaning it up.",
+                ));
+            }
+        }
     }
     let format = git(
         &[
@@ -1024,18 +1056,31 @@ async fn verify_worktree_history(target: &str, env: &Environment) -> Result<()> 
         ));
     }
     let log = Path::new(target).join(log.stdout.trim_end());
-    let revisions = [
+    let mut revisions = vec![
         "-C",
         target,
         "--no-replace-objects",
         "rev-list",
         "--max-count=1",
         "HEAD",
-        "--not",
-        "--glob=refs/*",
-        "--stdin",
     ]
-    .map(str::to_owned);
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    if tokio::fs::try_exists(directory.join("ORIG_HEAD")).await? {
+        let original = git(
+            &["-C", target, "rev-parse", "--verify", "ORIG_HEAD^{commit}"],
+            env,
+        )
+        .await?;
+        if !original.success {
+            return Err(Error::conflict(
+                "Git could not verify the worktree's original HEAD.",
+            ));
+        }
+        revisions.push(original.stdout.trim().to_owned());
+    }
+    revisions.extend(["--not", "--glob=refs/*", "--stdin"].map(str::to_owned));
     let mut check = command("git", &revisions, env, None)
         .stdin(Stdio::piped())
         .stderr(Stdio::null())
@@ -1904,6 +1949,28 @@ mod tests {
             .await
             .unwrap_err();
         assert!(old_endpoint.message.contains("shared branch"));
+        assert!(
+            git(
+                &["-C", target, "reflog", "expire", "--expire=all", "HEAD"],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        assert!(
+            git(
+                &["-C", target, "update-ref", "ORIG_HEAD", detached_oid],
+                &env
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let original_head = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(original_head.message.contains("shared branch"));
         assert!(
             git(
                 &[
