@@ -287,7 +287,8 @@ test('owner shares an installation and member works without management controls'
       status: 'failed',
       finishedAt: runCreatedAt,
     })
-    await member.goto(`${installationUrl}runs/${cleanupRunId}`)
+    await member.goto(`${installationUrl}fil/runs/${cleanupRunId}`)
+    await expect(member).toHaveURL(new RegExp(`/runs/${cleanupRunId}$`))
     await expect(member.getByRole('heading', { name: 'Private delegated work', exact: true })).toBeVisible()
     await member.getByRole('button', { name: 'Run details', exact: true }).click()
     await expect(member.getByRole('heading', { name: 'Original instructions', exact: true })).toBeVisible()
