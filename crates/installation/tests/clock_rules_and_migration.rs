@@ -1311,6 +1311,16 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     )
     .unwrap();
     conn.execute(
+        "INSERT INTO account_reads VALUES('opened-acct','mission',?1,?2)",
+        params![active_mission_id, t0 + 5000],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO account_reads VALUES('opened-acct','mission',?1,?2)",
+        params![deleted_mission_id, t0],
+    )
+    .unwrap();
+    conn.execute(
         "INSERT INTO account_dismissals VALUES('owner-acct',?1,?2,?3)",
         params![active_mission_id, t0 + 5000, future_snooze],
     )
@@ -1662,6 +1672,25 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         )
         .unwrap();
     assert_eq!(member_read, t0 + 5000);
+    let merely_opened: bool = migrated
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM account_reads WHERE account_id='opened-acct' AND chat_id=?1)",
+            [&blocked_chat_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !merely_opened,
+        "Opening a blocked mission did not dismiss it."
+    );
+    let ordinary_read: i64 = migrated
+        .query_row(
+            "SELECT r.finished_at FROM account_reads r JOIN conversations c ON c.id=r.chat_id +             WHERE r.account_id='opened-acct' AND c.run_id=?1",
+            [&unconverted_orphan_run],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ordinary_read, t0);
 
     drop(migrated);
     let service = cairn_installation::service::Service::new(config)

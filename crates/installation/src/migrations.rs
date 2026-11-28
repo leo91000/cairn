@@ -811,7 +811,9 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         for (account_id, mission_id, finished_at) in mission_reads {
             if let Some(chats) = migrated_chats_by_mission.get(&mission_id) {
                 for chat in chats {
-                    if chat.activity_at <= finished_at {
+                    // Opening a mission result did not acknowledge its blocked outcome.
+                    // The separate dismissal table carries that decision.
+                    if !chat.needs_review && chat.activity_at <= finished_at {
                         tx.execute(
                             "INSERT INTO account_reads_v39(account_id,chat_id,finished_at) VALUES(?1,?2,?3) \
                              ON CONFLICT(account_id,chat_id) DO UPDATE SET finished_at=max(finished_at,excluded.finished_at)",
