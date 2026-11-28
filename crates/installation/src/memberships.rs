@@ -6,13 +6,11 @@ use crate::{
 use cairn_contracts::{MergeAgentsInput, MergeAgentsOutput};
 use cairn_protocol::TaskAuthorPolicy;
 
-pub(crate) const CLOCK_MEMBERSHIP_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-
 #[derive(Default)]
 pub struct Memberships {
     pub(crate) authors: tokio::sync::Mutex<()>,
     /// When the Beacon last confirmed the memberships, reconciled with account access.
-    verified: std::sync::Mutex<Option<(std::time::Instant, bool)>>,
+    verified: std::sync::Mutex<Option<std::time::Instant>>,
     /// Wakes requests waiting for a confirmation made by the holder of `authors`.
     observed: tokio::sync::Notify,
 }
@@ -38,20 +36,10 @@ impl Memberships {
         self.verified
             .lock()
             .unwrap()
-            .is_some_and(|(verified, _)| match freshness {
+            .is_some_and(|verified| match freshness {
                 MembershipFreshness::Within(age) => verified.elapsed() < age,
                 MembershipFreshness::Since(started) => verified >= started,
             })
-    }
-
-    /// A migrated schedule needs a real installation membership observation
-    /// before an unverified creator is treated as a member.
-    pub(crate) fn clock_membership_confirmation(&self) -> Option<bool> {
-        self.verified
-            .lock()
-            .unwrap()
-            .filter(|(checked, _)| checked.elapsed() < CLOCK_MEMBERSHIP_TTL)
-            .map(|(_, claimed)| claimed)
     }
 
     /// Read-only lists may reuse a recent membership check.
@@ -128,7 +116,7 @@ impl Memberships {
                 crate::agent_access::reconcile(db, observed.as_ref())
             })
             .await?;
-        *self.verified.lock().unwrap() = Some((checked, policy.is_some()));
+        *self.verified.lock().unwrap() = Some(checked);
         self.observed.notify_waiters();
         Ok(policy)
     }

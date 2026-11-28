@@ -59,6 +59,9 @@ duplication et un éditeur sans code. Seul un déclencheur horaire manquait.
 - **Rattrapage** : après une interruption, les créneaux manqués produisent un seul
   déclenchement, avec la date prévue dans sa payload ; le créneau suivant est calculé
   à partir de maintenant.
+- Avant une admission automatique, l’installation confirme auprès de Beacon que
+  le créateur fait encore partie de l’installation. Si Beacon est indisponible,
+  le créneau reste en attente de cette confirmation.
 - **Chevauchement** : un nouveau prédicat de Cairn, « une conversation démarrée par
   cette règle travaille », est vrai tant qu’un tour est en file, en cours ou en
   attente d’un réveil. Une question sans réponse ne compte pas, pour qu’un oubli ne

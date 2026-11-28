@@ -59,6 +59,36 @@ impl App {
         let response = common::send(&self.router, request).await;
         (response.status(), common::read_json(response).await)
     }
+
+    async fn wait_for_clock_admission(&self, rule: &str, scheduled: i64) {
+        common::eventually(
+            std::time::Duration::from_secs(20),
+            std::time::Duration::from_millis(20),
+            async || {
+                cairn_installation::rules::engine::tick(&self.service)
+                    .await
+                    .unwrap();
+                let rule = rule.to_owned();
+                let next: Option<i64> = self
+                    .service
+                    .store
+                    .read(move |db| {
+                        Ok(db.0.query_row(
+                            "SELECT next_run FROM hook_rule_schedules WHERE rule_id=?",
+                            [&rule],
+                            |row| row.get(0),
+                        )?)
+                    })
+                    .await
+                    .unwrap();
+                (next != Some(scheduled)).then_some(())
+            },
+        )
+        .await;
+        cairn_installation::rules::engine::tick(&self.service)
+            .await
+            .unwrap();
+    }
 }
 
 fn schedule_rule_definition(name: &str, trigger: &Value) -> Value {
@@ -381,12 +411,7 @@ async fn clock_cron_rule_catches_up_once_guards_overlap_and_runs_now() {
         .unwrap();
 
     // Tick the rules engine: should emit exactly ONE catch-up triggering and start 1 conversation.
-    cairn_installation::rules::engine::tick(&app.service)
-        .await
-        .unwrap();
-    cairn_installation::rules::engine::tick(&app.service)
-        .await
-        .unwrap();
+    app.wait_for_clock_admission(&rule_id, missed).await;
 
     let (status, chats) = app
         .request(&app.owner, "GET", "/api/chats", Value::Null)
@@ -660,12 +685,7 @@ async fn clock_single_date_fires_once_and_never_repeats() {
         .await
         .unwrap();
 
-    cairn_installation::rules::engine::tick(&app.service)
-        .await
-        .unwrap();
-    cairn_installation::rules::engine::tick(&app.service)
-        .await
-        .unwrap();
+    app.wait_for_clock_admission(&rule_id, due).await;
 
     let (_, detail) = app
         .request(
@@ -728,6 +748,99 @@ fn report_outcome_rejects_needs_input_and_accepts_completed_or_blocked() {
             "evidence": ["cargo test ok"],
         }),
     ));
+}
+
+#[tokio::test]
+async fn automatic_clock_admission_requires_live_beacon_authority_for_all_owner_versions() {
+    let app = App::new().await;
+    let scheduled = now() - 3_600_000;
+    let mut rules = Vec::new();
+    for migrated in [false, true] {
+        let definition = schedule_rule_definition(
+            "Scheduled review",
+            &json!({ "type": "clock", "cron": "*/5 * * * *", "timezone": "UTC" }),
+        );
+        let (status, rule) = app
+            .request(
+                &app.owner,
+                "POST",
+                "/api/hook-rules",
+                json!({ "definition": definition }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{rule}");
+        let rule_id = text(&rule, "id").to_owned();
+        rules.push(rule_id.clone());
+        app.service
+            .store
+            .transaction(move |db| {
+                db.0.execute(
+                    "UPDATE hook_rule_schedules SET next_run=?1 WHERE rule_id=?2",
+                    params![scheduled, rule_id],
+                )?;
+                if migrated {
+                    db.0.execute(
+                        "UPDATE hook_rule_versions SET source='migration' WHERE rule_id=?",
+                        [&rule_id],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    let contacted = Arc::new(tokio::sync::Notify::new());
+    let revoke = Arc::new(tokio::sync::Notify::new());
+    let route = axum::routing::get({
+        let contacted = contacted.clone();
+        let revoke = revoke.clone();
+        move || async move {
+            contacted.notify_one();
+            revoke.notified().await;
+            StatusCode::UNAUTHORIZED
+        }
+    });
+    let (origin, beacon) =
+        common::serve_locally(Router::new().route("/api/relay/{installation}/task-authors", route))
+            .await;
+    let identity = app
+        .service
+        .config
+        .data_dir
+        .join("installation-relay/identity.json");
+    std::fs::write(
+        &identity,
+        json!({ "origin": origin, "installationId": id(), "token": "fixture-only" }).to_string(),
+    )
+    .unwrap();
+
+    let bound = std::time::Duration::from_secs(3);
+    tokio::time::timeout(bound, cairn_installation::rules::engine::tick(&app.service))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(bound, contacted.notified())
+        .await
+        .unwrap();
+    revoke.notify_one();
+    for rule in rules {
+        let (status, detail) = app
+            .request(
+                &app.owner,
+                "GET",
+                &format!("/api/hook-rules/{rule}"),
+                Value::Null,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["nextRun"], scheduled);
+    }
+    let (_, chats) = app
+        .request(&app.owner, "GET", "/api/chats", Value::Null)
+        .await;
+    assert!(chats.as_array().unwrap().is_empty());
+    beacon.abort();
 }
 
 #[tokio::test]

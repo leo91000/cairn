@@ -14,7 +14,7 @@ pub(super) struct MembershipCheck {
     retry_at: Option<Instant>,
 }
 
-fn refresh_memberships(service: &Arc<Service>) {
+fn check_due_memberships(service: &Arc<Service>, due: Vec<(String, i64)>) {
     {
         let mut check = service.rules.clock_memberships.lock().unwrap();
         if check.in_flight || check.retry_at.is_some_and(|at| at > Instant::now()) {
@@ -27,20 +27,19 @@ fn refresh_memberships(service: &Arc<Service>) {
     tokio::spawn(async move {
         let result = tokio::select! {
             () = service.shutdown.cancelled() => Ok(()),
-            result = service.memberships.verify_membership(
-                &service,
-                crate::memberships::CLOCK_MEMBERSHIP_TTL,
-            ) => result,
+            result = admit_due(&service, due) => result,
         };
-        if let Err(error) = result {
+        if let Err(error) = &result {
             tracing::warn!(
                 status = error.status,
-                "Clock rules await confirmation of migrated memberships"
+                "Clock rules await confirmation of installation memberships"
             );
         }
         let mut check = service.rules.clock_memberships.lock().unwrap();
         check.in_flight = false;
-        check.retry_at = Some(Instant::now() + std::time::Duration::from_secs(15));
+        check.retry_at = result
+            .is_err()
+            .then(|| Instant::now() + std::time::Duration::from_secs(15));
         service.rules.wake.notify_one();
     });
 }
@@ -253,53 +252,47 @@ pub(crate) fn record_migrated_failure(
 /// Emits one triggering for each due clock rule. After an interruption, missed slots
 /// produce a single triggering carrying the missed scheduled time, and the next slot
 /// is computed from now (ADR-0094).
-pub(super) async fn observe(s: &Arc<Service>) -> Result<bool> {
+pub(super) async fn observe(s: &Arc<Service>) -> Result<()> {
     let due = s.store.read(|db| db.due_clock_rules(now())).await?;
-    if due.is_empty() {
-        return Ok(false);
+    if !due.is_empty() {
+        check_due_memberships(s, due);
     }
-    let confirmed = if due
-        .iter()
-        .any(|(_, _, needs_memberships)| *needs_memberships)
-    {
-        match s.memberships.clock_membership_confirmation() {
-            Some(confirmed) => confirmed,
-            None => {
-                refresh_memberships(s);
-                false
-            }
-        }
-    } else {
-        true
-    };
-    let mut delivered = false;
-    for (rule_id, scheduled_for, needs_memberships) in due {
-        if needs_memberships && !confirmed {
-            continue;
-        }
+    Ok(())
+}
+
+async fn admit_due(s: &Service, due: Vec<(String, i64)>) -> Result<()> {
+    // A fresh Beacon check precedes automatic admissions. An outage retains the
+    // old slot so a later check can admit one catch-up, without blocking executors.
+    let _authors = s.memberships.authors.lock().await;
+    if s.memberships.observe(s).await?.is_none() {
+        return Err(Error::unauthorized(
+            "Installation is not claimed. Run cairn claim before scheduling work.",
+        ));
+    }
+    let mut first_error = None;
+    for (rule_id, scheduled) in due {
         let emitted = s
             .store
             .transaction({
                 let rule_id = rule_id.clone();
                 move |db| {
                     let Some(schedule) = db.hook_rule_schedule(&rule_id)? else {
-                        return Ok(false);
+                        return Ok(());
                     };
                     let emitted_at = now();
-                    if schedule.next_run.is_none_or(|next| next > emitted_at) {
-                        return Ok(false);
+                    if schedule.next_run != Some(scheduled) || scheduled > emitted_at {
+                        return Ok(());
                     }
-                    let scheduled = schedule.next_run.unwrap_or(scheduled_for);
                     let Some(row) = db.hook_rule(&rule_id)? else {
-                        return Ok(false);
+                        return Ok(());
                     };
                     let Some(version) = db.hook_rule_version(&rule_id, row.version)? else {
-                        return Ok(false);
+                        return Ok(());
                     };
                     let HookRuleTrigger::Clock { timezone, .. } = &version.definition.trigger
                     else {
                         db.delete_hook_rule_schedule(&rule_id)?;
-                        return Ok(false);
+                        return Ok(());
                     };
                     if row.disabled_at.is_some()
                         || row.emergency_paused_at.is_some()
@@ -307,7 +300,7 @@ pub(super) async fn observe(s: &Arc<Service>) -> Result<bool> {
                         || row.budget_exhausted_at.is_some()
                     {
                         clear_next_run(db, &rule_id)?;
-                        return Ok(false);
+                        return Ok(());
                     }
                     if blocked(db, &row, &version)?.is_some() {
                         // Rights are temporarily lost: advance past the missed slot so the
@@ -319,7 +312,7 @@ pub(super) async fn observe(s: &Arc<Service>) -> Result<bool> {
                             scheduled,
                             emitted_at,
                         )?;
-                        return Ok(false);
+                        return Ok(());
                     }
                     let event_id = format!("clock:{rule_id}:{scheduled}");
                     // Starting the migrated conversation adds one step. Preserve the
@@ -333,15 +326,14 @@ pub(super) async fn observe(s: &Arc<Service>) -> Result<bool> {
                         false,
                         depth,
                     )?;
-                    let inserted = insert_triggering(
+                    insert_triggering(
                         db,
                         &rule_id,
                         version.version,
                         &event_id,
                         &record,
                         emitted_at,
-                    )?
-                    .is_some();
+                    )?;
                     advance_schedule(
                         db,
                         schedule,
@@ -349,18 +341,16 @@ pub(super) async fn observe(s: &Arc<Service>) -> Result<bool> {
                         scheduled,
                         emitted_at,
                     )?;
-                    Ok(inserted)
+                    Ok(())
                 }
             })
             .await;
-        match emitted {
-            Ok(inserted) => delivered |= inserted,
-            Err(error) => {
-                tracing::warn!(rule = %rule_id, error = %error, "Clock rule could not be triggered");
-            }
+        if let Err(error) = emitted {
+            tracing::warn!(rule = %rule_id, error = %error, "Clock rule could not be triggered");
+            first_error.get_or_insert(error);
         }
     }
-    Ok(delivered)
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Triggers a clock rule immediately without waiting for its next scheduled occurrence.
