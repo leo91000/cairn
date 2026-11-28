@@ -309,7 +309,7 @@ fn head_timeout(method: &str, path: &str, native: bool) -> Duration {
     {
         300
     } else {
-        30
+        return crate::nodes::EXECUTION_RELAY_HEAD_TIMEOUT;
     };
     Duration::from_secs(seconds)
 }

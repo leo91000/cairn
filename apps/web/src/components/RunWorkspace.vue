@@ -22,7 +22,12 @@ import {
   Terminal,
 } from '../icons'
 import { useRetryState } from '../run-retry'
-import { exclusiveSuspensionLabel, isExclusivelySuspended, runDisplayStatus } from '../run-status'
+import {
+  canStopRun,
+  exclusiveSuspensionLabel,
+  isExclusivelySuspended,
+  runDisplayStatus,
+} from '../run-status'
 import { useLiveRun } from '../use-live-run'
 import ActivityFeed from './ActivityFeed.vue'
 import ArtifactGallery from './ArtifactGallery.vue'
@@ -147,7 +152,7 @@ async function copy() {
         <RouterLink :to="`/chats/${run.taskId}`" class="text-sm text-accent">
           Open chat
         </RouterLink>
-        <UiButton v-if="active" variant="danger-outline" @click="confirm = true">
+        <UiButton v-if="canStopRun(run) || waiting" variant="danger-outline" @click="confirm = true">
           <Icon :name="Square" :size="15" />Stop run
         </UiButton>
       </div>
@@ -267,7 +272,7 @@ async function copy() {
           This cancels the scheduled continuation.
         </p>
         <p v-else>
-          The running process will stop. Files and external changes already made
+          The conversation will pause. Files and external changes already made
           will remain, so review them before continuing the conversation.
         </p>
       </div>

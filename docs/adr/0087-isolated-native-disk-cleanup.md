@@ -67,20 +67,55 @@ physical closure after the disk flushes and retires. Recovery resumes an
 interrupted cleanup observation and commits its diagnostic with publication.
 The recorded execution failure continues to block automatic replay because
 the workload's exit status remains unknown.
-After DELETE has acknowledged a pending cleanup, the manager gives an already
-settled successful turn a bounded window to observe retirement. It preserves
-that outcome only after DELETE returns the attempt-bound
-`NativeCleanupRetired` receipt, which also checks the conversation's current
-quarantine.
+After DELETE acknowledges a pending cleanup for an already settled successful
+chat turn, the manager records the fence and releases the execution reservation
+in one transaction. That transaction starts a five-minute settlement deadline
+before the first follow-up request. The authenticated fence advertises whether
+the controller supports the read-only cleanup status. Controllers without this
+protocol keep their existing short grace and settlement behavior.
+The manager resumes bounded observations across restarts on a timer independent
+of ordinary recovery. Observations are tracked by execution attempt. Waiting
+attempts receive a slot before earlier attempts retry. The authenticated
+cleanup status identifies the attempt and reports both a clean flush and
+whether the workspace is available for reuse.
+If a compatible controller or relay stops serving that endpoint during an
+upgrade or rollback, the manager can use the bounded legacy retirement check
+for the same attempt. The original settlement deadline still applies.
+The existing retirement wait carries current workspace reuse evidence through
+older relays as a separate receipt. That receipt releases later work after
+settlement and preserves the original flush verdict. A controller whose only
+proof is a clean flush keeps other recovered disks gated until a compatible
+controller confirms reuse or the environment is explicitly retired.
+The recovery loop settles each run independently. A clean flush and current
+quarantine clearance establish success. A missing proof at the deadline
+publishes the original cleanup failure and keeps the original turn end. Later
+messages stay editable in the queue until the workspace is reusable, including after the
+controller retires it through recovery of an interrupted or failed flush.
+Environment detachment settles the saved verdict
+before replacing the execution checkpoint. Without proof it publishes the
+original cleanup diagnostic. Expiration leaves a fenced turn's cancellation
+state as set by explicit Stop. A Stop issued during cleanup uses the provider
+turn's end time to distinguish its inputs from later messages.
+If expiration precedes receipt persistence, detachment preserves the original
+turn end and any explicit Stop or confirmed flush. Without a verdict it records
+that cleanup could not be confirmed.
+The native stop response identifies a matching clean disk retirement separately
+from generic physical finalization, which also covers an aborted close.
 The live manager checkpoint serializes fencing and reloads its durable evidence
-before heartbeat or output persistence can overwrite it; placement lease renewal
-continues independently while the fence waits.
+before heartbeat or output persistence can overwrite it. After its final
+checkpoint write, the live worker hands that attempt to deferred recovery.
+The run can settle while the worker clears its local credentials. Admission
+and physical detachment still wait for the worker to release the run.
+When ordinary recovery records the fence after restart, it leaves settlement
+to the observer immediately. Normal admission clears provider homes before reuse.
 
 The native marker advances to `ublk-rootless-v3` before a mounted disk is
 handed to execution. This reader accepts v1/v2 and upgrades only its marker;
 v2 controllers reject v3 rather than ignoring the cleanup quarantine.
-The manager stores the bounded cause in its existing last-error checkpoint field,
-so no new checkpoint schema is needed. A run
+The manager records a published failure in the checkpoint's existing last-error
+field. A deferred settlement also preserves the pending diagnostic and deadline
+in the checkpoint. Managers need support for that field to recover these
+checkpoints. A run
 interrupted before its first v3 mount has no new pending physical close state.
 No journal format change or automatic migration of disk content is introduced.
 The cleanup record is additive controller state and is removed only after verified

@@ -169,6 +169,10 @@ pub struct Run {
     pub snapshot: Option<RunSnapshot>,
     #[serde(default)]
     pub isolated: bool,
+    /// A completed chat can still be stopped while its native attempt closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub native_cleanup_pending: Option<bool>,
     #[serde(default)]
     pub workspaces: Vec<RunWorkspace>,
     #[serde(default)]

@@ -146,10 +146,14 @@ pub(super) struct Unsent {
 /// Latest timestamp attributable to the stopped turn's input. A message at a
 /// retained environment deadline already belongs to the next turn.
 pub(super) fn turn_end(db: &Db<'_>, run: &Value) -> Result<i64> {
-    let ended = run["cancelRequestedAt"]
-        .as_i64()
-        .or_else(|| run["finishedAt"].as_i64())
-        .unwrap_or(0);
+    let ended = [
+        run["cancelRequestedAt"].as_i64(),
+        run["finishedAt"].as_i64(),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(0);
     Ok(
         RunCheckpoint::retained_input_deadline_in(db, text(run, "id"))?
             .map_or(ended, |deadline| ended.min(deadline.saturating_sub(1))),
@@ -648,6 +652,7 @@ pub(super) fn launch_turn(
         // The expiry owner settles the last turn before a follow-up can use
         // this conversation again. Its poll may be behind the scheduler.
         if crate::environment_expiration::pending(db, run_id)?
+            || RunCheckpoint::awaiting_native_retirement_in(db, run_id)?
             || (run["status"] == RunStatus::Succeeded
                 && RunCheckpoint::held_deadline_elapsed_in(db, run_id, now())?)
         {

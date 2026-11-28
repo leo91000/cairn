@@ -4,6 +4,7 @@ import { ref, watch } from 'vue'
 import { previewSchedule } from '../../../../packages/contracts/generated/previewSchedule'
 import { api } from '../api'
 import { localDateTime, scheduledTimestamp } from '../schedule-time'
+import UiButton from './UiButton.vue'
 
 type ClockTrigger = Extract<HookRuleTrigger, { type: 'clock' }>
 

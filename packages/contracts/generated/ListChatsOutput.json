@@ -1821,6 +1821,13 @@
             "null"
           ]
         },
+        "nativeCleanupPending": {
+          "description": "A completed chat can still be stopped while its native attempt closes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "nativeMode": {
           "anyOf": [
             {

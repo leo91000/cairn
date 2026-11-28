@@ -193,7 +193,7 @@ fun RunScreen(
             live.error?.let { ErrorNotice(it) {} }
             run?.let { current ->
                 val headerActions: @Composable RowScope.() -> Unit = {
-                    if (current.active || waiting)
+                    if (current.stoppable || waiting)
                         ActionIcon("Arrêter", CairnIcons.Stop, !state.busy) { confirm = "cancel" }
                     Box {
                         ActionIcon("Options de l’exécution", CairnIcons.More) { menu = true }
@@ -525,7 +525,7 @@ fun RunScreen(
                 when {
                     action == "cancel" && waiting -> "La reprise programmée sera annulée."
                     action == "cancel" ->
-                        "Le processus s’arrêtera. Les fichiers et les effets déjà produits resteront en place."
+                        "La conversation sera mise en pause. Les fichiers et les effets déjà produits resteront en place."
                     else ->
                         "Le répertoire sera supprimé. La branche Git et l’historique restent disponibles. Le serveur refuse de supprimer un worktree contenant des changements."
                 },

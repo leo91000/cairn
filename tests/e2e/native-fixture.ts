@@ -80,6 +80,7 @@ export class NativeFixture {
     runs: (): any[] => this.call('runs'),
     addRun: (value: unknown) => this.call('addRun', value),
     updateRun: (id: string, patch: unknown) => this.call('updateRun', id, patch),
+    deferNativeCleanup: (id: string) => this.call('deferNativeCleanup', id),
     event: (id: string, type: string, text: string, payload?: unknown) => this.call('event', id, type, text, payload),
     seedEvents: (id: string, events: Pick<RunEvent, 'type' | 'text' | 'payload'>[]) => this.call('seedEvents', id, events),
     events: (id: string, after = 0, limit = 10000): RunEvent[] => this.call('events', id, after, limit),

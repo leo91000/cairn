@@ -1149,7 +1149,7 @@ internal fun ChatPage(
                                     },
                                 )
                                 chat?.let { current ->
-                                    if (active || current.wakeup != null) {
+                                    if (current.run?.stoppable == true || current.wakeup != null) {
                                         HorizontalDivider()
                                         DropdownMenuItem(
                                             text = {
@@ -2108,8 +2108,8 @@ internal fun ChatPage(
                                                 send("queue")
                                             }
                                         if (
-                                            (active || chat?.wakeup != null) &&
-                                                (!hasDraft || readOnly)
+                                            (chat?.run?.stoppable == true ||
+                                                chat?.wakeup != null) && (!hasDraft || readOnly)
                                         )
                                             RoundAction(
                                                 "Arrêter",

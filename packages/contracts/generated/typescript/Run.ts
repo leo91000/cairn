@@ -21,6 +21,10 @@ import type { RunWorkspace } from './RunWorkspace'
 export interface Run {
   snapshot: RunSnapshot | null
   isolated: boolean
+  /**
+   * A completed chat can still be stopped while its native attempt closes.
+   */
+  nativeCleanupPending?: boolean
   workspaces: Array<RunWorkspace>
   taskName: string
   agentName: string

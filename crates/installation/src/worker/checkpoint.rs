@@ -50,6 +50,12 @@ pub struct RunCheckpoint {
     /// A new turn was explicitly queued after this attempt's failure was shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) acknowledged_finalization_failure_attempt: Option<String>,
+    /// Retirement evidence for a fenced native attempt and its retained workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_native_cleanup: Option<crate::recovery::PendingNativeCleanup>,
+    /// Positive flush evidence persisted by the fence before the turn is settled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) native_flushed_attempt: Option<String>,
     /// A successful controller turn receipt, recorded before the run view is settled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) retained_completion: Option<RetainedCompletion>,
@@ -578,6 +584,39 @@ impl RunCheckpoint {
             && self.last_error().starts_with("Native cleanup: ")
     }
 
+    pub(crate) fn pending_native_cleanup(&self) -> Option<&crate::recovery::PendingNativeCleanup> {
+        let pending = self.pending_native_cleanup.as_ref()?;
+        (self.runner_id() == Some(pending.attempt.as_str())).then_some(pending)
+    }
+
+    pub(super) fn native_flush_confirmed(&self) -> bool {
+        self.runner_id()
+            .is_some_and(|attempt| self.native_flushed_attempt.as_deref() == Some(attempt))
+    }
+
+    /// Project the closing attempt without loading its workspace plan or provider progress.
+    pub(crate) fn finishing_native_turn_in(
+        db: &Db<'_>,
+        run_id: &str,
+        completing_chat: bool,
+    ) -> Result<bool> {
+        let finishing =
+            db.0.prepare_cached(
+                "SELECT COALESCE(json_extract(state,'$.pendingNativeCleanup.attempt') =
+                             json_extract(state,'$.runnerId'), 0)
+                 OR (?2 AND json_extract(state,'$.heldEnvironment') IS NULL
+                        AND json_extract(state,'$.prepared.backend')='native'
+                        AND json_extract(state,'$.settled.status')='succeeded')
+             FROM run_checkpoints WHERE run_id=?1",
+            )?
+            .query_row(params![run_id, completing_chat], |row| {
+                row.get::<_, Option<bool>>(0)
+            })
+            .optional()?
+            .flatten();
+        Ok(finishing.unwrap_or_default())
+    }
+
     pub fn finalization_error(&self) -> Option<&str> {
         if self.runner_id().is_some()
             && self.runner_id() == self.finalization_failure_attempt.as_deref()
@@ -626,13 +665,28 @@ impl RunCheckpoint {
             self.controller_observation = None;
         }
         self.finalization_failure_attempt = None;
+        self.pending_native_cleanup = None;
+        self.native_flushed_attempt = None;
     }
 
     pub fn acknowledge_finalization_observation(&mut self) {
         if let Some(attempt) = &self.finalization_failure_attempt {
             self.acknowledged_finalization_failure_attempt = Some(attempt.clone());
         }
+        let prior_cleanup = self.pending_native_cleanup.take().filter(|pending| {
+            pending.awaiting_retirement()
+                || pending.state == crate::recovery::DeferredCleanupState::Retired
+        });
         self.reset_finalization_observation();
+        self.pending_native_cleanup = prior_cleanup;
+    }
+
+    pub(crate) fn awaiting_native_retirement_in(db: &Db<'_>, run_id: &str) -> Result<bool> {
+        Ok(db.0.prepare_cached(
+            "SELECT 1 FROM run_checkpoints WHERE run_id=?
+              AND json_extract(state,'$.pendingNativeCleanup.attempt')=json_extract(state,'$.runnerId')
+              AND json_extract(state,'$.pendingNativeCleanup.state')='awaitingRetirement'",
+        )?.exists([run_id])?)
     }
 
     /// Publish the cleanup failure once the optional proof has settled.
@@ -1051,7 +1105,7 @@ impl Checkpoint {
             ));
         }
         *state = saved;
-        result
+        result.map(|_| ())
     }
 
     pub fn try_snapshot(&self) -> Option<RunCheckpoint> {

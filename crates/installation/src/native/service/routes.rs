@@ -190,8 +190,14 @@ pub(super) async fn route(controller: Controller, request: Request) -> Result<Re
         }
         ("DELETE", ["runs", id]) => {
             controller.stop_attempt(id).await?;
-            controller.stopped_result(id).await
+            let mut result = controller.stopped_result(id).await;
+            if crate::runner::client_cleanup_result(&result, id).is_some() {
+                result["NativeCleanup"]["cleanupStatusProtocol"] =
+                    crate::runner::NATIVE_CLEANUP_STATUS_PROTOCOL.into();
+            }
+            result
         }
+        ("GET", ["runs", id, "cleanup-status"]) => controller.cleanup_status(id).await?,
         ("POST", ["runs", id, "wait"]) => {
             uuid(id)?;
             let observe_retirement =

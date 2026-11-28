@@ -18,7 +18,7 @@ use cairn_contracts::EventKind;
 use cairn_contracts::RunState;
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
@@ -49,7 +49,7 @@ impl Worker {
             .collect::<HashSet<_>>();
         let provider_active = self.provider_active(&active).await;
         crate::chats::coding_agent::tick(s, &active).await?;
-        // Parked missions must release any pre-crash execution independently
+        // Parked turns must release any pre-crash execution independently
         // of their wakeup and of admission capacity for new processes.
         for state in s.store.read(|db| db.active_run_states()).await? {
             let run_id = state.id.as_str();
@@ -259,7 +259,16 @@ impl Worker {
                 cancel,
             )
             .await;
-            worker.active.lock().await.remove(&run_id);
+            {
+                let mut active = worker.active.lock().await;
+                worker
+                    .deferred_cleanup_observers
+                    .lock()
+                    .await
+                    .live_handoffs
+                    .remove(&run_id);
+                active.remove(&run_id);
+            }
             worker.held.lock().await.remove(&run_id);
             worker.job_redactions.lock().await.remove(&run_id);
             worker.notify();
@@ -345,6 +354,16 @@ async fn run_to_completion(
     // disk/database failure must not strand a running record or
     // launch a second process before the previous one is fenced.
     loop {
+        if s.worker
+            .deferred_cleanup_observers
+            .lock()
+            .await
+            .has_handoff(&run_id)
+        {
+            // The exact fenced checkpoint is already owned by deferred
+            // recovery. A later housekeeping error does not requeue it.
+            break;
+        }
         let result = match s.accounts.lease(s, &run_id).await {
             Ok(lease) => requeue_after_error(&s.store, &run_id, lease).await,
             Err(error) => Err(error),
@@ -456,8 +475,184 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
     Ok(false)
 }
 
+const MAX_DEFERRED_CLEANUP_OBSERVERS: usize = 16;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CleanupObservation {
+    run_id: String,
+    attempt: String,
+}
+
+#[derive(Default)]
+pub(super) struct DeferredCleanupObservers {
+    in_flight: HashSet<CleanupObservation>,
+    waiting: VecDeque<CleanupObservation>,
+    live_handoffs: HashMap<String, String>,
+}
+
+impl DeferredCleanupObservers {
+    pub(super) fn accept_handoff(&mut self, run_id: &str, attempt: &str) {
+        self.live_handoffs
+            .insert(run_id.to_owned(), attempt.to_owned());
+    }
+
+    pub(super) fn has_handoff(&self, run_id: &str) -> bool {
+        self.live_handoffs.contains_key(run_id)
+    }
+
+    fn admit(
+        &mut self,
+        candidates: Vec<(CleanupObservation, RunCheckpoint)>,
+    ) -> Vec<(CleanupObservation, RunCheckpoint)> {
+        let eligible: HashSet<_> = candidates.iter().map(|(key, _)| key).collect();
+        self.waiting
+            .retain(|key| eligible.contains(key) && !self.in_flight.contains(key));
+
+        let mut waiting: HashSet<_> = self.waiting.iter().cloned().collect();
+        for (key, _) in &candidates {
+            if !self.in_flight.contains(key) && waiting.insert(key.clone()) {
+                self.waiting.push_back(key.clone());
+            }
+        }
+
+        let slots = MAX_DEFERRED_CLEANUP_OBSERVERS.saturating_sub(self.in_flight.len());
+        let mut candidates: HashMap<_, _> = candidates.into_iter().collect();
+        let mut admitted = Vec::new();
+        for key in self.waiting.drain(..self.waiting.len().min(slots)) {
+            if let Some(saved) = candidates.remove(&key) {
+                self.in_flight.insert(key.clone());
+                admitted.push((key, saved));
+            }
+        }
+        admitted
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_observing(&self) -> bool {
+        !self.in_flight.is_empty()
+    }
+}
+
+/// Observe and settle durable fences independently of ordinary recovery RPCs.
+pub(super) async fn observe_native_cleanup(s: &Arc<Service>) -> Result<()> {
+    let (mut ready, mut completed) = s
+        .store
+        .read(|db| {
+            let mut ready = Vec::new();
+            let mut completed = Vec::new();
+            for run_id in db.native_cleanup_recovery_ids()? {
+                let Some(saved) = RunCheckpoint::load_in(db, &run_id)? else {
+                    continue;
+                };
+                let Some(pending) = saved.pending_native_cleanup() else {
+                    continue;
+                };
+                let expiring = crate::environment_expiration::pending(db, &run_id)?;
+                let Some(state) = db.run_state(&run_id)? else {
+                    continue;
+                };
+                if pending.awaiting_retirement() && state.status != RunStatus::Queued {
+                    let Some(chat) = db.conversation_for_run(&run_id)? else {
+                        continue;
+                    };
+                    if !db.has_pending_messages(&chat.id)? {
+                        continue;
+                    }
+                }
+                let key = CleanupObservation {
+                    run_id,
+                    attempt: pending.attempt.clone(),
+                };
+                if state.status == RunStatus::Succeeded
+                    && (expiring
+                        || state.cancel_requested_at.is_some()
+                        || !pending.needs_observation())
+                {
+                    completed.push((key, saved));
+                } else if !expiring
+                    && (pending.needs_observation() || pending.awaiting_retirement())
+                {
+                    ready.push((key, saved));
+                }
+            }
+            Ok((ready, completed))
+        })
+        .await?;
+    let admitted = {
+        // A live worker owns the checkpoint until its last write. Admission
+        // still sees the worker as active while it clears its local resources.
+        let active = s.worker.active.lock().await;
+        let mut observers = s.worker.deferred_cleanup_observers.lock().await;
+        let eligible = |key: &CleanupObservation| {
+            !active.contains_key(&key.run_id)
+                || observers.live_handoffs.get(&key.run_id) == Some(&key.attempt)
+        };
+        ready.retain(|(key, _)| eligible(key));
+        completed.retain(|(key, _)| eligible(key));
+        observers.admit(ready)
+    };
+    for (key, saved) in admitted {
+        let service = s.clone();
+        s.worker.spawn_recovery(async move {
+            let result = recovery::observe_pending_native_cleanup(&service, &key.run_id, saved).await;
+            service.worker.deferred_cleanup_observers.lock().await.in_flight.remove(&key);
+            if let Err(error) = result {
+                tracing::warn!(run_id = key.run_id, message = %error.message, "Native cleanup observation failed");
+            }
+        });
+    }
+    for (key, expected) in completed {
+        if let Err(error) = settle_native_cleanup(s, key.run_id.clone(), expected).await {
+            tracing::warn!(run_id = key.run_id, message = %error.message, "Native cleanup settlement failed");
+        }
+    }
+    Ok(())
+}
+
+/// Publish the outcome and revoke access without waiting for account I/O.
+/// Ordinary launch recovery clears old provider homes before they are reused.
+async fn settle_native_cleanup(s: &Service, id: String, expected: RunCheckpoint) -> Result<()> {
+    use crate::recovery::DeferredCleanupState;
+
+    let settled = s
+        .store
+        .transaction(move |db| {
+            let Some(mut current) = RunCheckpoint::load_in(db, &id)? else {
+                return Ok(false);
+            };
+            if !recovery::same_execution(Some(&current), Some(&expected))
+                || current.pending_native_cleanup() != expected.pending_native_cleanup()
+            {
+                return Ok(false);
+            }
+            if !db
+                .run_state(&id)?
+                .is_some_and(|run| run.recovery_pending && run.status == RunStatus::Succeeded)
+            {
+                return Ok(false);
+            }
+            if let Some(pending) = current.pending_native_cleanup()
+                && pending.state == DeferredCleanupState::Observing
+                && !pending.needs_observation()
+            {
+                let mut pending = pending.clone();
+                pending.state = DeferredCleanupState::Unconfirmed;
+                current.pending_native_cleanup = Some(pending);
+            }
+            db.revoke_mcp_run(&id)?;
+            db.remove_account_lease(&id)?;
+            finish_recovery(db, &id, Some(&current))?;
+            Ok(true)
+        })
+        .await?;
+    if settled {
+        s.worker.notify();
+    }
+    Ok(())
+}
+
 /// A lost controller must not delay unrelated sends while completed chats fence.
-pub(super) async fn recover_completed_environments(s: &Service) -> Result<()> {
+pub(super) async fn recover_completed_environments(s: &Arc<Service>) -> Result<()> {
     for id in s.store.read(|db| db.completed_recovery_ids()).await? {
         if s.shutdown.is_cancelled() {
             break;
@@ -475,10 +670,17 @@ pub(super) async fn recover_completed_environments(s: &Service) -> Result<()> {
             continue;
         }
         let run = s.store.run(&id).await?;
-        if run["recoveryPending"] == true && RunStatus::of(&run) == Some(RunStatus::Succeeded) {
-            recover_or_wait(s, &run).await?;
-            s.worker.notify();
+        if run["recoveryPending"] != true || RunStatus::of(&run) != Some(RunStatus::Succeeded) {
+            continue;
         }
+        if RunCheckpoint::load(&s.store, &id)
+            .await?
+            .is_some_and(|saved| saved.pending_native_cleanup().is_some())
+        {
+            continue;
+        }
+        recover_or_wait(s, &run).await?;
+        s.worker.notify();
     }
     Ok(())
 }
@@ -623,6 +825,16 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     let run_id = text(run, "id");
     let mut checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
     let initial_state = s.store.run_state(run_id).await?;
+    if initial_state.cancel_requested_at.is_none()
+        && checkpoint
+            .as_ref()
+            .and_then(RunCheckpoint::pending_native_cleanup)
+            .is_some_and(recovery::PendingNativeCleanup::awaiting_retirement)
+    {
+        return Err(Error::unavailable(
+            "Waiting for the previous native environment to finish cleanup.",
+        ));
+    }
     let parked = matches!(
         initial_state.status,
         RunStatus::Waiting | RunStatus::Succeeded
@@ -839,6 +1051,14 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         return Ok(false);
     }
     let fenced = recovery::fence_attempt(s, run, expected_checkpoint.as_ref()).await;
+    if matches!(
+        fenced,
+        Ok(recovery::FenceDisposition::DeferredNativeCleanup)
+    ) {
+        // The durable observer owns settlement. Ordinary recovery must not
+        // clear credentials or publish a wait reason after that handoff.
+        return Ok(false);
+    }
     let mut expected_fenced = expected_checkpoint.clone();
     if fenced.is_ok()
         && let Some(saved) = &mut expected_fenced
@@ -936,12 +1156,41 @@ fn recovery_observation_limit(deadline: Option<i64>) -> Duration {
     })
 }
 
+/// Settle the retiring native turn before detachment replaces its checkpoint.
+pub(crate) fn finish_native_cleanup_before_detach(
+    db: &Db<'_>,
+    run_id: &str,
+    saved: &RunCheckpoint,
+) -> Result<bool> {
+    let Some(run) = db.run_state(run_id)? else {
+        return Ok(false);
+    };
+    if !super::control::native_cleanup_pending_in(db, &run)?
+        || saved
+            .pending_native_cleanup()
+            .is_some_and(crate::recovery::PendingNativeCleanup::awaiting_retirement)
+    {
+        return Ok(false);
+    }
+    finish_recovery_in(db, run_id, Some(saved), true)?;
+    Ok(true)
+}
+
 /// Cancellation and the final recovery state commit together. In particular,
 /// a completed provider turn must never restore a wait cancellation removed.
 pub(super) fn finish_recovery(
     db: &Db<'_>,
     id: &str,
     checkpoint: Option<&RunCheckpoint>,
+) -> Result<bool> {
+    finish_recovery_in(db, id, checkpoint, false)
+}
+
+fn finish_recovery_in(
+    db: &Db<'_>,
+    id: &str,
+    checkpoint: Option<&RunCheckpoint>,
+    detaching: bool,
 ) -> Result<bool> {
     let record = db
         .run_record(id)?
@@ -959,13 +1208,71 @@ pub(super) fn finish_recovery(
             },
         )?;
     }
+    let expiring_native = record.native_cleanup_pending
+        && (detaching || crate::environment_expiration::pending(db, id)?);
+    let has_native_fence = checkpoint.is_some_and(|saved| saved.pending_native_cleanup().is_some());
     let observed_control_failure = if let Some(saved) = checkpoint {
         super::held::take_observed_control_failure(db, id, saved)?
     } else {
         None
     };
+    let cleanup_finished_at = checkpoint
+        .filter(|saved| expiring_native || has_native_fence || saved.native_cleanup_failure())
+        .and_then(RunCheckpoint::settled)
+        .filter(|settled| settled.status == RunStatus::Succeeded)
+        .and_then(|settled| settled.finished_at)
+        .or_else(|| current.finished_at.filter(|_| expiring_native));
+    let cleanup_failure = |message| {
+        let mut failure = Settled::failure(RunStatus::Failed, message);
+        // Messages queued after the completed turn still belong to the next turn.
+        failure.finished_at = cleanup_finished_at.or(failure.finished_at);
+        failure.run_changes()
+    };
+
+    let mut published = None;
+    if let Some(saved) = checkpoint
+        && let Some(pending) = saved.pending_native_cleanup()
+    {
+        use crate::recovery::DeferredCleanupState;
+
+        if pending.awaiting_retirement() && current.cancel_requested_at.is_none() {
+            return Ok(false);
+        }
+        let mut saved = saved.clone();
+        if current.cancel_requested_at.is_none()
+            && observed_control_failure.is_none()
+            && current.status == RunStatus::Succeeded
+            && current.recovery_pending
+        {
+            match pending.state {
+                DeferredCleanupState::Observing if !expiring_native => return Ok(false),
+                DeferredCleanupState::Observing | DeferredCleanupState::Unconfirmed => saved
+                    .record_controller_result(
+                        db,
+                        id,
+                        &pending.attempt,
+                        Some(pending.clone().failure()),
+                    )?,
+                DeferredCleanupState::Retired | DeferredCleanupState::AwaitingRetirement => {}
+            }
+        }
+        // Retain the fence across turn boundaries while this disk still needs
+        // retirement. A later turn can wait for proof without replaying this one.
+        saved.pending_native_cleanup =
+            (pending.state != DeferredCleanupState::Retired).then(|| {
+                let mut pending = pending.clone();
+                pending.state = DeferredCleanupState::AwaitingRetirement;
+                pending
+            });
+        saved.store_in(db, id)?;
+        published = Some(saved);
+    }
+    let checkpoint = published.as_ref().or(checkpoint);
     if current.cancel_requested_at.is_some() {
-        cancel_recovery(db, id, current)?;
+        let completed_at = (current.status == RunStatus::Succeeded && current.recovery_pending)
+            .then_some(current.finished_at)
+            .flatten();
+        cancel_recovery(db, id, current, cleanup_finished_at.or(completed_at))?;
         return Ok(false);
     }
     if let Some(checkpoint) = checkpoint {
@@ -976,9 +1283,8 @@ pub(super) fn finish_recovery(
             && checkpoint.runner_id() == checkpoint.finalization_failure_attempt.as_deref()
             && let Some(error) = checkpoint.finalization_error()
         {
-            let settled = Settled::failure(RunStatus::Failed, error);
             crate::chats::continuation::cancel_for_run(db, id)?;
-            db.change_run(id, settled.run_changes())?;
+            db.change_run(id, cleanup_failure(error))?;
             return Ok(false);
         }
         if let Some(message) = observed_control_failure
@@ -989,9 +1295,16 @@ pub(super) fn finish_recovery(
         {
             crate::chats::continuation::cancel_for_run(db, id)?;
             db.event(id, &EventKind::Error, &message, None)?;
+            db.change_run(id, cleanup_failure(&message))?;
+            return Ok(false);
+        }
+        if expiring_native && !has_native_fence && !checkpoint.native_flush_confirmed() {
+            crate::chats::continuation::cancel_for_run(db, id)?;
             db.change_run(
                 id,
-                Settled::failure(RunStatus::Failed, &message).run_changes(),
+                cleanup_failure(
+                    "Native disk cleanup could not be confirmed before the environment expired.",
+                ),
             )?;
             return Ok(false);
         }
@@ -1138,12 +1451,12 @@ pub(super) fn finish_recovery(
 
 /// Settles a recovering run whose cancellation was requested. One waiting for an automatic
 /// retry shows the stop in its conversation; a wait's own card already shows its cancellation.
-fn cancel_recovery(db: &Db<'_>, id: &str, run: &RunState) -> Result<()> {
+fn cancel_recovery(db: &Db<'_>, id: &str, run: &RunState, finished_at: Option<i64>) -> Result<()> {
     db.change_run(
         id,
         crate::runs::RunChanges {
             status: Some(RunStatus::Cancelled),
-            finished_at: Some(Some(now())),
+            finished_at: Some(Some(finished_at.unwrap_or_else(now))),
             account_wait_reason: Some(None),
             recovery_pending: Some(false),
             retry: Some(None),

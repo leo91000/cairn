@@ -1,6 +1,5 @@
 # Android 0.6.0 / web parity
 
-
 ## Programmations et Fil (ADR-0094)
 
 Web et Android ouvrent **Programmer un agent** depuis les Règles. Le formulaire
@@ -27,6 +26,16 @@ Les deux interfaces utilisent les mêmes opérations que le MCP public et
 reporte et marque lue une conversation pour le compte qui a autorisé son accès.
 Ces actions personnelles requièrent une délégation de compte dans
 `cairn_installation`.
+
+## Stop during native cleanup (ADR-0087)
+
+During a completed turn's deferred cleanup, web and Android keep Stop available
+in the chat composer and run view through the existing authorized actions.
+Android also presents its native confirmation from the conversation menu.
+Both apps use the retiring attempt's state while a different destination
+backend is selected.
+Stop pauses the conversation and retains messages written after the turn ended.
+Public MCP and `cairn_installation` use the same stop and cancellation actions.
 
 ## Signal Pur login and MCP OAuth consent (2026-11-26)
 

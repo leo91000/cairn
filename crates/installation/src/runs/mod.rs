@@ -184,6 +184,7 @@ pub(crate) struct RunRecord {
     pub boundary: Value,
     pub wakeup: Option<cairn_contracts::ChatWakeup>,
     pub placement: Box<crate::nodes::run_placement::RunPlacement>,
+    pub(crate) native_cleanup_pending: bool,
 }
 
 impl RunRecord {
@@ -204,6 +205,7 @@ impl RunRecord {
             .transpose()?
             .unwrap_or(Value::Null);
         value["wakeup"] = serde_json::to_value(self.wakeup)?;
+        value["nativeCleanupPending"] = self.native_cleanup_pending.into();
         Ok(value)
     }
 }
@@ -278,6 +280,7 @@ fn record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
     let boundary: String = row.get(30)?;
     Ok(RunRecord {
         wakeup: None,
+        native_cleanup_pending: false,
         state: state_row(row)?,
         placement: Box::new(crate::nodes::run_placement::row(row, 31)?),
         snapshot: row.get(29)?,
@@ -318,9 +321,26 @@ impl Db<'_> {
     pub(crate) fn completed_recovery_ids(&self) -> Result<Vec<String>> {
         Ok(self
             .0
-            .prepare_cached("SELECT id FROM runs WHERE status='succeeded' AND recovery_pending=1 ORDER BY created_at")?
+            .prepare_cached(
+                "SELECT id FROM runs WHERE status='succeeded' AND recovery_pending=1
+                 AND NOT EXISTS (SELECT 1 FROM run_checkpoints WHERE run_id=runs.id
+                   AND json_type(state,'$.pendingNativeCleanup')='object')
+                 ORDER BY created_at",
+            )?
             .query_map([], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(crate) fn native_cleanup_recovery_ids(&self) -> Result<Vec<String>> {
+        Ok(self.0.prepare_cached(
+            "SELECT runs.id FROM runs JOIN run_checkpoints ON run_checkpoints.run_id=runs.id
+             WHERE (status='succeeded' AND recovery_pending=1
+                      AND json_type(run_checkpoints.state,'$.pendingNativeCleanup')='object')
+                OR (json_extract(run_checkpoints.state,'$.pendingNativeCleanup.state')='awaitingRetirement'
+                      AND ((status='queued' AND recovery_pending=1 AND cancel_requested_at IS NULL)
+                           OR status IN ('failed','cancelled','interrupted')))
+             ORDER BY created_at",
+        )?.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
     }
 
     pub(crate) fn run_record(&self, id: &str) -> Result<Option<RunRecord>> {
@@ -343,6 +363,8 @@ impl Db<'_> {
             .optional()?;
         if let Some(record) = &mut record {
             record.wakeup = self.wakeup(false, id)?;
+            record.native_cleanup_pending =
+                crate::worker::control::native_cleanup_pending_in(self, &record.state)?;
         }
         Ok(record)
     }
@@ -351,7 +373,7 @@ impl Db<'_> {
     /// skill sources or other execution inputs in the snapshot. The turn's plan
     /// boundary stays, so plan decisions read the same values as the full run.
     pub(crate) fn conversation_run(&self, id: &str) -> Result<Option<Value>> {
-        Ok(self.json_rows(
+        let mut run = self.json_rows(
             "SELECT json_object(
                 'id',id, 'status',status, 'finishedAt',finished_at,
                 'sessionId',session_id, 'workspaceCleanedAt',workspace_cleaned_at,
@@ -374,7 +396,19 @@ impl Db<'_> {
                 )
              ) FROM runs WHERE id=?",
             [id],
-        )?.pop())
+        )?.pop();
+        if let Some(view) = &mut run {
+            let pending = if view["status"] == RunStatus::Succeeded
+                && view["recoveryPending"] == true
+                && let Some(state) = self.run_state(id)?
+            {
+                crate::worker::control::native_cleanup_pending_in(self, &state)?
+            } else {
+                false
+            };
+            view["nativeCleanupPending"] = pending.into();
+        }
+        Ok(run)
     }
 
     /// Structural authority checks need only this edge, not the frozen prompt,

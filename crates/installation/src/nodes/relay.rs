@@ -223,7 +223,7 @@ fn route(method: &str, path: &str) -> Result<()> {
             uuid(id)
                 && matches!(
                     (method, *operation),
-                    ("GET", "logs" | "administrative-pause")
+                    ("GET", "logs" | "administrative-pause" | "cleanup-status")
                         | ("POST", "wait")
                         | ("POST", "artifact" | "environment")
                 )
@@ -508,6 +508,48 @@ mod tests {
         assert!(route("GET", &format!("{pause}/extra")).is_err());
         stop.cancel();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn outbound_relay_reports_an_unsupported_native_route_as_unavailable() {
+        use axum::{Json, Router, http::StatusCode, routing::post};
+
+        let (replies, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/internal/nodes/reply",
+            post(move |Json(frame): Json<Value>| async move {
+                replies.send(frame).unwrap();
+                StatusCode::NO_CONTENT
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = url::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = reqwest::Client::new();
+        let master = Master {
+            client: &http,
+            controller: &http,
+            url: &url,
+            token: "test-node",
+        };
+        let command = json!({
+            "id": crate::config::id(), "method": "GET", "body": "",
+            "path": format!("/runs/{}/future-operation", crate::config::id()),
+        });
+        forward(
+            &master,
+            &url,
+            "test-controller",
+            &command,
+            &Arc::new(Executor::default()),
+        )
+        .await
+        .unwrap();
+        let reply = received.recv().await.unwrap();
+        assert_eq!(reply["status"], 503);
+        assert_eq!(reply["id"], command["id"]);
+        assert_eq!(reply["done"], true);
+        server.abort();
     }
 
     #[tokio::test]

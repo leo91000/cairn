@@ -13,6 +13,7 @@ mod retry;
 mod schedule;
 
 pub use control::routes;
+pub(crate) use schedule::finish_native_cleanup_before_detach;
 
 use crate::{
     config::now,
@@ -43,6 +44,7 @@ pub(crate) struct ResumeSelectionContext {
 pub struct Worker {
     pub active: Mutex<HashMap<String, CancellationToken>>,
     held: Mutex<std::collections::HashSet<String>>,
+    deferred_cleanup_observers: Mutex<schedule::DeferredCleanupObservers>,
     pub(crate) job_redactions: Mutex<HashMap<String, crate::accounts::output_redactions::History>>,
     tick_lock: Mutex<()>,
     preparation: Arc<Mutex<()>>,
@@ -64,6 +66,13 @@ struct Admission {
 }
 
 impl Worker {
+    pub(crate) async fn has_native_cleanup_handoff(&self, run_id: &str) -> bool {
+        self.deferred_cleanup_observers
+            .lock()
+            .await
+            .has_handoff(run_id)
+    }
+
     /// Keep durable conversation recovery alive until graceful shutdown completes.
     pub(crate) fn spawn_recovery(
         &self,
@@ -106,6 +115,7 @@ impl Worker {
         self.tasks.spawn(clean_conversations(s.clone()));
         self.tasks.spawn(detach_environments(s.clone()));
         self.tasks.spawn(retire_environments(s.clone()));
+        self.tasks.spawn(observe_native_cleanup(s.clone()));
         self.tasks.spawn(observe_background_jobs(s.clone()));
         self.tasks.spawn(self.clone().run_forever(s));
         Ok(())
@@ -423,6 +433,25 @@ async fn detach_environments(s: Arc<Service>) {
                     audit(&s.store, "environment.detachment_failed", json!({ "message": error.message })).await;
                 }
             },
+        }
+    }
+}
+
+async fn observe_native_cleanup(s: Arc<Service>) {
+    let mut timer = tokio::time::interval(Duration::from_secs(5));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = s.shutdown.cancelled() => return,
+            _ = timer.tick() => {},
+        }
+        tokio::select! {
+            () = s.shutdown.cancelled() => return,
+            result = schedule::observe_native_cleanup(&s) => {
+                if let Err(error) = result {
+                    tracing::warn!(error = %error, "Could not schedule native cleanup observations");
+                }
+            }
         }
     }
 }
