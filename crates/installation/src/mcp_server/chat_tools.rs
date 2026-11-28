@@ -111,9 +111,11 @@ fn readable(db: &Db<'_>, id: &str) -> Result<Value> {
     }))
 }
 
-fn detail(db: &Db<'_>, args: &Value) -> Result<Value> {
+fn detail(db: &Db<'_>, args: &Value, reader: Option<&str>) -> Result<Value> {
     use cairn_contracts::{ChatMessagePage, ChatMessagePreview, GetChatOutput};
-    let detail = readable(db, text(args, "chatId"))?;
+    let mut detail = readable(db, text(args, "chatId"))?;
+    crate::reads::Reads::load_for(db, reader)?
+        .chats(db, std::slice::from_mut(&mut detail["chat"]))?;
     let offset = args["offset"].as_u64().unwrap() as usize;
     let limit = args["limit"].as_u64().unwrap() as usize;
     let values = detail["messages"].as_array().unwrap();
@@ -403,7 +405,7 @@ pub(crate) async fn invoke(
                 authorize.authorize(db)?;
                 let result = match operation.as_str() {
                     "list_chats" => list(db, &args, reader.as_deref())?,
-                    "get_chat" => detail(db, &args)?,
+                    "get_chat" => detail(db, &args, reader.as_deref())?,
                     "read_chat_content" => content(db, &args)?,
                     "list_chat_side_questions" => {
                         let detail = chats::detail(db, text(&args, "chatId"))?;

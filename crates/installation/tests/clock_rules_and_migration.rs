@@ -1410,6 +1410,16 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .unwrap();
     assert_eq!(next_run, Some(t0 + 60_000));
     assert_eq!(legacy_depth, 8);
+    let limits: (u32, u32) = migrated
+        .query_row(
+            "SELECT json_extract(definition,'$.limits.triggeringsPerHour'),
+                    json_extract(definition,'$.limits.conversationsPerHour')
+             FROM hook_rule_versions WHERE rule_id=? AND version=1",
+            [&active_mission_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(limits, (100, 100));
     let failure: (String, String, i64, String) = migrated
         .query_row(
             "SELECT status,error,finished_at,json_extract(event,'$.payload.scheduledAt')
@@ -1685,7 +1695,8 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     );
     let ordinary_read: i64 = migrated
         .query_row(
-            "SELECT r.finished_at FROM account_reads r JOIN conversations c ON c.id=r.chat_id +             WHERE r.account_id='opened-acct' AND c.run_id=?1",
+            "SELECT r.finished_at FROM account_reads r JOIN conversations c ON c.id=r.chat_id
+             WHERE r.account_id='opened-acct' AND c.run_id=?1",
             [&unconverted_orphan_run],
             |row| row.get(0),
         )

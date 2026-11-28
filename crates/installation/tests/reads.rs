@@ -1005,6 +1005,21 @@ async fn conversation_snoozes_on_a_tool_stay_with_its_account() {
     )
     .await;
     assert!(find(&result(&exec_chats)["chats"], "id", chat_id)["snoozedUntil"].is_null());
+
+    let input = json!({ "chatId": chat_id });
+    let public_detail = tool(&app.router, "/mcp", &public, "get_chat", input.clone()).await;
+    assert_eq!(result(&public_detail)["chat"]["snoozedUntil"], until);
+    assert_eq!(result(&public_detail)["chat"]["readAt"], finished_at);
+    let exec_detail = tool(
+        &app.router,
+        "/mcp-installation",
+        &execution,
+        "get_chat",
+        input,
+    )
+    .await;
+    assert_eq!(result(&exec_detail)["chat"]["id"], chat_id);
+    assert!(result(&exec_detail)["chat"]["snoozedUntil"].is_null());
 }
 
 #[tokio::test]

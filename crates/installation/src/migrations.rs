@@ -345,6 +345,17 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 }
             };
 
+            // A five-field cron can run every minute. Keep recurring mission
+            // cadences under a finite rule budget with room for manual launches.
+            let limits = if cron.is_some() {
+                let cap = crate::rules::validation::MAX_CONVERSATIONS_PER_HOUR;
+                HookRuleLimits {
+                    triggerings_per_hour: cap,
+                    conversations_per_hour: cap,
+                }
+            } else {
+                HookRuleLimits::default()
+            };
             let definition = HookRuleDefinition {
                 name,
                 description: String::new(),
@@ -368,7 +379,7 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                     }],
                     otherwise: Vec::new(),
                 }],
-                limits: HookRuleLimits::default(),
+                limits,
             };
 
             let disabled = !mission.enabled || mission.archived || cron.is_none();
