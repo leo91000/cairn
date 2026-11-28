@@ -455,7 +455,8 @@ impl Execution<'_> {
     ) -> Result<Exit> {
         let attempt = output::Attempt {
             previously_launched: self.checkpoint.read(RunCheckpoint::launched).await,
-            managed_turn: workspace.env.contains_key("CAIRN_PROVIDER_TURN"),
+            managed_antigravity: self.provider == Provider::Antigravity
+                && workspace.env.contains_key("CAIRN_PROVIDER_TURN"),
         };
         workspace.authorization.recheck().await?;
         let mut child = Supervised::spawn(

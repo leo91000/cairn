@@ -1146,22 +1146,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retiring_an_environment_preserves_account_quota_and_usage_recovery() {
-        use crate::accounts::{Account, AccountState, Lease, usage::Usage};
+    async fn retiring_an_environment_preserves_account_quota_through_the_cooldown() {
+        use crate::accounts::{Account, AccountState, Lease};
         use crate::provider::Provider;
         use crate::worker::checkpoint::{Checkpoint, EventChanges};
 
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
         let run = id();
-        let mut account = Account::new(Provider::Codex, "Quota fixture", AccountState::Ready);
-        account.usage = Some(Usage::from_value(&json!({
-            "allowed": true, "checkedAt": now() - 1000,
-            "windows": [{ "id": "primary", "usedPercent": 99 }]
-        })));
+        let account = Account::new(Provider::Antigravity, "Quota fixture", AccountState::Ready);
         let lease = Lease {
             account_id: account.id.clone(),
-            provider: Provider::Codex,
+            provider: Provider::Antigravity,
             run_id: run.clone(),
             model: "fixture-model".into(),
             home: root.path().join("account"),
@@ -1189,7 +1185,7 @@ mod tests {
                 EventChanges {
                     run: None,
                     failure: Some(("Usage limit reached".into(), None, true)),
-                    managed_quota: true,
+                    antigravity_quota_refusal: true,
                     antigravity_probe_failed: false,
                     completed: false,
                     progress_complete: true,
@@ -1216,21 +1212,16 @@ mod tests {
                 next.run_id = id();
                 assert!(db.reserve_account_lease(&next).unwrap_err().is_conflict());
 
+                let driver = Provider::Antigravity.driver();
                 let mut account = db.coding_account(&next.account_id)?.unwrap();
-                account.usage = Some(Usage::from_value(&json!({
-                    "allowed": true, "checkedAt": account.exhausted.as_ref().unwrap().at + 1,
-                    "windows": [{ "id": "primary", "usedPercent": 100 }]
-                })));
-                crate::accounts::replenish(&mut account, Provider::Codex.driver());
+                assert!(account.usage.is_none());
+                crate::accounts::replenish(&mut account, driver);
                 assert!(account.exhausted.is_some());
-                db.save_coding_account(&account)?;
 
+                account.exhausted.as_mut().unwrap().at = now() - driver.fresh_for();
+                db.save_coding_account(&account)?;
                 let mut account = db.coding_account(&next.account_id)?.unwrap();
-                account.usage = Some(Usage::from_value(&json!({
-                    "allowed": true, "checkedAt": account.exhausted.as_ref().unwrap().at + 2,
-                    "windows": [{ "id": "primary", "usedPercent": 99 }]
-                })));
-                crate::accounts::replenish(&mut account, Provider::Codex.driver());
+                crate::accounts::replenish(&mut account, driver);
                 assert!(account.exhausted.is_none());
                 db.save_coding_account(&account)?;
                 // The other slot becomes usable even if the old controller
@@ -1276,7 +1267,7 @@ mod tests {
                     }),
                     completed: false,
                     failure: None,
-                    managed_quota: false,
+                    antigravity_quota_refusal: false,
                     antigravity_probe_failed: false,
                     progress_complete: true,
                     last_message: None,

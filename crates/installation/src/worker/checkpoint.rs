@@ -847,7 +847,7 @@ impl RunCheckpoint {
 pub struct EventChanges {
     pub run: Option<crate::runs::RunChanges>,
     pub failure: Option<(String, Option<crate::run_retry::Cause>, bool)>,
-    pub managed_quota: bool,
+    pub antigravity_quota_refusal: bool,
     pub antigravity_probe_failed: bool,
     pub completed: bool,
     pub progress_complete: bool,
@@ -1079,8 +1079,8 @@ impl Checkpoint {
         let failure = changes.failure.filter(|(_, _, provider)| {
             state.last_error().is_empty() || (*provider && !state.provider_failed())
         });
-        let managed_quota =
-            changes.managed_quota && failure.as_ref().is_some_and(|(_, _, provider)| *provider);
+        let antigravity_quota_refusal = changes.antigravity_quota_refusal
+            && failure.as_ref().is_some_and(|(_, _, provider)| *provider);
         let mut progress = state.progress.clone();
         let progress_changed = progress.as_mut().is_some_and(|progress| {
             if !changes.progress_complete {
@@ -1168,8 +1168,8 @@ impl Checkpoint {
                 if let Some(saved) = &saved {
                     saved.store_in(db, &id)?;
                 }
-                if managed_quota {
-                    db.exhaust_managed_account(&id)?;
+                if antigravity_quota_refusal {
+                    db.exhaust_managed_antigravity_account(&id)?;
                 }
                 db.event(&id, &kind, &text, Some(&payload))?;
                 Ok(saved)

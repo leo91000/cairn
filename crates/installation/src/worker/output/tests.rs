@@ -1688,7 +1688,8 @@ async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() 
 
     let mut f = Fixture::new().await;
     let s = &f.service;
-    let account_id = crate::accounts::broker::tests::add_account(s, Provider::Codex, "Quota").await;
+    let account_id =
+        crate::accounts::broker::tests::add_account(s, Provider::Antigravity, "Quota").await;
     let mut account = s.accounts.account(s, &account_id).await.unwrap();
     account.usage = Some(Usage::from_value(&json!({
         "allowed": true, "windows": [{ "id": "primary", "usedPercent": 99 }],
@@ -1696,7 +1697,7 @@ async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() 
     s.store.save_coding_account(&account).await.unwrap();
     let lease = crate::accounts::Lease {
         account_id: account_id.clone(),
-        provider: Provider::Codex,
+        provider: Provider::Antigravity,
         run_id: f.id.clone(),
         model: "fixture-model".into(),
         home: s.config.home.join("quota-fixture"),
@@ -1730,7 +1731,7 @@ async fn managed_quota_frame_can_publish_while_account_refresh_holds_its_lock() 
             &event,
             &f.checkpoint,
             Attempt {
-                managed_turn: true,
+                managed_antigravity: true,
                 ..Attempt::default()
             },
             &[],

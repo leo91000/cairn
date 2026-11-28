@@ -31,7 +31,7 @@ pub(super) struct Output {
 #[derive(Clone, Copy, Default)]
 pub(super) struct Attempt {
     pub previously_launched: bool,
-    pub managed_turn: bool,
+    pub managed_antigravity: bool,
 }
 
 impl Output {
@@ -438,7 +438,7 @@ pub(super) async fn record(
             &stored,
             checkpoint,
             secrets,
-            attempt.managed_turn && exhausted,
+            attempt.managed_antigravity && exhausted,
         )
         .await?;
     }
@@ -550,7 +550,7 @@ async fn store_event(
     stored: &Value,
     checkpoint: &Checkpoint,
     secrets: &[String],
-    managed_quota: bool,
+    antigravity_quota_refusal: bool,
 ) -> Result<()> {
     let value = stored["item"]
         .get("text")
@@ -628,7 +628,7 @@ async fn store_event(
             EventChanges {
                 run: changed.then_some(changes),
                 failure: failure.map(|(message, cause)| (message, cause, provider_failure)),
-                managed_quota: managed_quota && provider_failure,
+                antigravity_quota_refusal: antigravity_quota_refusal && provider_failure,
                 antigravity_probe_failed,
                 completed,
                 progress_complete: super::progress::same_semantics(event, stored),

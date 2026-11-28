@@ -263,17 +263,20 @@ impl Db<'_> {
     }
 
     pub fn save_coding_account(&self, a: &Account) -> Result<()> {
-        // A worker can record a terminal quota refusal while a refresh holds
-        // an account snapshot across provider I/O. Saving that snapshot may
-        // update current usage, but only its observed exhaustion is mutable.
-        let stored_exhaustion_at = self
-            .0
-            .prepare_cached("SELECT at FROM account_exhaustion WHERE account_id=?")?
-            .query_row([&a.id], |row| row.get::<_, i64>(0))
-            .optional()?;
-        let write_exhaustion = a
-            .loaded_exhaustion_at
-            .is_none_or(|observed| observed == stored_exhaustion_at);
+        // A managed Antigravity turn can record exhaustion while a refresh
+        // holds an account snapshot across provider I/O. The refresh still
+        // saves current usage, but can only replace the exhaustion it observed.
+        let mut write_exhaustion = true;
+        if a.provider == Provider::Antigravity
+            && let Some(observed) = a.loaded_exhaustion_at
+        {
+            let stored = self
+                .0
+                .prepare_cached("SELECT at FROM account_exhaustion WHERE account_id=?")?
+                .query_row([&a.id], |row| row.get::<_, i64>(0))
+                .optional()?;
+            write_exhaustion = observed == stored;
+        }
         let state = match a.state {
             AccountState::Pending => "pending",
             AccountState::Ready => "ready",
@@ -349,28 +352,33 @@ impl Db<'_> {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Bind a managed provider's terminal quota refusal to the active lease in
-    /// the same transaction that records its authenticated output.
-    pub(crate) fn exhaust_managed_account(&self, run_id: &str) -> Result<()> {
+    /// Record the quota refusal against its Antigravity lease in the
+    /// transaction publishing the managed turn's authenticated output.
+    pub(crate) fn exhaust_managed_antigravity_account(&self, run_id: &str) -> Result<()> {
         let lease = self
             .0
             .prepare_cached(
-                "SELECT run_id,account_id,provider,model,home FROM account_leases WHERE run_id=?",
+                "SELECT account_id,model FROM account_leases WHERE run_id=? AND provider='antigravity'",
             )?
-            .query_row([run_id], lease_row)
+            .query_row([run_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .optional()?;
-        if let Some(lease) = lease {
-            self.exhaust_coding_account(&lease.account_id, &lease.model)?;
+        if let Some((account_id, model)) = lease {
+            self.exhaust_coding_account(&account_id, &model)?;
         }
         Ok(())
     }
 
     pub(crate) fn exhaust_coding_account(&self, id: &str, model: &str) -> Result<()> {
         let mut account = crate::error::required(self.coding_account(id)?, "Account not found.")?;
-        let at = account
-            .exhausted
-            .as_ref()
-            .map_or_else(now, |old| now().max(old.at.saturating_add(1)));
+        let mut at = now();
+        if account.provider == Provider::Antigravity
+            && let Some(prior) = &account.exhausted
+        {
+            // Concurrent snapshots must distinguish even same-millisecond refusals.
+            at = at.max(prior.at.saturating_add(1));
+        }
         account.exhausted = Some(Exhaustion {
             at,
             model: model.to_owned(),
