@@ -1059,9 +1059,12 @@ impl Execution<'_> {
         }
 
         if let Some(session) = session.as_ref()
-            && self.may_switch_account(&exit)
+            && let Some(account) = self.exhausted_account(&exit)
         {
             if has_live_environment(&saved, self.retained, &workspace.env) {
+                s.accounts
+                    .exhausted(s, &account.account_id, &account.model)
+                    .await?;
                 // A failed provider turn must not implicitly replay jobs or
                 // resume a controller that account rotation would fence.
                 // A conversation continues with its next message (ADR-0091); a mission is resumed.

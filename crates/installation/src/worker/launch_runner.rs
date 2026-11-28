@@ -678,12 +678,11 @@ impl Execution<'_> {
         Ok(())
     }
 
-    pub(super) fn may_switch_account(&self, exit: &Exit) -> bool {
-        exit.exhausted
-            && exit.code != Some(0)
-            && self.account.is_some()
-            && !self.stopping()
-            && !exit.timed_out
+    pub(super) fn exhausted_account(&self, exit: &Exit) -> Option<&Lease> {
+        if !exit.exhausted || exit.code == Some(0) || self.stopping() || exit.timed_out {
+            return None;
+        }
+        self.account.as_ref()
     }
 
     /// Parks the exhausted account and waits for another one to continue the session.
