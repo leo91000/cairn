@@ -94,7 +94,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let root = TempDir::new().unwrap();
-        crate::common::managed_codex_home(&root.path().join("home"));
+        std::fs::create_dir(root.path().join("home")).unwrap();
         let service = Service::new(Config {
             data_dir: root.path().join("data"),
             home: root.path().join("home"),
@@ -114,24 +114,28 @@ impl Fixture {
         })
         .await
         .unwrap();
-        let chat = service
+        let mut chat = service
             .chat_create(json!({ "agentId": MAIN_AGENT_ID }))
             .await
             .unwrap();
         let chat_id = text(&chat, "id").to_owned();
+        let id = crate::config::id();
+        chat["runId"] = id.clone().into();
+        let record = json!({
+            "id": id,
+            "taskId": chat_id,
+            "status": "queued",
+            "trigger": "chat",
+            "snapshot": { "task": { "id": chat_id, "prompt": "Fixture only" } },
+        });
         service
-            .chat_send(
-                &chat_id,
-                json!({ "id": crate::config::id(), "text": "Fixture only" }),
-            )
+            .store
+            .transaction(move |db| {
+                db.add_run_fixture(&record, None)?;
+                db.save_conversation_boundary(&chat)
+            })
             .await
             .unwrap();
-        service
-            .chat_tick(&std::collections::HashSet::new())
-            .await
-            .unwrap();
-        let detail = service.chat_detail(&chat_id).await.unwrap();
-        let id = text(&detail, "runId").to_owned();
         let checkpoint = Checkpoint::new(
             service.store.clone(),
             id.clone(),
@@ -152,7 +156,17 @@ impl Fixture {
     async fn bind_progress(&self) {
         self.service
             .store
-            .update_run_boundary(&self.id, json!({ "missionTurnId": "progress-turn" }))
+            .update_run_boundary(
+                &self.id,
+                json!({
+                    "chatExecution": {
+                        "messageId": "progress-turn",
+                        "text": "Fixture only",
+                        "attachments": [],
+                        "recovery": false,
+                    },
+                }),
+            )
             .await
             .unwrap();
         self.checkpoint

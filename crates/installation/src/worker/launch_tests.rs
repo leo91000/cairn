@@ -129,8 +129,8 @@ async fn ready_job_wakeup_prevents_idle_close_before_scheduler_adoption() {
     service.store.transaction({
         let id = id.clone();
         move |db| {
-            db.change_run(&id, crate::runs::RunChanges { status: Some(RunStatus::Waiting), ..Default::default() })?;
-            db.save_wakeup(false, &id, Some(&serde_json::from_value(json!({
+            db.change_run(&id, crate::runs::RunChanges { status: Some(RunStatus::Succeeded), ..Default::default() })?;
+            db.save_wakeup(true, &id, Some(&serde_json::from_value(json!({
                 "id":"wake","messageId":null,"reason":"job","seconds":60,
                 "createdAt":now(),"wakeAt":now()+60_000,
                 "condition":{"type":"job_finished","jobId":"77d595dc-97b7-4c13-923d-e163baf49ea8"}
@@ -177,7 +177,7 @@ async fn ready_job_wakeup_prevents_idle_close_before_scheduler_adoption() {
     assert!(checkpoint.snapshot().await.held_environment.is_some());
     service
         .store
-        .write(move |db| db.save_wakeup(false, &id, None))
+        .write(move |db| db.save_wakeup(true, &id, None))
         .await
         .unwrap();
     checkpoint
