@@ -85,6 +85,7 @@ struct Fixture {
     _root: TempDir,
     service: Arc<Service>,
     id: String,
+    chat_id: String,
     checkpoint: Checkpoint,
     activity: Activity,
     log_total: usize,
@@ -93,7 +94,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let root = TempDir::new().unwrap();
-        std::fs::create_dir(root.path().join("home")).unwrap();
+        crate::common::managed_codex_home(&root.path().join("home"));
         let service = Service::new(Config {
             data_dir: root.path().join("data"),
             home: root.path().join("home"),
@@ -119,7 +120,10 @@ impl Fixture {
             .unwrap();
         let chat_id = text(&chat, "id").to_owned();
         service
-            .chat_send(&chat_id, json!({ "text": "Fixture only" }))
+            .chat_send(
+                &chat_id,
+                json!({ "id": crate::config::id(), "text": "Fixture only" }),
+            )
             .await
             .unwrap();
         service
@@ -138,6 +142,7 @@ impl Fixture {
             _root: root,
             service,
             id,
+            chat_id,
             checkpoint,
             activity,
             log_total: 0,
@@ -983,19 +988,6 @@ async fn oversized_tool_frames_are_recorded_without_losing_the_following_event()
     assert_eq!(fixture.log_total, 0);
 }
 
-async fn question_chat(fixture: &Fixture) -> String {
-    let mut chat = fixture.service.chat_create(json!({})).await.unwrap();
-    chat["runId"] = fixture.id.clone().into();
-    let id = text(&chat, "id").to_owned();
-    fixture
-        .service
-        .store
-        .save_conversation_boundary(chat)
-        .await
-        .unwrap();
-    id
-}
-
 fn question_event(id: &str, blocking: bool) -> Value {
     json!({
         "type": "chat.question",
@@ -1016,7 +1008,7 @@ async fn native_completion_closes_side_admission_before_worker_finalization() {
         "runner.failed",
     ] {
         let mut fixture = Fixture::new().await;
-        let chat = question_chat(&fixture).await;
+        let chat = fixture.chat_id.clone();
         let run = fixture.id.clone();
         fixture
             .service
@@ -1152,7 +1144,7 @@ async fn native_completion_closes_side_admission_before_worker_finalization() {
 async fn side_answers_are_stored_redacted() {
     for collision in ["unrelated-secret", "answered", "a1b2c3d4"] {
         let mut fixture = Fixture::new().await;
-        let chat = question_chat(&fixture).await;
+        let chat = fixture.chat_id.clone();
         let (run, key) = (fixture.id.clone(), format!("chat-side-question:{chat}:"));
         let (answered, failed) = (
             "a1b2c3d4-0000-4000-8000-000000000001",
@@ -1248,7 +1240,7 @@ async fn side_answers_are_stored_redacted() {
 async fn common_questions_survive_native_closures_without_becoming_answers() {
     for blocking in [false, true] {
         let mut fixture = Fixture::new().await;
-        let chat = question_chat(&fixture).await;
+        let chat = fixture.chat_id.clone();
         let question = "a".repeat(64);
         fixture.event(question_event(&question, blocking)).await;
         assert_eq!(
@@ -1309,7 +1301,7 @@ async fn a_completed_outcome_retires_questions_but_blocked_and_old_reports_do_no
         ("completed", "previous", 1),
     ] {
         let mut fixture = Fixture::new().await;
-        let chat = question_chat(&fixture).await;
+        let chat = fixture.chat_id.clone();
         fixture
             .service
             .store
@@ -1341,7 +1333,7 @@ async fn a_completed_outcome_retires_questions_but_blocked_and_old_reports_do_no
 #[tokio::test]
 async fn releasing_a_session_preserves_common_questions_and_answers_in_delivery() {
     let mut fixture = Fixture::new().await;
-    let chat = question_chat(&fixture).await;
+    let chat = fixture.chat_id.clone();
     let pending = "a".repeat(64);
     let answering = "b".repeat(64);
     fixture

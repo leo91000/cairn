@@ -29,7 +29,13 @@ async fn preparation_fixture(root: &Path) -> (Arc<Service>, Value) {
     });
     let run = service
         .store
-        .transaction(move |db| db.add_run_fixture(&record, None))
+        .transaction(move |db| {
+            let run = db.add_run_fixture(&record, None)?;
+            db.save_conversation_boundary(
+                &json!({ "id": record["taskId"], "runId": record["id"] }),
+            )?;
+            Ok(run)
+        })
         .await
         .unwrap();
     (service, run)

@@ -797,10 +797,9 @@ mod tests {
                 "{provider}"
             );
             assert!(!instructions.contains("Check the deployment."));
-            assert_eq!(
-                chat["execution"]["text"],
-                "Task brief:\nCheck the deployment."
-            );
+            let execution = text(&chat["execution"], "text");
+            assert!(execution.contains("Effective node mode: Native protected."));
+            assert!(execution.ends_with("Task brief:\nCheck the deployment."));
         }
     }
 

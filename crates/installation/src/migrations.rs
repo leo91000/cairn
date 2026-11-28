@@ -72,6 +72,37 @@ struct LegacyRun {
     checkpoint: Option<String>,
 }
 
+fn legacy_run_batch(tx: &Connection, cursor: &(i64, String)) -> Result<Vec<LegacyRun>> {
+    let mut stmt = tx.prepare_cached(
+        "SELECT r.id,r.task_id,r.project_id,r.created_at,r.started_at,r.finished_at,\
+             r.task_name,r.agent_name,r.snapshot,r.boundary,r.status,r.session_id,k.state \
+             FROM runs r LEFT JOIN run_checkpoints k ON k.run_id=r.id \
+             WHERE (r.created_at,r.id)>(?1,?2) AND r.trigger!='chat' \
+             AND NOT EXISTS(SELECT 1 FROM conversations c WHERE c.run_id=r.id) \
+             ORDER BY r.created_at ASC, r.id ASC LIMIT 32",
+    )?;
+    let rows = stmt
+        .query_map(params![cursor.0, cursor.1], |r| {
+            Ok(LegacyRun {
+                id: r.get(0)?,
+                task_id: r.get(1)?,
+                project_id: r.get(2)?,
+                created_at: r.get(3)?,
+                started_at: r.get(4)?,
+                finished_at: r.get(5)?,
+                task_name: r.get(6)?,
+                agent_name: r.get(7)?,
+                snapshot: r.get(8)?,
+                boundary: r.get(9)?,
+                status: r.get(10)?,
+                session_id: r.get(11)?,
+                checkpoint: r.get(12)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 fn table_exists(tx: &Connection, name: &str) -> rusqlite::Result<bool> {
     tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
@@ -412,93 +443,71 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
         }
     }
 
-    // Migrate every non-chat run that is not already linked to a conversation into a conversation
-    // whose origin is its migrated rule (ADR-0094).
-    let legacy_runs = {
-        let mut stmt = tx.prepare(
-            "SELECT r.id,r.task_id,r.project_id,r.created_at,r.started_at,r.finished_at,\
-             r.task_name,r.agent_name,r.snapshot,r.boundary,r.status,r.session_id,k.state \
-             FROM runs r LEFT JOIN run_checkpoints k ON k.run_id=r.id \
-             WHERE r.trigger!='chat' AND NOT EXISTS(SELECT 1 FROM conversations c WHERE c.run_id=r.id) \
-             ORDER BY r.created_at ASC, r.id ASC",
-        )?;
-        stmt.query_map([], |r| {
-            Ok(LegacyRun {
-                id: r.get(0)?,
-                task_id: r.get(1)?,
-                project_id: r.get(2)?,
-                created_at: r.get(3)?,
-                started_at: r.get(4)?,
-                finished_at: r.get(5)?,
-                task_name: r.get(6)?,
-                agent_name: r.get(7)?,
-                snapshot: r.get(8)?,
-                boundary: r.get(9)?,
-                status: r.get(10)?,
-                session_id: r.get(11)?,
-                checkpoint: r.get(12)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-
-    // Track migrated chats per legacy mission id for read-mark and dismissal migration.
+    // Read full snapshots in bounded batches. Only the small read-mark and
+    // dismissal mapping survives a batch.
     let mut migrated_chats_by_mission: HashMap<String, Vec<MigratedRun>> = HashMap::new();
 
-    for run in legacy_runs {
-        let snapshot: Value = run
-            .snapshot
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or(Value::Null);
-        let meta = mission_meta.get(&run.task_id);
-        let agent_id = snapshot["agent"]["id"]
-            .as_str()
-            .map(str::to_owned)
-            .or_else(|| meta.map(|m| m.agent.clone()))
-            .unwrap_or_default();
-        if agent_id.is_empty() {
-            continue;
+    let mut cursor = (i64::MIN, String::new());
+    loop {
+        let runs = legacy_run_batch(&tx, &cursor)?;
+        if runs.is_empty() {
+            break;
         }
-        let agent_name = if !run.agent_name.is_empty() {
-            Some(run.agent_name.clone())
-        } else {
-            snapshot["agent"]["name"].as_str().map(str::to_owned)
-        };
-        let project_name = snapshot["project"]["name"].as_str().map(str::to_owned);
-        let live_agent_id: Option<String> = tx
-            .query_row("SELECT id FROM agents WHERE id=?", [&agent_id], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        let live_project_id: Option<String> = match &run.project_id {
-            Some(pid) => tx
-                .query_row("SELECT id FROM projects WHERE id=?", [pid], |r| r.get(0))
-                .optional()?,
-            None => None,
-        };
-        let title = if !run.task_name.trim().is_empty() {
-            run.task_name.clone()
-        } else if let Some(m) = meta {
-            m.name.clone()
-        } else {
-            "Migrated run".to_owned()
-        };
-        let chat_id = id();
-        let slug = slug_for_migrated_chat(&tx, &chat_id)?;
-        let updated_at = run.finished_at.or(run.started_at).unwrap_or(run.created_at);
-        let rev = id();
-        let boundary: Value = serde_json::from_str(&run.boundary)?;
-        let parked = !matches!(run.status.as_str(), "queued" | "running");
-        let expired = parked && boundary["environmentState"] == "expired";
-        let expired_at = expired
-            .then(|| boundary["environmentExpiredAt"].as_i64())
-            .flatten();
-        let retirement = boundary["environmentRetirementId"]
-            .as_str()
-            .filter(|_| expired);
+        for run in runs {
+            cursor = (run.created_at, run.id.clone());
+            let snapshot: Value = run
+                .snapshot
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(Value::Null);
+            let meta = mission_meta.get(&run.task_id);
+            let agent_id = snapshot["agent"]["id"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| meta.map(|m| m.agent.clone()))
+                .unwrap_or_default();
+            if agent_id.is_empty() {
+                continue;
+            }
+            let agent_name = if !run.agent_name.is_empty() {
+                Some(run.agent_name.clone())
+            } else {
+                snapshot["agent"]["name"].as_str().map(str::to_owned)
+            };
+            let project_name = snapshot["project"]["name"].as_str().map(str::to_owned);
+            let live_agent_id: Option<String> = tx
+                .query_row("SELECT id FROM agents WHERE id=?", [&agent_id], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            let live_project_id: Option<String> = match &run.project_id {
+                Some(pid) => tx
+                    .query_row("SELECT id FROM projects WHERE id=?", [pid], |r| r.get(0))
+                    .optional()?,
+                None => None,
+            };
+            let title = if !run.task_name.trim().is_empty() {
+                run.task_name.clone()
+            } else if let Some(m) = meta {
+                m.name.clone()
+            } else {
+                "Migrated run".to_owned()
+            };
+            let chat_id = id();
+            let slug = slug_for_migrated_chat(&tx, &chat_id)?;
+            let updated_at = run.finished_at.or(run.started_at).unwrap_or(run.created_at);
+            let rev = id();
+            let boundary: Value = serde_json::from_str(&run.boundary)?;
+            let parked = !matches!(run.status.as_str(), "queued" | "running");
+            let expired = parked && boundary["environmentState"] == "expired";
+            let expired_at = expired
+                .then(|| boundary["environmentExpiredAt"].as_i64())
+                .flatten();
+            let retirement = boundary["environmentRetirementId"]
+                .as_str()
+                .filter(|_| expired);
 
-        tx.execute(
+            tx.execute(
             "INSERT INTO conversations(\
              id,slug,title,agent_id,live_agent_id,project_id,live_project_id,run_id,\
              paused,lifecycle,created_at,updated_at,last_activity_at,revision,\
@@ -532,19 +541,19 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             ],
         )?;
 
-        let rule_name = meta.map_or_else(|| title.clone(), |m| m.name.clone());
-        let creator_account_id = meta
-            .map(|m| m.creator.clone())
-            .or_else(|| known_owner.clone())
-            .unwrap_or_else(|| "owner".to_owned());
-        let rule_id = meta.map_or(run.task_id.as_str(), |mission| mission.rule_id.as_str());
-        let origin_json = json!({
-            "hook": "clock",
-            "ruleName": rule_name,
-            "schedule": true,
-        })
-        .to_string();
-        tx.execute(
+            let rule_name = meta.map_or_else(|| title.clone(), |m| m.name.clone());
+            let creator_account_id = meta
+                .map(|m| m.creator.clone())
+                .or_else(|| known_owner.clone())
+                .unwrap_or_else(|| "owner".to_owned());
+            let rule_id = meta.map_or(run.task_id.as_str(), |mission| mission.rule_id.as_str());
+            let origin_json = json!({
+                "hook": "clock",
+                "ruleName": rule_name,
+                "schedule": true,
+            })
+            .to_string();
+            tx.execute(
             "INSERT INTO hook_rule_conversations(\
              chat_id,creator_account_id,key,agent_id,rule_id,author,origin,run_id,cursor,watch,created_at\
             ) VALUES(?1,?2,NULL,?3,?4,NULL,?5,?6,0,'{}',?7)",
@@ -559,66 +568,66 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
             ],
         )?;
 
-        // Record as rule-started in conversation_writers so ADR-0075 treats it as rule-originated.
-        tx.execute(
-            "INSERT OR IGNORE INTO conversation_writers(\
+            // Record as rule-started in conversation_writers so ADR-0075 treats it as rule-originated.
+            tx.execute(
+                "INSERT OR IGNORE INTO conversation_writers(\
              chat_id,account_id,agent_id,plugin_instructions,created_at,instruction_tainted,\
              reached_at,reached_by,reached_account_id,reached_rule_id\
             ) VALUES(?1,NULL,?2,'',?3,0,?3,'rule',NULL,?4)",
-            params![chat_id, agent_id, run.created_at, rule_id],
-        )?;
+                params![chat_id, agent_id, run.created_at, rule_id],
+            )?;
 
-        let legacy_wait: Option<Option<String>> = tx
-            .query_row(
-                "SELECT message_id FROM durable_wakeups WHERE mission_run_id=?",
-                [&run.id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let turn = legacy_wait
-            .as_ref()
-            .and_then(|message| message.as_deref())
-            .or_else(|| boundary["missionTurnId"].as_str())
-            .unwrap_or(&run.id);
-        let brief = snapshot["task"]["prompt"]
-            .as_str()
-            .or_else(|| meta.map(|mission| mission.brief.as_str()))
-            .unwrap_or(&title);
-        let checkpoint: Value = run
-            .checkpoint
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()?
-            .unwrap_or_default();
-        let launched = checkpoint["turnPending"] != true
-            && (checkpoint["launched"] == true
-                || checkpoint["launchedTurn"].is_string()
-                || (run.started_at.is_some() && run.session_id.is_some()));
-        let recovery = launched && run.status != "succeeded";
-        let text = boundary["waitContinuation"]["reason"].as_str().map_or_else(
-            || {
-                if recovery {
-                    crate::run_output::RESUME_PROMPT.to_owned()
-                } else {
-                    format!("Task brief:\n{brief}")
-                }
-            },
-            |reason| {
-                let observation = boundary["waitContinuation"]
-                    .get("observation")
-                    .filter(|data| !data.is_null());
-                crate::chats::continuation::resume_prompt(reason, observation)
-            },
-        );
-        let execution = json!({
-            "messageId": turn,
-            "text": text,
-            "attachments": [],
-            "recovery": recovery,
-        });
-        // Older mission processes used the saved turn id without a conversation
-        // message. Preserve that id in the conversation, wakeup and checkpoint.
-        tx.execute(
+            let legacy_wait: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT message_id FROM durable_wakeups WHERE mission_run_id=?",
+                    [&run.id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let turn = legacy_wait
+                .as_ref()
+                .and_then(|message| message.as_deref())
+                .or_else(|| boundary["missionTurnId"].as_str())
+                .unwrap_or(&run.id);
+            let brief = snapshot["task"]["prompt"]
+                .as_str()
+                .or_else(|| meta.map(|mission| mission.brief.as_str()))
+                .unwrap_or(&title);
+            let checkpoint: Value = run
+                .checkpoint
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?
+                .unwrap_or_default();
+            let launched = checkpoint["turnPending"] != true
+                && (checkpoint["launched"] == true
+                    || checkpoint["launchedTurn"].is_string()
+                    || (run.started_at.is_some() && run.session_id.is_some()));
+            let recovery = launched && run.status != "succeeded";
+            let text = boundary["waitContinuation"]["reason"].as_str().map_or_else(
+                || {
+                    if recovery {
+                        crate::run_output::RESUME_PROMPT.to_owned()
+                    } else {
+                        format!("Task brief:\n{brief}")
+                    }
+                },
+                |reason| {
+                    let observation = boundary["waitContinuation"]
+                        .get("observation")
+                        .filter(|data| !data.is_null());
+                    crate::chats::continuation::resume_prompt(reason, observation)
+                },
+            );
+            let execution = json!({
+                "messageId": turn,
+                "text": text,
+                "attachments": [],
+                "recovery": recovery,
+            });
+            // Older mission processes used the saved turn id without a conversation
+            // message. Preserve that id in the conversation, wakeup and checkpoint.
+            tx.execute(
             "UPDATE runs SET task_id=?1,trigger='chat', \
              status=CASE WHEN status='waiting' AND ?2 THEN 'succeeded' ELSE status END, \
              finished_at=CASE WHEN status='waiting' AND ?2 THEN coalesce(finished_at,?3) ELSE finished_at END, \
@@ -626,41 +635,45 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                  '$.sourceTaskPrompt',?6,'$.sourceSessionId',session_id) WHERE id=?7",
             params![chat_id, legacy_wait.is_some(), updated_at, execution.to_string(), run.task_id, brief, run.id],
         )?;
-        if launched {
-            tx.execute(
-                "UPDATE run_checkpoints SET state=json_set(state,'$.launchedTurn',?2) \
+            if launched {
+                tx.execute(
+                    "UPDATE run_checkpoints SET state=json_set(state,'$.launchedTurn',?2) \
                  WHERE run_id=?1 AND coalesce(json_extract(state,'$.launchedTurn'),'')=''",
-                params![run.id, turn],
-            )?;
-        }
-        if legacy_wait.is_some() {
-            tx.execute(
-                "UPDATE durable_wakeups SET chat_id=?1,mission_run_id=NULL,message_id=?2 \
+                    params![run.id, turn],
+                )?;
+            }
+            if legacy_wait.is_some() {
+                tx.execute(
+                    "UPDATE durable_wakeups SET chat_id=?1,mission_run_id=NULL,message_id=?2 \
                  WHERE mission_run_id=?3",
-                params![chat_id, turn, run.id],
-            )?;
+                    params![chat_id, turn, run.id],
+                )?;
+            }
+
+            migrated_chats_by_mission
+                .entry(run.task_id)
+                .or_default()
+                .push(MigratedRun {
+                    chat_id,
+                    activity_at: updated_at,
+                    needs_review: run.finished_at.is_some()
+                        && matches!(
+                            boundary["outcome"]["status"].as_str(),
+                            Some("blocked" | "needs_input")
+                        ),
+                });
         }
-
-        // Update requested_by on any runs delegated by this run.
-        tx.execute(
-            "UPDATE runs SET requested_by=json_remove(json_set(requested_by,'$.chatId',?1),'$.taskId') \
-             WHERE json_extract(requested_by,'$.runId')=?2",
-            params![chat_id, run.id],
-        )?;
-
-        migrated_chats_by_mission
-            .entry(run.task_id)
-            .or_default()
-            .push(MigratedRun {
-                chat_id,
-                activity_at: updated_at,
-                needs_review: run.finished_at.is_some()
-                    && matches!(
-                        boundary["outcome"]["status"].as_str(),
-                        Some("blocked" | "needs_input")
-                    ),
-            });
     }
+
+    // Repoint references to the calling run in one pass after all conversations exist.
+    tx.execute(
+        "UPDATE runs AS child SET requested_by=json_remove(\
+             json_set(child.requested_by,'$.chatId',parent.id),'$.taskId') \
+         FROM conversations AS parent \
+         WHERE json_type(child.requested_by,'$.taskId') IS NOT NULL \
+         AND parent.run_id=json_extract(child.requested_by,'$.runId')",
+        [],
+    )?;
 
     // A conversation created by the old conversion already owns its run. Give
     // it the same schedule origin without replacing its messages or identity.

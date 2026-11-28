@@ -163,7 +163,7 @@ async fn clock_cron_rule_catches_up_once_guards_overlap_and_runs_now() {
         .store
         .transaction(move |db| {
             db.0.execute(
-                "UPDATE hook_rule_schedules SET next_run=?1 WHERE rule_id=?2",
+                "UPDATE hook_rule_schedules SET next_run=?1,legacy_chain_depth=8 WHERE rule_id=?2",
                 params![missed, rule_id_db],
             )?;
             Ok(())
@@ -197,6 +197,20 @@ async fn clock_cron_rule_catches_up_once_guards_overlap_and_runs_now() {
     assert_eq!(started[0]["originRule"]["ruleName"], "Morning triage");
     assert_eq!(started[0]["originRule"]["schedule"], true);
     let first_chat_id = text(started[0], "id").to_owned();
+    let first_chat_for_depth = first_chat_id.clone();
+    let depth: u32 = app
+        .service
+        .store
+        .read(move |db| {
+            Ok(db.0.query_row(
+                "SELECT depth FROM hook_rule_chain_depths WHERE chat_id=?",
+                [&first_chat_for_depth],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(depth, 8);
 
     // Next run was advanced into the future (> now).
     let (status, detail) = app
@@ -728,6 +742,21 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     .unwrap();
 
     // Seed two legacy mission runs: one finished+blocked (for active_mission_id) and one waiting with wakeup (for oneshot_mission_id).
+    // Tied creation times cross the history migration's batch boundary.
+    for _ in 0..35 {
+        conn.execute(
+            "INSERT INTO runs(id,task_id,status,trigger,created_at,finished_at,snapshot,boundary, \
+             recovery_pending,resume_available,resume_count) \
+             VALUES(?1,?2,'succeeded','schedule',?3,?3,?4,'{\"batchFixture\":true}',0,0,0)",
+            params![
+                id(),
+                disabled_mission_id,
+                t0,
+                json!({ "agent": agent }).to_string()
+            ],
+        )
+        .unwrap();
+    }
     conn.execute(
         "INSERT INTO runs(id,task_id,status,trigger,created_at,started_at,finished_at,snapshot,boundary,\
            recovery_pending,resume_available,resume_count) \
@@ -958,6 +987,15 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         )
         .unwrap();
     assert_eq!(rule_count, 5);
+    let batched: i64 = migrated
+        .query_row(
+            "SELECT count(*) FROM runs r JOIN conversations c ON c.run_id=r.id \
+         WHERE r.trigger='chat' AND json_extract(r.boundary,'$.batchFixture')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(batched, 35);
 
     // Active cron mission preserves schedule & native authority.
     let (disabled, membership_ended, owner): (Option<i64>, Option<i64>, bool) = migrated
@@ -1241,35 +1279,6 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .await
         .unwrap();
     assert_eq!(schedule, next_run.unwrap());
-    // Model the owner membership after Beacon verification. The scheduled
-    // event consumes one step when it starts a chat, preserving depth eight.
-    let schedule_rule_id = active_mission_id.clone();
-    service
-        .store
-        .transaction(move |db| {
-            db.0.execute(
-                "UPDATE hook_rules SET creator_owner=1 WHERE id=?",
-                [&schedule_rule_id],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    cairn_installation::rules::engine::tick(&service)
-        .await
-        .unwrap();
-    let event_depth: u32 = service
-        .store
-        .read(move |db| {
-            Ok(db.0.query_row(
-            "SELECT json_extract(event,'$.cairn.depth') FROM hook_rule_triggerings WHERE rule_id=?",
-            [&active_mission_id],
-            |row| row.get(0),
-        )?)
-        })
-        .await
-        .unwrap();
-    assert_eq!(event_depth, legacy_depth - 1);
     stalled_beacon.abort();
     let detail = service.chat_detail(&waiting_chat_id).await.unwrap();
     assert_eq!(detail["run"]["chatExecution"]["messageId"], "legacy-turn");

@@ -882,7 +882,7 @@ mod tests {
         let (listener, address) = crate::common::bind().await;
         let upstream = crate::common::serve(listener, router);
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("home")).unwrap();
+        crate::common::managed_codex_home(&root.path().join("home"));
         let s = Service::new(crate::common::config(root.path()))
             .await
             .unwrap();
@@ -903,9 +903,12 @@ mod tests {
             .await
             .unwrap();
         let chat_id = text(&chat, "id").to_owned();
-        s.chat_send(&chat_id, json!({ "text": "Fixture only" }))
-            .await
-            .unwrap();
+        s.chat_send(
+            &chat_id,
+            json!({ "id": crate::config::id(), "text": "Fixture only" }),
+        )
+        .await
+        .unwrap();
         s.chat_tick(&std::collections::HashSet::new())
             .await
             .unwrap();
