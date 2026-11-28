@@ -210,6 +210,8 @@ impl ConversationLists {
 struct State {
     plan_turns_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    run_conversation_paused: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     workspace_cleanup_blocked_by_input: Option<bool>,
     run: Value,
     chat: Value,
@@ -548,8 +550,17 @@ fn read_page(
     }
     let pending_work =
         !scope.chat && !run_id.is_empty() && db.conversation_has_pending_work(run_id)?;
+    let paused_wait = !scope.chat
+        && run["wakeup"].is_object()
+        && db
+            .0
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE run_id=? AND paused=1)",
+            )?
+            .query_row([run_id], |row| row.get::<_, bool>(0))?;
     let state = State {
         plan_turns_enabled: crate::chat_plan_settings::view(db)?.enabled,
+        run_conversation_paused: paused_wait.then_some(true),
         workspace_cleanup_blocked_by_input: pending_work.then_some(true),
         artifacts: artifacts(db, run_id)?,
         run,

@@ -258,11 +258,15 @@ impl Worker {
         let env = std::env::vars().collect();
         for workspace in &managed {
             ensure_clean(workspace, &root, &env).await?;
+            if workspace["kind"] == "worktree" {
+                ensure_removable_worktree(&run, workspace, &env).await?;
+            }
         }
         authorize.recheck().await?;
         let proof = authorize.clone();
         let run_id = id.to_owned();
-        s.store
+        let (cleaned_at, resume_available) = s
+            .store
             .transaction(move |db| {
                 proof.authorize(db)?;
                 let current = required(db.run_record(&run_id)?, "Run not found")?;
@@ -279,10 +283,32 @@ impl Worker {
                         ..Default::default()
                     },
                 )?;
-                Ok(())
+                Ok((
+                    current.state.workspace_cleaned_at,
+                    current.state.resume_available,
+                ))
             })
             .await?;
-        for workspace in &managed {
+        if let Err(error) = authorize.recheck().await {
+            // No removal has started. Restore the state that this claim replaced.
+            let run_id = id.to_owned();
+            s.store
+                .transaction(move |db| {
+                    db.change_run(
+                        &run_id,
+                        crate::runs::RunChanges {
+                            workspace_cleaned_at: Some(cleaned_at),
+                            resume_available: Some(resume_available),
+                            ..Default::default()
+                        },
+                    )?;
+                    Ok(())
+                })
+                .await?;
+            return Err(error);
+        }
+        remove_workspace(&run, &managed[0], &env).await?;
+        for workspace in &managed[1..] {
             authorize.recheck().await?;
             remove_workspace(&run, workspace, &env).await?;
         }
@@ -772,17 +798,69 @@ async fn remove_workspace(run: &Value, workspace: &Value, env: &Environment) -> 
         tokio::fs::remove_dir_all(path).await?;
         return Ok(());
     }
-    let project = run_projects(run)
+    let project = cleanup_project_path(run, workspace)?;
+    let output = git(&["-C", &project, "worktree", "remove", path], env).await?;
+    if !output.success {
+        return Err(Error::conflict("Git could not remove this worktree."));
+    }
+    Ok(())
+}
+
+fn cleanup_project_path(run: &Value, workspace: &Value) -> Result<String> {
+    run_projects(run)
         .into_iter()
-        .find(|p| p["id"] == workspace["projectId"])
-        .ok_or_else(|| Error::bad("Project not found"))?;
-    let output = git(
-        &["-C", text(&project, "path"), "worktree", "remove", path],
+        .find(|project| project["id"] == workspace["projectId"])
+        .map(|project| text(&project, "path").to_owned())
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| Error::bad("Project not found"))
+}
+
+async fn ensure_removable_worktree(
+    run: &Value,
+    workspace: &Value,
+    env: &Environment,
+) -> Result<()> {
+    let target = text(workspace, "path");
+    if !tokio::fs::try_exists(target).await? {
+        return Ok(());
+    }
+    let project = cleanup_project_path(run, workspace)?;
+    let registered = git(
+        &["-C", &project, "worktree", "list", "--porcelain", "-z"],
         env,
     )
     .await?;
-    if !output.success {
-        return Err(Error::conflict("Git could not remove this worktree."));
+    let path = format!("worktree {target}");
+    let entry = registered
+        .stdout
+        .split("\0\0")
+        .skip(1)
+        .find(|entry| entry.split('\0').next() == Some(path.as_str()));
+    let Some(entry) = entry.filter(|_| registered.success) else {
+        return Err(Error::conflict(
+            "Git could not verify this linked worktree.",
+        ));
+    };
+    if entry
+        .split('\0')
+        .any(|field| field.split_ascii_whitespace().next() == Some("locked"))
+    {
+        return Err(Error::conflict("Unlock this worktree before cleaning up."));
+    }
+    let submodules = git(&["-C", target, "submodule", "status"], env).await?;
+    if !submodules.success {
+        return Err(Error::conflict(
+            "Git could not verify the worktree's submodules.",
+        ));
+    }
+    if submodules
+        .stdout
+        .lines()
+        .any(|line| !line.is_empty() && !line.starts_with('-'))
+    {
+        return Err(Error::conflict(
+            "This worktree has initialized submodules. Preserve their files before cleaning up.",
+        ));
     }
     Ok(())
 }
@@ -1378,6 +1456,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worktree_refusals_are_identified_before_cleanup_claims_the_run() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let module = root.path().join("module");
+        let target = root.path().join("worktree");
+        let source = source.to_str().unwrap();
+        let module = module.to_str().unwrap();
+        let target = target.to_str().unwrap();
+        let env = std::env::vars().collect();
+        for command in [
+            vec!["init", "-q", source],
+            vec!["init", "-q", module],
+            vec![
+                "-C",
+                module,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Module",
+            ],
+            vec![
+                "-C",
+                source,
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                module,
+                "nested",
+            ],
+            vec![
+                "-C",
+                source,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "-qm",
+                "Project",
+            ],
+            vec!["-C", source, "worktree", "add", "-q", "--detach", target],
+        ] {
+            assert!(git(&command, &env).await.unwrap().success, "{command:?}");
+        }
+        let run = json!({ "snapshot": { "projects": [{ "id": "project", "path": source }] } });
+        let workspace = json!({ "kind": "worktree", "projectId": "project", "path": target });
+        ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap();
+        assert!(
+            git(&["-C", source, "worktree", "lock", target], &env)
+                .await
+                .unwrap()
+                .success
+        );
+        let locked = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(locked.message.contains("Unlock this worktree"));
+        assert!(
+            git(&["-C", source, "worktree", "unlock", target], &env)
+                .await
+                .unwrap()
+                .success
+        );
+        assert!(
+            git(
+                &[
+                    "-C",
+                    target,
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "update",
+                    "--init"
+                ],
+                &env,
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let initialized = ensure_removable_worktree(&run, &workspace, &env)
+            .await
+            .unwrap_err();
+        assert!(initialized.message.contains("initialized submodules"));
+        assert!(Path::new(target).join("nested/.git").is_file());
+    }
+
+    #[tokio::test]
     async fn cleanup_preserves_the_workspace_needed_to_answer_a_question() {
         let f = crate::plugin_grant_fixture::Fixture::new().await;
         let running = f.s.store.run(&f.run).await.unwrap();
@@ -1456,6 +1630,7 @@ mod tests {
                     status: Some(RunStatus::Cancelled),
                     snapshot: Some(serde_json::from_value(snapshot).unwrap()),
                     workspace: Some(Some(root.to_string_lossy().into_owned())),
+                    resume_available: Some(true),
                     boundary: Some(json!({
                         "isolated": false,
                         "workspaces": [
@@ -1468,6 +1643,25 @@ mod tests {
             )
             .await
             .unwrap();
+        let claimed_run = f.run.clone();
+        let revoke_before_removal = crate::authorization::Authorization::new(&f.s, move |db| {
+            let state = db.run_state(&claimed_run)?.unwrap();
+            if state.workspace_cleaned_at.is_some() {
+                return Err(Error::forbidden("Revoked before removal."));
+            }
+            Ok(())
+        });
+        let error =
+            f.s.worker
+                .cleanup_live(&f.s, &f.run, revoke_before_removal)
+                .await
+                .unwrap_err();
+        assert_eq!(error.status, 403);
+        assert!(first.exists() && second.exists());
+        let untouched = f.s.store.run(&f.run).await.unwrap();
+        assert!(untouched["workspaceCleanedAt"].is_null());
+        assert_eq!(untouched["resumeAvailable"], true);
+
         let watched = first.clone();
         let authorize = crate::authorization::Authorization::new(&f.s, move |_| {
             if !watched.exists() {

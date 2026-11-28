@@ -337,9 +337,11 @@ test('owner shares an installation and member works without management controls'
       status: 'succeeded',
       chatExecution: { messageId: turnId, text: 'Review the private workspace.', attachments: [] },
     })
-    seed!.store.put('chats', { id: delegated.id, wakeup })
+    seed!.store.put('chats', { id: delegated.id, wakeup, paused: true })
     await page.reload()
     await expect(page.getByRole('button', { name: 'Stop run', exact: true })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Open chat', exact: true })).toBeVisible()
+    await expect(page.getByRole('status').filter({ hasText: 'Scheduled continuation paused' })).toBeVisible()
     await page.getByRole('button', { name: 'Run details', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Original instructions', exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toHaveCount(0)

@@ -119,6 +119,7 @@ fun RunScreen(
     val live = rememberLive(vm, state, "/runs/${segment(id)}/stream", streaming = selected)
     val run = live.state?.run
     val waiting = run?.status == "waiting" || (run?.status == "succeeded" && run.wakeup != null)
+    val pausedWait = live.state?.runConversationPaused == true
     var tab by rememberSaveable(id) { mutableIntStateOf(1) }
     // A delegated conversation can be directed through its requester, but cleanup needs
     // access to the run's own agent.
@@ -264,7 +265,9 @@ fun RunScreen(
                         Notice(
                             wakeup.reason,
                             Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                            title = recordedTitle(wakeup),
+                            title =
+                                if (pausedWait) "Reprise programmée en pause"
+                                else recordedTitle(wakeup),
                             icon = CairnIcons.Hourglass,
                             maxLines = 1,
                         )
@@ -350,7 +353,7 @@ fun RunScreen(
                                         LocalLiveWait provides
                                             LiveWait(
                                                 current.wakeup,
-                                                paused = false,
+                                                paused = pausedWait,
                                                 settled = waiting,
                                                 canPause = false,
                                                 openRun = openRun,
@@ -394,7 +397,9 @@ fun RunScreen(
                                 else if (waiting)
                                     item(key = "run-waiting") {
                                         Text(
-                                            "Attente programmée · ${current.wakeup?.reason.orEmpty()}"
+                                            if (pausedWait) "Reprise programmée en pause"
+                                            else
+                                                "Attente programmée · ${current.wakeup?.reason.orEmpty()}"
                                         )
                                     }
                                 else if (current.active)

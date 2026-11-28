@@ -750,7 +750,11 @@ abstract class NodePlacementCases {
                         val path = request.path!!.substringBefore('?')
                         val live =
                             if (path == "/api/installations/fixture/api/runs/${run.id}/stream")
-                                LiveState(run = run, workspaceCleanupBlockedByInput = pendingInput)
+                                LiveState(
+                                    run = run,
+                                    runConversationPaused = wakeup != null,
+                                    workspaceCleanupBlockedByInput = pendingInput,
+                                )
                             else null
                         if (live != null) {
                             val frame =
@@ -818,7 +822,12 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isNotEmpty()
                 }
-                if (wakeup != null) compose.onNodeWithContentDescription("Arrêter").assertExists()
+                if (wakeup != null) {
+                    compose.onNodeWithContentDescription("Arrêter").assertExists()
+                    compose
+                        .onNodeWithText("Reprise programmée en pause", substring = false)
+                        .assertExists()
+                }
                 compose.onNodeWithContentDescription("Options de l’exécution").performClick()
                 compose.onNodeWithText("Détails de l’exécution").performClick()
                 compose.onNodeWithText("Espace de travail").assertExists()

@@ -56,13 +56,19 @@ const run = computed(() => live.snapshot.value?.run ?? undefined)
 const waiting = computed(() =>
   run.value?.status === 'waiting' || (run.value?.status === 'succeeded' && !!run.value.wakeup),
 )
+const pausedWait = computed(() => live.snapshot.value?.runConversationPaused === true)
 const suspended = computed(() => isExclusivelySuspended(run.value))
 const recovery = useRetryState(() => run.value)
 // What the run waits for, above its tabs: its scheduled continuation, a retry or an account.
 const waitNotice = computed(() => {
   const wakeup = run.value?.wakeup
-  if (waiting.value && wakeup)
-    return { title: recordedTitle(wakeup), detail: wakeup.reason }
+  if (waiting.value && wakeup) {
+    return {
+      title: pausedWait.value ? 'Scheduled continuation paused' : recordedTitle(wakeup),
+      detail: wakeup.reason,
+    }
+  }
+
   if (recovery.value)
     return undefined
   const reason = run.value?.accountWaitReason
@@ -137,13 +143,13 @@ async function copy() {
       <RouterLink :to="back.to" class="back-link inline-flex items-center gap-[7px] text-muted text-xs mb-[25px]">
         <Icon :name="ArrowLeft" :size="16" />{{ back.label }}
       </RouterLink>
-      <UiButton v-if="run && active" variant="danger-outline" @click="confirm = true">
-        <Icon :name="Square" :size="15" />Stop run
-      </UiButton>
-      <div v-else-if="run" class="flex flex-wrap justify-end gap-2">
+      <div v-if="run" class="flex flex-wrap items-center justify-end gap-2">
         <RouterLink :to="`/chats/${run.taskId}`" class="text-sm text-accent">
           Open chat
         </RouterLink>
+        <UiButton v-if="active" variant="danger-outline" @click="confirm = true">
+          <Icon :name="Square" :size="15" />Stop run
+        </UiButton>
       </div>
     </div>
     <p v-if="!run && connectionNotice" role="status" class="px-4 py-2 text-xs text-muted">
@@ -204,7 +210,7 @@ async function copy() {
           <Markdown v-if="run.summary" :content="run.summary" />
           <div v-else class="mini-empty flex flex-col items-center text-center pt-7 pb-8.5 text-subtle px-6">
             <span v-if="!suspended && !waiting && active" class="pulse-ring w-8 h-8 rounded-full border-2 border-line [border-top-color:light-dark(#6660a5,_var(--dark-border))] animate-spin mb-[17px]" />
-            <h3>{{ waiting ? 'Waiting for scheduled continuation' : suspended ? exclusiveSuspensionLabel : active ? "Work is underway" : "No summary yet" }}</h3>
+            <h3>{{ pausedWait ? 'Scheduled continuation paused' : waiting ? 'Waiting for scheduled continuation' : suspended ? exclusiveSuspensionLabel : active ? "Work is underway" : "No summary yet" }}</h3>
             <p>
               Open Conversation to follow this run.
             </p>
@@ -219,7 +225,7 @@ async function copy() {
           :events="events"
           :timeline="timeline"
           :active="!!active && !waiting"
-          :wakeup="{ wakeup: run.wakeup ?? null, paused: false, settled: waiting, canPause: false }"
+          :wakeup="{ wakeup: run.wakeup ?? null, paused: pausedWait, settled: waiting, canPause: false }"
           :suspended="suspended"
           :agent-id="run.snapshot.agent.id"
           :agent="run.snapshot.agent.name"
