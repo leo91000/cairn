@@ -2457,7 +2457,8 @@ mod tests {
                     None,
                 )?;
                 let error = requeue(db, "run", Some("held-turn"), None, None, None).unwrap_err();
-                assert!(error.message.contains("workspace has been cleaned up"));
+                assert_eq!(error.status, 409);
+                assert!(error.message.contains("cleanup is in progress"));
                 assert_eq!(db.run("run")?.unwrap()["status"], "cancelled");
                 Ok(())
             })

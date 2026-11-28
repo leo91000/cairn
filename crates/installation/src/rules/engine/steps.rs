@@ -1172,21 +1172,29 @@ fn migrated_view(
     detail: bool,
 ) -> Result<cairn_contracts::HookRuleTriggering> {
     use cairn_contracts::{HookRuleTriggering, HookRuleTriggeringEvent, HookRuleTriggeringStatus};
-    let (created_at, finished_at, status, title, slug, agent): (
+    let (created_at, finished_at, status, title, slug, agent, wake_at): (
         i64,
         Option<i64>,
         String,
         String,
         String,
         String,
+        Option<i64>,
     ) = db.0.query_row(
         "SELECT h.created_at,
                CASE WHEN json_extract(h.origin,'$.legacyRun.status') IS NOT NULL
-                    THEN json_extract(h.origin,'$.legacyRun.finishedAt') ELSE r.finished_at END,
-               coalesce(json_extract(h.origin,'$.legacyRun.status'),r.status,'interrupted'),
-               c.title,c.slug,h.agent_id
+                    THEN json_extract(h.origin,'$.legacyRun.finishedAt')
+                    WHEN w.id IS NOT NULL THEN NULL ELSE r.finished_at END,
+               coalesce(json_extract(h.origin,'$.legacyRun.status'),
+                    CASE WHEN w.id IS NOT NULL THEN 'waiting' ELSE r.status END,'interrupted'),
+               c.title,c.slug,h.agent_id,w.wake_at
              FROM hook_rule_conversations h JOIN conversations c ON c.id=h.chat_id
-             LEFT JOIN runs r ON r.id=h.run_id WHERE h.chat_id=?1",
+             LEFT JOIN runs r ON r.id=h.run_id
+             LEFT JOIN run_checkpoints k ON k.run_id=r.id
+             LEFT JOIN durable_wakeups w ON w.chat_id=h.chat_id
+                AND w.id=json_extract(k.state,'$.migratedMissionWakeupId')
+                AND json_extract(h.origin,'$.legacyRun.status') IS NULL
+             WHERE h.chat_id=?1",
         [chat_id],
         |row| {
             Ok((
@@ -1196,6 +1204,7 @@ fn migrated_view(
                 row.get(3)?,
                 row.get(4)?,
                 row.get(5)?,
+                row.get(6)?,
             ))
         },
     )?;
@@ -1246,7 +1255,7 @@ fn migrated_view(
         created_at,
         updated_at: finished_at.unwrap_or(created_at),
         finished_at,
-        resumes_at: None,
+        resumes_at: wake_at,
         details_visible: visible,
         error,
         event,

@@ -2106,10 +2106,31 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     assert!(next_slot.0 > now());
     assert!(!next_slot.1, "a v38 admission already delivered this slot");
     stalled_beacon.abort();
+    let app = router(service.clone()).await.unwrap();
+    let owner = RelayContext::new(&common::relay_fixture::context(&service).await);
+    let get = async |who: &RelayContext, path: &str| {
+        let request = who
+            .authorize(common::request("GET", path))
+            .body(Body::empty())
+            .unwrap();
+        let response = common::send(&app, request).await;
+        let status = response.status();
+        let body = common::read_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    };
     let detail = service.chat_detail(&waiting_chat_id).await.unwrap();
     assert_eq!(detail["run"]["chatExecution"]["messageId"], "legacy-turn");
     assert_eq!(detail["wakeup"]["messageId"], "legacy-turn");
     assert_eq!(detail["run"]["recoveryPending"], true);
+    let waiting_history = get(
+        &owner,
+        &format!("/api/hook-rule-triggerings/{waiting_chat_id}"),
+    )
+    .await;
+    assert_eq!(waiting_history["status"], "waiting");
+    assert!(waiting_history["finishedAt"].is_null());
+    assert_eq!(waiting_history["resumesAt"], detail["wakeup"]["wakeAt"]);
     service
         .chat_tick(&std::collections::HashSet::new())
         .await
@@ -2168,8 +2189,6 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
     assert_eq!(checkpoint["remainingMs"], 10_000);
     assert!(checkpoint.get("migratedMissionWakeupId").is_none());
 
-    let app = router(service.clone()).await.unwrap();
-    let owner = RelayContext::new(&common::relay_fixture::context(&service).await);
     let stale_resume = owner
         .authorize(common::request(
             "POST",
@@ -2190,17 +2209,6 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         RelayContext::new(&common::relay_fixture::member_context(&service, "history-reader").await);
     let history = format!("/api/hook-rules/{active_mission_id}/triggerings");
     let entry = format!("/api/hook-rule-triggerings/{blocked_chat_id}");
-    let get = async |who: &RelayContext, path: &str| {
-        let request = who
-            .authorize(common::request("GET", path))
-            .body(Body::empty())
-            .unwrap();
-        let response = common::send(&app, request).await;
-        let status = response.status();
-        let body = common::read_json(response).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        body
-    };
     let list = get(&owner, &history).await;
     assert!(
         list["triggerings"]

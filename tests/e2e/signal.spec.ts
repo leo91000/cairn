@@ -9,6 +9,7 @@ import {
   expect,
   expectSingleScroll,
   headerStatus,
+  isolatedWorkspaceTest,
   test,
   useRelayForHttpMocks,
   workspacePath,
@@ -418,8 +419,7 @@ test('phones use the floating dock and read conversations full screen', async ({
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
 })
 
-test('snoozing a blocked conversation clears attention until it is restored', async ({ page, workspace }) => {
-  await workspace.api('/api/chats')
+isolatedWorkspaceTest('snoozing a blocked conversation clears attention until it is restored', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   workspace.service.store.put('chats', { id: chat.id, title: 'Review is blocked' })
   const run = workspace.service.chatRun(chat.id, 'Review is blocked')
@@ -431,6 +431,11 @@ test('snoozing a blocked conversation clears attention until it is restored', as
       evidence: [],
       reportedAt: Date.now(),
     },
+  })
+  await expect.poll(async () => workspace.api(`/api/chats/${chat.id}`), { timeout: 20000 }).toMatchObject({
+    status: 'succeeded',
+    title: 'Review is blocked',
+    outcome: { status: 'blocked' },
   })
   await signIn(page)
   const row = page.locator(`[data-fil-key="chat:${chat.id}"]`)
