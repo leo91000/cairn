@@ -619,6 +619,10 @@ pub(crate) fn upgrade_to_v39(writer: &mut Connection) -> Result<()> {
                 "hook": "clock",
                 "ruleName": rule_name,
                 "schedule": true,
+                "legacyRun": {
+                    "status": run.finished_at.map(|_| &run.status),
+                    "finishedAt": run.finished_at,
+                },
             })
             .to_string();
             tx.execute(
@@ -990,7 +994,7 @@ fn link_converted_mission_runs(
 ) -> Result<()> {
     let mut converted = tx.prepare(
         "SELECT c.id,c.agent_id,c.created_at,r.id,json_extract(r.boundary,'$.sourceTaskId'), \
-            coalesce(nullif(r.task_name,''),c.title) \
+            coalesce(nullif(r.task_name,''),c.title), r.status, r.finished_at \
          FROM conversations c JOIN runs r ON r.id=c.run_id \
          WHERE r.trigger='chat' AND json_type(r.boundary,'$.sourceTaskId')='text'",
     )?;
@@ -1019,10 +1023,16 @@ fn link_converted_mission_runs(
         let agent_id: String = row.get(1)?;
         let created_at: i64 = row.get(2)?;
         let run_id: String = row.get(3)?;
+        let status: String = row.get(6)?;
+        let finished_at: Option<i64> = row.get(7)?;
         let origin = json!({
             "hook": "clock",
             "ruleName": rule_name,
             "schedule": true,
+            "legacyRun": {
+                "status": finished_at.map(|_| status),
+                "finishedAt": finished_at,
+            },
         });
         insert.execute(params![
             chat_id,

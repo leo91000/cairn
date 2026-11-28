@@ -9,6 +9,8 @@ avec fuseau IANA. Android utilise les sélecteurs natifs de date et d’heure.
 Le formulaire crée une règle Horloge avec une condition de chevauchement que
 l’éditeur complet peut modifier. **Lancer maintenant** apparaît lorsque le
 serveur l’autorise et ouvre l’historique de la règle.
+Sur les deux plateformes, cet historique donne accès aux conversations issues
+des anciens runs de la mission.
 
 Le Fil montre l’origine des conversations programmées, les résultats bloqués
 et les questions. **Reporter jusqu’à**, **Rétablir** et **Marquer comme lu**

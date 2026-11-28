@@ -101,6 +101,7 @@ async function toggle(triggering: HookRuleTriggering) {
 }
 
 const ran = computed(() => Object.fromEntries((detail.value?.steps ?? []).map(step => [step.nodeId, step.status])))
+const migratedConversation = computed(() => detail.value?.event?.payload?.migratedConversation)
 const tones: Record<string, string> = {
   success: 'bg-success',
   danger: 'bg-coral',
@@ -179,13 +180,20 @@ const pretty = (value: unknown) => JSON.stringify(value, null, 2)
           </p>
           <template v-else>
             <RuleFlow
-              v-if="detail.version === version"
+              v-if="!migratedConversation && detail.version === version"
               :nodes="definition.steps"
               container="/steps"
               :catalog="catalog"
               :agent-name="agentName"
               :ran="ran"
             />
+            <RouterLink
+              v-if="migratedConversation?.slug"
+              :to="`/chats/${encodeURIComponent(migratedConversation.slug)}`"
+              class="text-sm font-semibold text-accent hover:underline"
+            >
+              Open conversation · {{ migratedConversation.title }}
+            </RouterLink>
             <section v-for="(step, index) in detail.steps ?? []" :key="`${step.nodeId}:${index}`" class="rounded-xl border border-line bg-surface p-3">
               <p class="m-0! flex items-center gap-2 text-sm font-semibold">
                 <span class="size-2 rounded-full" :class="step.status === 'completed' ? 'bg-success' : step.status === 'failed' ? 'bg-coral' : 'bg-accent'" />

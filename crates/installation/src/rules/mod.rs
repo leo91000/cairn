@@ -976,6 +976,33 @@ pub(crate) async fn run_now(
     engine::clock::run_now(s, input, actor).await
 }
 
+/// A project's explicit selection belongs to a schedule until its current version changes.
+pub(crate) fn clock_rule_uses_project(db: &Db<'_>, project: &str) -> Result<bool> {
+    let mut statement = db.0.prepare_cached(
+        "SELECT v.definition FROM hook_rules r JOIN hook_rule_versions v
+         ON v.rule_id=r.id AND v.version=r.version
+         WHERE json_extract(v.definition,'$.trigger.type')='clock'",
+    )?;
+    let definitions = statement.query_map([], |row| row.get::<_, String>(0))?;
+    for definition in definitions {
+        let definition: HookRuleDefinition = serde_json::from_str(&definition?)?;
+        let mut used = false;
+        validation::visit_actions(&definition.steps, &mut |action| {
+            if let RuleAction::StartAgent {
+                project_id: Some(id),
+                ..
+            } = action
+            {
+                used |= id.to_string() == project;
+            }
+        });
+        if used {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) async fn preview_schedule(
     s: &Service,
     input: SchedulePreviewInput,

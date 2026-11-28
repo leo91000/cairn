@@ -582,7 +582,7 @@ fn uses_project(run: &Value, id: &str) -> bool {
             .any(|w| w["projectId"] == id)
 }
 
-/// Refuses to remove a record still referenced by an agent, a task or active work.
+/// Refuses to remove a record still referenced by an agent, a schedule or active work.
 pub(crate) fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
     if kind == "agents" && id == MAIN_AGENT_ID {
         return Err(Error::conflict("The main agent cannot be removed."));
@@ -594,6 +594,11 @@ pub(crate) fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> 
     if kind == "projects" && db.agent_snapshots()?.iter().any(assigned) {
         return Err(Error::conflict(
             "This project is assigned to an agent. Update the agent first.",
+        ));
+    }
+    if kind == "projects" && crate::rules::clock_rule_uses_project(db, id)? {
+        return Err(Error::conflict(
+            "This project is used by a schedule. Update or delete that rule first.",
         ));
     }
     if matches!(kind, "agents" | "projects")

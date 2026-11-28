@@ -325,12 +325,16 @@ pub(super) async fn sweep(s: &Service) -> Result<()> {
                 [now() - 3_600_000],
             )?;
             // Delivery receipts outlive quiet triggerings while another listener is
-            // deferred. Counted receipts also meter the hour independently of history.
+            // deferred. A pending Clock slot can already have a receipt after a v38
+            // upgrade. Counted receipts meter the hour independently of history.
             db.0.execute(
                 "DELETE FROM hook_rule_receipts WHERE (counted_at IS NULL OR counted_at<=?1) \
                  AND NOT EXISTS(SELECT 1 FROM plugin_hook_events e WHERE e.id=hook_rule_receipts.event_id) \
                  AND NOT EXISTS(SELECT 1 FROM hook_rule_admissions a \
                      WHERE a.rule_id=hook_rule_receipts.rule_id AND a.event_id=hook_rule_receipts.event_id) \
+                 AND NOT EXISTS(SELECT 1 FROM hook_rule_schedules s \
+                     WHERE s.rule_id=hook_rule_receipts.rule_id \
+                     AND hook_rule_receipts.event_id='clock:'||s.rule_id||':'||s.next_run) \
                  AND NOT EXISTS(SELECT 1 FROM hook_rule_triggerings t \
                      WHERE t.rule_id=hook_rule_receipts.rule_id AND t.event_id=hook_rule_receipts.event_id \
                      AND t.status IN ('running','waiting','retrying'))",

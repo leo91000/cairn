@@ -124,7 +124,8 @@ Tout est migré ; il ne reste qu’un lecteur de conversations.
   écrites par un agent. Un enregistrement direct par le créateur établit un
   nouveau départ pour la programmation.
 - Chaque run devient une conversation dont l’origine est cette règle, avec sa
-  timeline, ses livrables et son résultat. Les missions qui utilisaient
+  timeline, ses livrables et son résultat. L’historique de la règle ouvre aussi
+  les conversations créées par l’ancienne mission. Les missions qui utilisaient
   `worktree=false` ou une liste de skills explicite les perdent.
 
 ### Ordre de livraison

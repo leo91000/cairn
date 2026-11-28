@@ -9,7 +9,7 @@ use cairn_installation::{
     store::Store,
     validation::text,
 };
-use common::{RelayContext, relay_fixture::router, run_fixture::DbRunFixture};
+use common::{ProjectFixture, RelayContext, relay_fixture::router, run_fixture::DbRunFixture};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::{os::unix::fs::PermissionsExt, sync::Arc};
@@ -294,6 +294,40 @@ async fn a_deleted_clock_rule_keeps_its_conversation_origin_identity() {
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{reused}");
+}
+
+#[tokio::test]
+async fn clock_rules_prevent_removing_their_selected_project() {
+    let app = App::new().await;
+    let project = app
+        .service
+        .project_fixture(
+            json!({ "name": "Used by Clock", "path": app._root.path() }),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut definition = schedule_rule_definition(
+        "Project schedule",
+        &json!({ "type": "clock", "cron": "0 9 * * *", "timezone": "UTC" }),
+    );
+    definition["steps"][0]["then"][0]["action"]["projectId"] = project["id"].clone();
+    let (status, rule) = app
+        .request(
+            &app.owner,
+            "POST",
+            "/api/hook-rules",
+            json!({ "definition": definition }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{rule}");
+    let path = format!("/api/projects/{}", text(&project, "id"));
+    let (status, refused) = app.request(&app.owner, "DELETE", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(
+        text(&refused, "error").contains("used by a schedule"),
+        "{refused}"
+    );
 }
 
 #[tokio::test]
@@ -2038,4 +2072,42 @@ async fn sqlite_v38_to_v39_migrates_missions_runs_reads_and_dismissals_cleanly()
         .unwrap();
     assert_eq!(checkpoint["remainingMs"], 10_000);
     assert!(checkpoint.get("migratedMissionWakeupId").is_none());
+
+    let app = router(service.clone()).await.unwrap();
+    let owner = RelayContext::new(&common::relay_fixture::context(&service).await);
+    let member =
+        RelayContext::new(&common::relay_fixture::member_context(&service, "history-reader").await);
+    let history = format!("/api/hook-rules/{active_mission_id}/triggerings");
+    let entry = format!("/api/hook-rule-triggerings/{blocked_chat_id}");
+    let get = async |who: &RelayContext, path: &str| {
+        let request = who
+            .authorize(common::request("GET", path))
+            .body(Body::empty())
+            .unwrap();
+        let response = common::send(&app, request).await;
+        let status = response.status();
+        let body = common::read_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    };
+    let list = get(&owner, &history).await;
+    assert!(
+        list["triggerings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| { entry["id"] == blocked_chat_id && entry["status"] == "completed" })
+    );
+    let retained = get(&owner, &entry).await;
+    assert_eq!(
+        retained["event"]["payload"]["migratedConversation"]["id"],
+        blocked_chat_id
+    );
+    assert_eq!(
+        retained["event"]["payload"]["migratedConversation"]["runStatus"],
+        "succeeded"
+    );
+    let hidden = get(&member, &entry).await;
+    assert_eq!(hidden["detailsVisible"], false);
+    assert!(hidden["event"].is_null());
 }

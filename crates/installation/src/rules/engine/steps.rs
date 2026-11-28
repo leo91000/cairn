@@ -1047,6 +1047,15 @@ pub(super) fn details_visible(
     definition: &cairn_contracts::HookRuleDefinition,
     viewer: &super::super::Viewer,
 ) -> Result<bool> {
+    details_visible_for_agent(db, row, &definition.execution_agent_id.to_string(), viewer)
+}
+
+fn details_visible_for_agent(
+    db: &Db<'_>,
+    row: &RuleRow,
+    agent: &str,
+    viewer: &super::super::Viewer,
+) -> Result<bool> {
     let Some(account) = &viewer.account else {
         return Ok(true);
     };
@@ -1057,7 +1066,7 @@ pub(super) fn details_visible(
         account: account.clone(),
         owner: false,
     }
-    .uses_agent(db, &definition.execution_agent_id.to_string())
+    .uses_agent(db, agent)
 }
 
 pub(super) fn view(
@@ -1153,6 +1162,81 @@ pub(super) fn view(
 
 pub(super) const PAGE: usize = 50;
 
+/// The old run remains in its conversation. Project it into rule history without
+/// giving the rule executor a new triggering or changing the rule's budget.
+fn migrated_view(
+    db: &Db<'_>,
+    chat_id: &str,
+    rule: &RuleRow,
+    viewer: &super::super::Viewer,
+    detail: bool,
+) -> Result<cairn_contracts::HookRuleTriggering> {
+    use cairn_contracts::{HookRuleTriggering, HookRuleTriggeringEvent, HookRuleTriggeringStatus};
+    let (created_at, finished_at, status, title, slug, agent): (
+        i64,
+        Option<i64>,
+        String,
+        String,
+        String,
+        String,
+    ) = db.0.query_row(
+        "SELECT h.created_at,
+               coalesce(json_extract(h.origin,'$.legacyRun.finishedAt'),r.finished_at),
+               coalesce(json_extract(h.origin,'$.legacyRun.status'),r.status,'interrupted'),
+               c.title,c.slug,h.agent_id
+             FROM hook_rule_conversations h JOIN conversations c ON c.id=h.chat_id
+             LEFT JOIN runs r ON r.id=h.run_id WHERE h.chat_id=?1",
+        [chat_id],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
+    )?;
+    let visible = details_visible_for_agent(db, rule, &agent, viewer)?;
+    let triggering_status = match status.as_str() {
+        "queued" | "running" => HookRuleTriggeringStatus::Running,
+        "waiting" => HookRuleTriggeringStatus::Waiting,
+        "succeeded" => HookRuleTriggeringStatus::Completed,
+        "cancelled" => HookRuleTriggeringStatus::Stopped,
+        _ => HookRuleTriggeringStatus::Failed,
+    };
+    Ok(HookRuleTriggering {
+        id: uuid::Uuid::parse_str(chat_id).map_err(Error::internal)?,
+        rule_id: cairn_contracts::HookRuleId(
+            uuid::Uuid::parse_str(&rule.id).map_err(Error::internal)?,
+        ),
+        version: 1,
+        status: triggering_status,
+        actions: 1,
+        created_at,
+        updated_at: finished_at.unwrap_or(created_at),
+        finished_at,
+        resumes_at: None,
+        details_visible: visible,
+        error: None,
+        event: (visible && detail).then(|| HookRuleTriggeringEvent {
+            hook: "clock".into(),
+            instance_id: None,
+            received_at: created_at,
+            payload: json!({
+                "migratedConversation": {
+                    "id": chat_id,
+                    "slug": slug,
+                    "title": title,
+                    "runStatus": status,
+                },
+            }),
+        }),
+        steps: None,
+    })
+}
+
 /// Details follow the execution agent of the version a triggering ran with.
 pub(super) fn visible_for(
     db: &Db<'_>,
@@ -1189,8 +1273,11 @@ pub(crate) fn list(
     };
     let ids =
         db.0.prepare_cached(
-            "SELECT id,created_at,version FROM hook_rule_triggerings WHERE rule_id=?1 \
-             AND (created_at<?2 OR (created_at=?2 AND id<?3)) \
+            "SELECT id,created_at,version,0 FROM hook_rule_triggerings WHERE rule_id=?1 \
+             AND (created_at,id)<(?2,?3) \
+             UNION ALL \
+             SELECT chat_id AS id,created_at,1,1 FROM hook_rule_conversations WHERE rule_id=?1 \
+             AND (created_at,chat_id)<(?2,?3) AND json_type(origin,'$.legacyRun')='object' \
              ORDER BY created_at DESC,id DESC LIMIT ?4",
         )?
         .query_map(params![rule, before, after_id, PAGE as i64 + 1], |row| {
@@ -1198,16 +1285,21 @@ pub(crate) fn list(
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, u32>(2)?,
+                row.get::<_, bool>(3)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let next_cursor = (ids.len() > PAGE).then(|| {
-        let (id, at, _) = &ids[PAGE - 1];
+        let (id, at, _, _) = &ids[PAGE - 1];
         format!("{at}:{id}")
     });
     let mut visibility = std::collections::BTreeMap::new();
     let mut triggerings = Vec::new();
-    for (id, _, version) in ids.into_iter().take(PAGE) {
+    for (id, _, version, migrated) in ids.into_iter().take(PAGE) {
+        if migrated {
+            triggerings.push(migrated_view(db, &id, &row, viewer, false)?);
+            continue;
+        }
         let visible = match visibility.get(&version) {
             Some(visible) => *visible,
             None => {
@@ -1239,10 +1331,22 @@ pub(crate) fn get(
     id: &str,
     viewer: &super::super::Viewer,
 ) -> Result<cairn_contracts::HookRuleTriggering> {
-    let t = required(db.hook_triggering(id)?, "Triggering not found")?;
-    let row = required(db.hook_rule(&t.rule_id)?, "Rule not found")?;
-    let visible = visible_for(db, &row, t.version, viewer)?;
-    view(db, id, visible, true)
+    if let Some(t) = db.hook_triggering(id)? {
+        let row = required(db.hook_rule(&t.rule_id)?, "Rule not found")?;
+        let visible = visible_for(db, &row, t.version, viewer)?;
+        return view(db, id, visible, true);
+    }
+    let rule: Option<String> =
+        db.0.query_row(
+            "SELECT rule_id FROM hook_rule_conversations
+         WHERE chat_id=?1 AND json_type(origin,'$.legacyRun')='object'",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let rule = required(rule, "Triggering not found")?;
+    let row = required(db.hook_rule(&rule)?, "Rule not found")?;
+    migrated_view(db, id, &row, viewer, true)
 }
 
 #[cfg(test)]

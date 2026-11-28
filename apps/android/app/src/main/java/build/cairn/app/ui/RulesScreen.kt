@@ -558,7 +558,7 @@ internal fun RuleDetailPanel(
                     catalog,
                     { ruleAgentName(state, it) },
                 )
-            "history" -> RuleHistoryPanel(vm, id)
+            "history" -> RuleHistoryPanel(vm, id, openConversation)
             "versions" ->
                 RuleVersionsPanel(vm, id, catalog, { ruleAgentName(state, it) }, openConversation)
         }
@@ -650,7 +650,11 @@ private fun RuleVersionsPanel(
 }
 
 @Composable
-internal fun RuleHistoryPanel(vm: CairnViewModel, ruleId: String) {
+internal fun RuleHistoryPanel(
+    vm: CairnViewModel,
+    ruleId: String,
+    openConversation: (String) -> Unit,
+) {
     var entries by remember(ruleId) { mutableStateOf<List<JsonElement>>(emptyList()) }
     var quiet by remember(ruleId) { mutableLongStateOf(0) }
     var refused by remember(ruleId) { mutableLongStateOf(0) }
@@ -777,6 +781,14 @@ internal fun RuleHistoryPanel(vm: CairnViewModel, ruleId: String) {
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         else {
+                            val migrated =
+                                loaded.obj("event")?.obj("payload")?.obj("migratedConversation")
+                            val conversationId = migrated.text("id")
+                            if (conversationId.isNotBlank()) {
+                                TextButton(onClick = { openConversation(conversationId) }) {
+                                    Text("Ouvrir la conversation · ${migrated.text("title")}")
+                                }
+                            }
                             loaded.list("steps").forEachIndexed { index, step ->
                                 Text(
                                     "${index + 1}. ${step.text("label").ifBlank { step.text("nodeId") }} · ${triggeringStatusTitles[step.text("status")] ?: step.text("status")}",

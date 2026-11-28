@@ -29,7 +29,7 @@ import {
   X,
 } from '../icons'
 import { localReads, markRead } from '../reads'
-import { localDateTime } from '../schedule-time'
+import { localDateTime, scheduledTimestamp } from '../schedule-time'
 import { typingTarget } from '../shortcuts'
 import {
   filOf,
@@ -234,7 +234,7 @@ function readAll() {
 
 const snoozing = ref<FilItem | null>(null)
 const snoozeDate = ref('')
-const snoozeDeadline = computed(() => new Date(snoozeDate.value).getTime())
+const snoozeDeadline = computed(() => scheduledTimestamp(snoozeDate.value, Intl.DateTimeFormat().resolvedOptions().timeZone))
 
 function openSnooze(item: FilItem) {
   snoozeDate.value = localDateTime(tomorrowMorning())
@@ -243,11 +243,12 @@ function openSnooze(item: FilItem) {
 
 function snooze() {
   const item = snoozing.value
-  if (!item || snoozeDeadline.value <= Date.now() || !Number.isFinite(snoozeDeadline.value))
+  const deadline = snoozeDeadline.value
+  if (!item || deadline === null || deadline <= Date.now())
     return
 
   snoozing.value = null
-  void snoozeConversation(item.chatId, item.snoozeAt ?? item.at, snoozeDeadline.value)
+  void snoozeConversation(item.chatId, item.snoozeAt ?? item.at, deadline)
 }
 
 function move(delta: number) {
@@ -529,7 +530,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
     <Modal v-if="snoozing" title="Snooze conversation" @close="snoozing = null">
       <form class="grid gap-4 p-5" @submit.prevent="snooze">
         <label>Until<input v-model="snoozeDate" type="datetime-local" required></label>
-        <UiButton type="submit" variant="primary" :disabled="!(snoozeDeadline > now)">
+        <UiButton type="submit" variant="primary" :disabled="snoozeDeadline === null || snoozeDeadline <= now">
           Snooze
         </UiButton>
       </form>

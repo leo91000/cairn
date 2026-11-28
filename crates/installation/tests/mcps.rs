@@ -232,6 +232,12 @@ async fn run_and_chat_tools_report_the_same_current_wakeup() {
         "seconds": 60,
         "createdAt": 1,
         "wakeAt": 60_001,
+        "condition": {
+            "type": "plugin",
+            "pluginId": "fixture",
+            "conditionType": "sample",
+            "input": { "opaque": "x".repeat(55_000) },
+        },
     });
     let chat = chat_id.clone();
     let saved: cairn_contracts::ChatWakeup = serde_json::from_value(wakeup.clone()).unwrap();
@@ -246,10 +252,15 @@ async fn run_and_chat_tools_report_the_same_current_wakeup() {
     };
     let get_run = mcp.call("get_run", json!({ "runId": run_id })).await;
     assert_eq!(result(&get_run)["run"]["run"]["wakeup"]["id"], wakeup["id"]);
+    assert_eq!(
+        result(&get_run)["run"]["run"]["wakeup"]["condition"],
+        wakeup["condition"]
+    );
     let list_runs = mcp.call("list_runs", json!({ "taskId": chat_id })).await;
     assert_eq!(result(&list_runs)[0]["wakeup"]["id"], wakeup["id"]);
     let get_chat = mcp.call("get_chat", json!({ "chatId": chat_id })).await;
     assert_eq!(result(&get_chat)["chat"]["wakeup"]["id"], wakeup["id"]);
+    assert!(result(&get_chat)["chat"]["wakeup"]["condition"].is_null());
     let chat = chat_id.clone();
     s.store
         .transaction(move |db| db.save_wakeup(true, &chat, None))

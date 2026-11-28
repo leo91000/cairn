@@ -103,7 +103,19 @@ fn list(db: &Db<'_>, args: &Value, reader: Option<&str>) -> Result<Value> {
 fn readable(db: &Db<'_>, id: &str) -> Result<Value> {
     let detail = chats::public_detail(db, id)?;
     let mut chat = summary(&detail)?;
-    chat["wakeup"] = detail["wakeup"].clone();
+    let wakeup = &detail["wakeup"];
+    if wakeup.is_object() {
+        // The id and deadline support cancellation and the conversation display.
+        // Full condition inputs and observations belong to run detail.
+        chat["wakeup"] = json!({
+            "id": wakeup["id"],
+            "messageId": wakeup["messageId"],
+            "reason": text(wakeup, "reason").chars().take(300).collect::<String>(),
+            "seconds": wakeup["seconds"],
+            "createdAt": wakeup["createdAt"],
+            "wakeAt": wakeup["wakeAt"],
+        });
+    }
     Ok(json!({
         "chat": chat,
         "messages": detail["messages"],
