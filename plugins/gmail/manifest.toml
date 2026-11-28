@@ -1,11 +1,14 @@
 id = "gmail"
 name = "Gmail"
-version = "1.0.0"
-description = "Read, search, compose and manage mail across explicitly selected Google accounts, with attachments and all Gmail REST methods."
+version = "1.1.0"
+description = "Read, search, compose and manage mail across explicitly selected Google accounts, with attachments and all Gmail REST methods; let rules react to new mail."
 apiVersion = 2
 capabilities = [
   "http",
   "files",
+  "timers",
+  "storage",
+  "hooks",
 ]
 hosts = [
   "gmail.googleapis.com",
@@ -136,6 +139,13 @@ default = false
 risk = "high"
 description = "For Google Workspace administrators."
 
+[[settings]]
+key = "watchMail"
+title = "Mail for rules"
+type = "boolean"
+default = true
+description = "Rules can react to mail received or sent, labels changing and deletions, within about a minute. Cairn reads the mailbox history; nothing is recorded unless a rule listens."
+
 [setup]
 effort = "app"
 summary = "Gmail connects through a Google Cloud app you own. Create it once, in about ten minutes; each mailbox then takes one Google sign-in."
@@ -228,6 +238,12 @@ id = "connect"
 kind = "credential"
 title = "Sign in with Google"
 description = "Choose the mailbox to connect. Your password stays with Google; Cairn receives only the permissions you chose."
+
+[[setup.steps]]
+id = "rules"
+title = "Rules"
+description = "Rules you write can react to this mailbox: mail received or sent, labels changing, deletions."
+settings = [ "watchMail" ]
 
 [[setup.steps]]
 id = "agents"
@@ -351,3 +367,114 @@ name = "input"
 flag = "--input"
 required = true
 maxLength = 10000
+
+[[resources]]
+name = "person"
+description = "Someone writing mail, by address."
+
+[[hooks]]
+name = "message-received"
+title = "Mail arrives"
+description = "Mail arrives in the inbox. Spam, drafts and the account's own messages are not included."
+resourceFields = [ { path = "/fromEmail", resourceType = "person" }, ]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "messageId",
+  "threadId",
+]
+
+[hooks.payloadSchema.properties]
+messageId = { type = "string", description = "The message, for the gmail tool." }
+threadId = { type = "string", description = "Its conversation." }
+from = { type = "string", description = "The From header." }
+fromEmail = { type = "string", description = "The sender's address, in lower case." }
+fromName = { type = "string", description = "The sender's name, when there is one." }
+to = { type = "string", description = "The To header." }
+cc = { type = "string", description = "The Cc header." }
+subject = { type = "string", description = "The subject." }
+snippet = { type = "string", description = "The start of the text, as Gmail shows it." }
+date = { type = "string", description = "The Date header." }
+labelIds = { type = "array", description = "Its labels, such as INBOX, UNREAD, IMPORTANT or a custom label's ID." }
+url = { type = "string", description = "A link to it in Gmail." }
+
+[[hooks]]
+name = "message-sent"
+title = "Mail is sent"
+description = "The account sends a message, from Gmail or through an agent."
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "messageId",
+  "threadId",
+]
+
+[hooks.payloadSchema.properties]
+messageId = { type = "string", description = "The message, for the gmail tool." }
+threadId = { type = "string", description = "Its conversation." }
+from = { type = "string", description = "The From header." }
+fromEmail = { type = "string", description = "The sender's address, in lower case." }
+fromName = { type = "string", description = "The sender's name, when there is one." }
+to = { type = "string", description = "The To header." }
+cc = { type = "string", description = "The Cc header." }
+subject = { type = "string", description = "The subject." }
+snippet = { type = "string", description = "The start of the text, as Gmail shows it." }
+date = { type = "string", description = "The Date header." }
+labelIds = { type = "array", description = "Its labels, such as INBOX, UNREAD, IMPORTANT or a custom label's ID." }
+url = { type = "string", description = "A link to it in Gmail." }
+
+[[hooks]]
+name = "label-added"
+title = "A message is starred or labeled"
+description = "Labels are added to a message: starred, marked important or unread, moved to the trash, or given a custom label."
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "messageId",
+  "threadId",
+  "labelIds",
+]
+
+[hooks.payloadSchema.properties]
+messageId = { type = "string", description = "The message." }
+threadId = { type = "string", description = "Its conversation." }
+labelIds = { type = "array", description = "The labels added or removed, such as STARRED, UNREAD, IMPORTANT, TRASH or a custom label's ID." }
+labelNames = { type = "array", description = "Their names, custom labels included." }
+
+[[hooks]]
+name = "label-removed"
+title = "A label is removed from a message"
+description = "Labels are removed from a message: read (UNREAD removed), archived (INBOX removed), unstarred, or a custom label removed."
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "messageId",
+  "threadId",
+  "labelIds",
+]
+
+[hooks.payloadSchema.properties]
+messageId = { type = "string", description = "The message." }
+threadId = { type = "string", description = "Its conversation." }
+labelIds = { type = "array", description = "The labels added or removed, such as STARRED, UNREAD, IMPORTANT, TRASH or a custom label's ID." }
+labelNames = { type = "array", description = "Their names, custom labels included." }
+
+[[hooks]]
+name = "message-deleted"
+title = "A message is deleted"
+description = "A message is permanently deleted."
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "messageId",
+  "threadId",
+]
+
+[hooks.payloadSchema.properties]
+messageId = { type = "string", description = "The deleted message." }
+threadId = { type = "string", description = "Its conversation." }

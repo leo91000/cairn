@@ -851,6 +851,13 @@
             "$ref": "#/definitions/PluginResourceField"
           },
           "type": "array"
+        },
+        "title": {
+          "description": "How people read the hook when they pick it, e.g. \"A message is posted\".",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

@@ -74,6 +74,24 @@
         }
       ]
     },
+    "PluginBrand": {
+      "additionalProperties": false,
+      "description": "The package's mark: a background colour and an SVG path on a 24×24 grid.",
+      "properties": {
+        "color": {
+          "description": "`#rrggbb`.",
+          "type": "string"
+        },
+        "path": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "color"
+      ],
+      "type": "object"
+    },
     "PluginResourceField": {
       "additionalProperties": false,
       "properties": {
@@ -199,6 +217,17 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "brand": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginBrand"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The plugin's mark, for pickers and the rule's starting node."
         },
         "description": {
           "type": "string"

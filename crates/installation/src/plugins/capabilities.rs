@@ -398,8 +398,12 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         for (name, value) in headers {
             let name = name.to_ascii_lowercase();
             let value = value.as_str().unwrap_or("");
-            let allowed = matches!(name.as_str(), "content-type" | "accept" | "user-agent")
-                || name.starts_with("x-");
+            // Conditional requests let a poller ask "anything new?" without spending
+            // the service's rate limit when nothing changed.
+            let allowed = matches!(
+                name.as_str(),
+                "content-type" | "accept" | "user-agent" | "if-none-match" | "if-modified-since"
+            ) || name.starts_with("x-");
             if !allowed || value.len() > 500 || value.chars().any(char::is_control) {
                 return Err(invalid("This header is not allowed."));
             }
@@ -490,9 +494,12 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
     let mut headers = Map::new();
     for (name, value) in response.headers() {
         let name = name.as_str();
-        // Metadata such as rate limits, granted scopes and pagination; never cookies.
-        let metadata =
-            matches!(name, "retry-after" | "content-type" | "link") || name.starts_with("x-");
+        // Metadata such as rate limits, granted scopes, pagination and validators for
+        // conditional requests; never cookies.
+        let metadata = matches!(
+            name,
+            "retry-after" | "content-type" | "link" | "etag" | "last-modified"
+        ) || name.starts_with("x-");
         if metadata && let Ok(value) = value.to_str() {
             headers.insert(name.to_owned(), json!(value));
         }

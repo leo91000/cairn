@@ -667,6 +667,10 @@ pub struct RuleCatalogHook {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub instance_name: Option<String>,
+    /// The plugin's mark, for pickers and the rule's starting node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub brand: Option<cairn_plugin_api::Brand>,
     #[ts(type = "any ")]
     pub payload_schema: serde_json::Value,
     pub resource_fields: Vec<cairn_plugin_api::ResourceField>,

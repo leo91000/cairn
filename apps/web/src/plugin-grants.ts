@@ -266,7 +266,7 @@ export function contributions(manifest: PluginManifest): Contribution[] {
   const named = (kind: PluginContributionGrant['kind'], items: {
     name: string
     description?: string
-    title?: string
+    title?: string | null
     resourceFields?: Array<{ resourceType: string }>
     arguments?: Array<{ resourceType?: string | null }>
   }[] = []) => items.map((item) => {

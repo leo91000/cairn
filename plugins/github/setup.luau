@@ -67,6 +67,27 @@ local function scopeAlert(scopes: string?): any?
     return nil
 end
 
+-- Repositories rules can watch: the most recently pushed ones, and those already chosen.
+local function watchable(chosen: any): any
+    local options, listed = {}, {}
+    local repos = github.get("/user/repos?per_page=100&sort=pushed&direction=desc&affiliation=owner,collaborator,organization_member")
+    for _, repo in if type(repos) == "table" then repos else {} do
+        local name = github.repository(repo.full_name)
+        if name and #name <= 201 and not listed[name] then
+            listed[name] = true
+            table.insert(options, { value = name, label = truncate(name, 100), description = if repo.private then "Private" else "Public" })
+        end
+    end
+    for _, value in if type(chosen) == "table" then chosen else {} do
+        local name = github.repository(value)
+        if name and not listed[name] then
+            listed[name] = true
+            table.insert(options, { value = name, label = truncate(name, 100) })
+        end
+    end
+    return cairn.array(options)
+end
+
 local function form(event: any): any
     local view = {}
     if not event.credential then
@@ -94,7 +115,8 @@ local function form(event: any): any
     if alert then
         table.insert(view, alert)
     end
-    return { values = values, view = cairn.array(view) }
+    local options = { watchRepositories = watchable(event.values and event.values.watchRepositories) }
+    return { values = values, options = options, view = cairn.array(view) }
 end
 
 return {
@@ -120,6 +142,14 @@ return {
                         value = if settings.gitName
                             then settings.gitName .. " <" .. (settings.gitEmail or "") .. ">"
                             else "The installation's Git identity",
+                    },
+                    {
+                        label = "Rules watch",
+                        value = if type(settings.watchRepositories) == "table" and #settings.watchRepositories > 0
+                            then #settings.watchRepositories .. (if #settings.watchRepositories == 1 then " repository" else " repositories")
+                                .. (if settings.watchNotifications then " and notifications" else "")
+                            elseif settings.watchNotifications then "Notifications"
+                            else "Nothing yet",
                     },
                 },
             },

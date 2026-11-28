@@ -10302,6 +10302,13 @@
             "$ref": "#/definitions/PluginResourceField"
           },
           "type": "array"
+        },
+        "title": {
+          "description": "How people read the hook when they pick it, e.g. \"A message is posted\".",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -13285,6 +13292,17 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "brand": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginBrand"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The plugin's mark, for pickers and the rule's starting node."
         },
         "description": {
           "type": "string"

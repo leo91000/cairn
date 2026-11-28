@@ -1,7 +1,7 @@
 id = "discord"
 name = "Discord"
-version = "0.4.1"
-description = "Mention a bot in your server to start a conversation with one of your agents."
+version = "0.5.0"
+description = "Mention a bot in your server to start a conversation with one of your agents, or let rules react to what happens in the server."
 apiVersion = 2
 capabilities = [
   "socket",
@@ -10,6 +10,7 @@ capabilities = [
   "conversations.control",
   "http",
   "storage",
+  "hooks",
 ]
 hosts = [
   "discord.com",
@@ -53,12 +54,19 @@ settings = [
   "channelId",
   "messageContent",
   "everyMessage",
+  "memberEvents",
 ]
 
 [[setup.steps]]
 id = "people"
 kind = "people"
 title = "Who can talk to it"
+
+[[setup.steps]]
+id = "agents"
+kind = "agents"
+title = "Agents for rules"
+description = "Agents whose rules may react to what happens in this server. You can restrict each hook to channels later."
 
 [[settings]]
 key = "guildId"
@@ -95,6 +103,12 @@ type = "boolean"
 description = "For support channels: every new message is a request, and the agent stays silent when nothing is needed. Needs Message Content."
 
 [[settings]]
+key = "memberEvents"
+title = "Members joining and leaving"
+type = "boolean"
+description = "Rules can react when someone joins or leaves the server. Turn on Server Members Intent for the bot in the Developer Portal first."
+
+[[settings]]
 key = "guildName"
 title = "Server name"
 type = "string"
@@ -118,3 +132,360 @@ key = "botName"
 title = "Bot name"
 type = "string"
 hidden = true
+
+[agentAccess]
+description = "Off by default. Granted agents' rules can react to what happens in this bot's server: messages, edits, reactions, buttons, threads, channels and members. Restrict each hook to channels or threads when you grant it."
+
+[[resources]]
+name = "server"
+description = "The Discord server the bot was set up in."
+
+[[resources]]
+name = "channel"
+description = "A channel of the server."
+parentType = "server"
+
+[[resources]]
+name = "thread"
+description = "A thread of a channel."
+parentType = "channel"
+
+[[resources]]
+name = "person"
+description = "A member of the server."
+
+[[hooks]]
+name = "message"
+title = "A message is posted"
+description = "A message is posted in the server. Its text needs Message Content unless it mentions the bot. The bot's own messages are not included."
+resourceFields = [
+  { path = "/guildId", resourceType = "server" },
+  { path = "/channelId", resourceType = "channel" },
+  { path = "/threadId", resourceType = "thread" },
+  { path = "/authorId", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "messageId",
+  "guildId",
+  "channelId",
+  "authorId",
+  "authorName",
+  "authorBot",
+  "text",
+  "mentionsBot",
+]
+
+[hooks.payloadSchema.properties]
+messageId = { type = "string", description = "The message's ID." }
+guildId = { type = "string", description = "The server." }
+channelId = { type = "string", description = "The channel, or the parent channel of a thread." }
+threadId = { type = "string", description = "The thread, when the message is in one." }
+authorId = { type = "string", description = "Who wrote it." }
+authorName = { type = "string", description = "Their display name." }
+authorBot = { type = "boolean", description = "Whether another bot or a webhook wrote it." }
+text = { type = "string", description = "What the message says; empty without Message Content unless it mentions the bot." }
+mentionsBot = { type = "boolean", description = "Whether it mentions the bot." }
+replyToId = { type = "string", description = "The message it replies to." }
+url = { type = "string", description = "A link to the message." }
+createdAt = { type = "string", description = "When it was posted (ISO 8601)." }
+
+[hooks.payloadSchema.properties.attachments]
+type = "array"
+description = "Up to four attached files."
+maxItems = 4
+
+[hooks.payloadSchema.properties.attachments.items]
+type = "object"
+properties = { name = { type = "string" }, url = { type = "string" }, contentType = { type = "string" }, size = { type = "integer" } }
+
+[[hooks]]
+name = "message-edited"
+title = "A message is edited"
+description = "A message of the server is edited. Its new text needs Message Content."
+resourceFields = [
+  { path = "/guildId", resourceType = "server" },
+  { path = "/channelId", resourceType = "channel" },
+  { path = "/threadId", resourceType = "thread" },
+  { path = "/authorId", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "messageId",
+  "guildId",
+  "channelId",
+]
+
+[hooks.payloadSchema.properties]
+messageId = { type = "string", description = "The message's ID." }
+guildId = { type = "string", description = "The server." }
+channelId = { type = "string", description = "The channel, or the parent channel of a thread." }
+threadId = { type = "string", description = "The thread, when the message is in one." }
+authorId = { type = "string", description = "Who wrote it, when Discord says." }
+authorName = { type = "string", description = "Their display name." }
+text = { type = "string", description = "The new text, when Discord sends it." }
+editedAt = { type = "string", description = "When it was edited (ISO 8601)." }
+url = { type = "string", description = "A link to the message." }
+
+[[hooks]]
+name = "message-deleted"
+title = "A message is deleted"
+description = "A message of the server is deleted."
+resourceFields = [
+  { path = "/guildId", resourceType = "server" },
+  { path = "/channelId", resourceType = "channel" },
+  { path = "/threadId", resourceType = "thread" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "messageId",
+  "guildId",
+  "channelId",
+]
+
+[hooks.payloadSchema.properties]
+messageId = { type = "string", description = "The message's ID." }
+guildId = { type = "string", description = "The server." }
+channelId = { type = "string", description = "The channel, or the parent channel of a thread." }
+threadId = { type = "string", description = "The thread, when the message is in one." }
+
+[[hooks]]
+name = "reaction-added"
+title = "Someone reacts to a message"
+description = "Someone adds a reaction to a message of the server."
+resourceFields = [
+  { path = "/guildId", resourceType = "server" },
+  { path = "/channelId", resourceType = "channel" },
+  { path = "/threadId", resourceType = "thread" },
+  { path = "/userId", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "messageId",
+  "guildId",
+  "channelId",
+  "userId",
+  "emoji",
+]
+
+[hooks.payloadSchema.properties]
+messageId = { type = "string", description = "The message's ID." }
+guildId = { type = "string", description = "The server." }
+channelId = { type = "string", description = "The channel, or the parent channel of a thread." }
+threadId = { type = "string", description = "The thread, when the message is in one." }
+userId = { type = "string", description = "Who reacted." }
+userName = { type = "string", description = "Their display name, when Discord says." }
+emoji = { type = "string", description = "The emoji: the character itself, or name:id for a custom emoji." }
+emojiName = { type = "string", description = "The emoji's name or character." }
+messageAuthorId = { type = "string", description = "Who wrote the message, when Discord says." }
+
+[[hooks]]
+name = "reaction-removed"
+title = "A reaction is removed"
+description = "Someone removes their reaction from a message of the server."
+resourceFields = [
+  { path = "/guildId", resourceType = "server" },
+  { path = "/channelId", resourceType = "channel" },
+  { path = "/threadId", resourceType = "thread" },
+  { path = "/userId", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "messageId",
+  "guildId",
+  "channelId",
+  "userId",
+  "emoji",
+]
+
+[hooks.payloadSchema.properties]
+messageId = { type = "string", description = "The message's ID." }
+guildId = { type = "string", description = "The server." }
+channelId = { type = "string", description = "The channel, or the parent channel of a thread." }
+threadId = { type = "string", description = "The thread, when the message is in one." }
+userId = { type = "string", description = "Who reacted." }
+userName = { type = "string", description = "Their display name, when Discord says." }
+emoji = { type = "string", description = "The emoji: the character itself, or name:id for a custom emoji." }
+emojiName = { type = "string", description = "The emoji's name or character." }
+
+[[hooks]]
+name = "button-pressed"
+title = "A button is pressed"
+description = "Someone presses a button on one of the bot's messages. The bot acknowledges it at once."
+resourceFields = [
+  { path = "/guildId", resourceType = "server" },
+  { path = "/channelId", resourceType = "channel" },
+  { path = "/threadId", resourceType = "thread" },
+  { path = "/userId", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "interactionId",
+  "customId",
+  "messageId",
+  "guildId",
+  "channelId",
+  "userId",
+  "userName",
+]
+
+[hooks.payloadSchema.properties]
+interactionId = { type = "string", description = "The press." }
+customId = { type = "string", description = "The button's identifier." }
+messageId = { type = "string", description = "The message's ID." }
+guildId = { type = "string", description = "The server." }
+channelId = { type = "string", description = "The channel, or the parent channel of a thread." }
+threadId = { type = "string", description = "The thread, when the message is in one." }
+userId = { type = "string", description = "Who pressed it." }
+userName = { type = "string", description = "Their display name." }
+
+[[hooks]]
+name = "thread-created"
+title = "A thread is created"
+description = "A thread is created in the server."
+resourceFields = [
+  { path = "/guildId", resourceType = "server" },
+  { path = "/channelId", resourceType = "channel" },
+  { path = "/threadId", resourceType = "thread" },
+  { path = "/ownerId", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "threadId",
+  "guildId",
+  "channelId",
+  "name",
+]
+
+[hooks.payloadSchema.properties]
+threadId = { type = "string", description = "The new thread." }
+guildId = { type = "string", description = "The server." }
+channelId = { type = "string", description = "The channel it belongs to." }
+name = { type = "string", description = "Its name." }
+ownerId = { type = "string", description = "Who created it." }
+
+[[hooks]]
+name = "thread-deleted"
+title = "A thread is deleted"
+description = "A thread of the server is deleted."
+resourceFields = [
+  { path = "/guildId", resourceType = "server" },
+  { path = "/channelId", resourceType = "channel" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "threadId",
+  "guildId",
+  "channelId",
+]
+
+[hooks.payloadSchema.properties]
+threadId = { type = "string", description = "The deleted thread." }
+guildId = { type = "string", description = "The server." }
+channelId = { type = "string", description = "The channel it belonged to." }
+
+[[hooks]]
+name = "channel-created"
+title = "A channel is created"
+description = "A channel is created in the server."
+resourceFields = [
+  { path = "/guildId", resourceType = "server" },
+  { path = "/channelId", resourceType = "channel" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "channelId",
+  "guildId",
+  "name",
+  "kind",
+]
+
+[hooks.payloadSchema.properties]
+channelId = { type = "string", description = "The new channel." }
+guildId = { type = "string", description = "The server." }
+name = { type = "string", description = "Its name." }
+kind = { type = "string", description = "text, voice, announcement, forum, stage, media or category." }
+categoryId = { type = "string", description = "Its category, when it has one." }
+
+[[hooks]]
+name = "channel-deleted"
+title = "A channel is deleted"
+description = "A channel of the server is deleted."
+resourceFields = [ { path = "/guildId", resourceType = "server" }, ]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "channelId",
+  "guildId",
+  "name",
+]
+
+[hooks.payloadSchema.properties]
+channelId = { type = "string", description = "The deleted channel." }
+guildId = { type = "string", description = "The server." }
+name = { type = "string", description = "Its name." }
+
+[[hooks]]
+name = "member-joined"
+title = "Someone joins the server"
+description = "Someone joins the server. Needs “Members joining and leaving”."
+resourceFields = [
+  { path = "/guildId", resourceType = "server" },
+  { path = "/userId", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "userId",
+  "userName",
+  "guildId",
+  "bot",
+]
+
+[hooks.payloadSchema.properties]
+userId = { type = "string", description = "The member." }
+userName = { type = "string", description = "Their display name." }
+guildId = { type = "string", description = "The server." }
+bot = { type = "boolean", description = "Whether the member is a bot." }
+joinedAt = { type = "string", description = "When they joined (ISO 8601)." }
+
+[[hooks]]
+name = "member-left"
+title = "Someone leaves the server"
+description = "Someone leaves or is removed from the server. Needs “Members joining and leaving”."
+resourceFields = [ { path = "/guildId", resourceType = "server" }, ]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "userId",
+  "userName",
+  "guildId",
+  "bot",
+]
+
+[hooks.payloadSchema.properties]
+userId = { type = "string", description = "The member." }
+userName = { type = "string", description = "Their display name." }
+guildId = { type = "string", description = "The server." }
+bot = { type = "boolean", description = "Whether the member is a bot." }

@@ -11,6 +11,8 @@ data class PluginHook(
     val payloadSchema: kotlinx.serialization.json.JsonElement?,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val resourceFields: List<PluginResourceField> = listOf(),
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val title: String? = null,
 ) {
     init {}
 }

@@ -161,3 +161,25 @@ Sources: [Gmail REST reference](https://developers.google.com/workspace/gmail/ap
 [token expiry and revocation](https://developers.google.com/identity/protocols/oauth2/),
 [scopes](https://developers.google.com/workspace/gmail/api/auth/scopes),
 [threaded replies](https://developers.google.com/workspace/gmail/api/guides/threads).
+
+## Hooks for rules
+
+With “Mail for rules” (on by default, setup step **Rules**), the worker reads the
+mailbox history (`users.history.list`) every minute and emits
+[hooks](../../docs/HOOK-RULES.md) for rules of agents granted the mailbox. Gmail
+pushes changes only to an owner's Pub/Sub topic, which Cairn does not receive. The
+first read only records the mailbox's `historyId`; a position Gmail no longer keeps
+(404) starts again from the current one. Up to three pages of 100 records are read per
+minute, the rest a second later.
+
+| Hook | History record | Payload |
+| --- | --- | --- |
+| `message-received` | message added with `INBOX`, not `SPAM`, `DRAFT` or `SENT` | `messageId`, `threadId`, `from`, `fromEmail`, `fromName`, `to`, `cc`, `subject`, `date`, `snippet`, `labelIds`, `url` |
+| `message-sent` | message added with `SENT` | the same |
+| `label-added`, `label-removed` | labels added or removed | `messageId`, `threadId`, `labelIds`, `labelNames` |
+| `message-deleted` | permanent deletion | `messageId`, `threadId` |
+
+Headers come from a metadata read of at most 15 new messages a minute; beyond that, a
+hook carries only identifiers and labels. Reading the history needs only the read-only
+scope. Senders are `person` resources (a lower-case address), so `authorIn` can
+name them; Gmail has no directory to list, so the picker offers the typed address.

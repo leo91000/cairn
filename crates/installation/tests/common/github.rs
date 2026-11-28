@@ -150,6 +150,8 @@ async fn answer(root: &Path, calls: &Mutex<Vec<Value>>, request: Request<Body>) 
         "body": if body.is_null() { json!(String::from_utf8_lossy(&bytes)) } else { body.clone() },
         "accept": headers.get("accept").and_then(|value| value.to_str().ok()),
         "userAgent": headers.get("user-agent").and_then(|value| value.to_str().ok()),
+        "ifNoneMatch": headers.get("if-none-match").and_then(|value| value.to_str().ok()),
+        "ifModifiedSince": headers.get("if-modified-since").and_then(|value| value.to_str().ok()),
     }));
     let state = state(root);
     if full.contains("/git/blobs/")
@@ -217,7 +219,34 @@ async fn answer(root: &Path, calls: &Mutex<Vec<Value>>, request: Request<Body>) 
             let content = text(&value, "content").replace(['\n', ' '], "");
             return (StatusCode::OK, STANDARD.decode(content).unwrap()).into_response();
         }
-        return json_response(StatusCode::OK, &value);
+        // Validators follow the answer's content, as GitHub's do: asking again with
+        // them about an unchanged answer is a 304 without a body.
+        let digest = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            contents.hash(&mut hasher);
+            hasher.finish()
+        };
+        let etag = format!("W/\"{digest:016x}\"");
+        let modified = format!(
+            "Sat, 28 Nov 2026 10:{:02}:{:02} GMT",
+            digest % 60,
+            (digest / 60) % 60
+        );
+        let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+        if header("if-none-match") == Some(etag.as_str())
+            || header("if-modified-since") == Some(modified.as_str())
+        {
+            return (StatusCode::NOT_MODIFIED, [("etag", etag)]).into_response();
+        }
+        let mut response = json_response(StatusCode::OK, &value);
+        let answer = response.headers_mut();
+        answer.insert("etag", etag.parse().unwrap());
+        answer.insert("last-modified", modified.parse().unwrap());
+        if let Some(interval) = state["pollInterval"].as_u64() {
+            answer.insert("x-poll-interval", interval.to_string().parse().unwrap());
+        }
+        return response;
     }
 
     if path == "user" {

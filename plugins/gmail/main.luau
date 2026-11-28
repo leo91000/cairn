@@ -1,6 +1,7 @@
 local api = require("./lib/api")
 local mail = require("./lib/mail")
 local setup = require("./setup")
+local watch = require("./watch")
 
 local function invoke(input)
     local request = input.input
@@ -35,6 +36,25 @@ local function invoke(input)
     return mail.run(instance, request)
 end
 
+-- Senders, by address. Gmail has no directory to list: a typed address is the only
+-- candidate, and resolving checks its form.
+local function person(value)
+    if type(value) ~= "string" or #value > 254 or not value:match("^[^%s@<>\"]+@[^%s@<>\"]+%.[^%s@<>\"]+$") then return nil end
+    local address = value:lower()
+    return { resourceType = "person", id = address, name = address }
+end
+
+local function resources(input)
+    if input.resourceType ~= "person" then error("Unknown resource type") end
+    if input.op == "list" then
+        local candidate = input.page == 1 and person(input.query) or nil
+        return { items = cairn.array(if candidate then { candidate } else {}) }
+    end
+    local resolved = person(input.id)
+    if not resolved or resolved.id ~= input.id then error("Resource not found") end
+    return resolved
+end
+
 local function decode(value, fallback)
     if not value then return fallback end
     local ok, result = pcall(cairn.json.decode, value)
@@ -56,4 +76,8 @@ return {
     form = setup.form,
     test = setup.test,
     view = setup.view,
+    -- The mailbox history, polled into hooks for rules.
+    start = watch.start,
+    timer = watch.timer,
+    resources = resources,
 }

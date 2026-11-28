@@ -687,3 +687,227 @@ async fn a_pending_project_import_excludes_only_its_own_installation() {
     assert!(first.s.store.projects().await.unwrap().is_empty());
     assert!(other.s.store.projects().await.unwrap().is_empty());
 }
+
+const EVENTS: &str = "repos/octo/app/events?per_page=30";
+const RUNS: &str = "repos/octo/app/actions/runs?status=completed&per_page=20";
+const NOTIFICATIONS: &str = "notifications?per_page=50";
+
+fn event(id: &str, kind: &str, mut payload: Value) -> Value {
+    json!({
+        "id": id, "type": kind, "actor": { "login": "ada" },
+        "repo": { "name": "octo/app" }, "payload": payload.take(),
+        "created_at": "2026-11-28T10:00:00Z",
+    })
+}
+
+fn run_of(id: u64, conclusion: &str, mut pulls: Value) -> Value {
+    json!({
+        "id": id, "run_attempt": 1, "name": "CI", "conclusion": conclusion, "status": "completed",
+        "head_branch": "feature", "head_sha": "a".repeat(40), "event": "pull_request",
+        "actor": { "login": "ada" }, "pull_requests": pulls.take(),
+        "html_url": format!("https://github.com/octo/app/actions/runs/{id}"),
+        "updated_at": "2026-11-28T10:05:00Z",
+    })
+}
+
+fn notification_of(id: &str, updated: &str) -> Value {
+    json!({
+        "id": id, "reason": "review_requested", "updated_at": updated,
+        "repository": { "full_name": "octo/app" },
+        "subject": { "title": "Add rules", "type": "PullRequest", "url": "https://api.github.com/repos/octo/app/pulls/12" },
+    })
+}
+
+/// Releases the instance's due timers into its worker once.
+async fn tick(
+    f: &Fixture,
+    connection: &connections::Connection,
+    session: &mut cairn_plugin_host::Session,
+) {
+    common::expire_plugin_timers(&f.s.store, &connection.id).await;
+    cairn_installation::plugins::runtime::pump(&f.s, connection, session)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn watched_repositories_and_notifications_become_hooks_with_conditional_polling() {
+    let f = fixture().await;
+    f.github.state(&json!({ "repos": [
+        { "full_name": "octo/app", "private": true },
+        { "full_name": "octo/site", "private": false },
+    ] }));
+    let form = common::plugin_form(
+        &f.s,
+        "github",
+        &json!({ "token": "gho_watch", "settings": { "watchRepositories": ["octo/old"] } }),
+    )
+    .await
+    .unwrap();
+    let offered = form["options"]["watchRepositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|option| text(option, "value").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(offered, ["octo/app", "octo/site", "octo/old"]);
+
+    f.github.respond(
+        EVENTS,
+        &json!([event(
+            "100",
+            "PushEvent",
+            json!({ "ref": "refs/heads/main" })
+        )]),
+    );
+    f.github.respond(
+        RUNS,
+        &json!({ "workflow_runs": [run_of(7, "success", json!([]))] }),
+    );
+    f.github.respond(
+        NOTIFICATIONS,
+        &json!([notification_of("n1", "2026-11-28T09:00:00Z")]),
+    );
+    let saved = common::save_plugin(
+        &f.s,
+        "github",
+        &json!({
+            "name": "Watch", "enabled": true, "token": "gho_watch",
+            "settings": { "watchRepositories": ["octo/app"], "watchNotifications": true },
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let connection: connections::Connection = serde_json::from_value(saved).unwrap();
+    for hook in [
+        "pushed",
+        "pull-request-opened",
+        "pull-request-closed",
+        "issue-commented",
+        "workflow-run-completed",
+        "notification",
+    ] {
+        common::listen(&f.s.store, &connection.id, hook).await;
+    }
+    let package = registry::active(&f.s, "github").await.unwrap();
+    let worker = std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn"));
+    let mut session =
+        f.s.plugins
+            .host
+            .start(&worker, &package.manifest, &package.source)
+            .await
+            .unwrap();
+    cairn_installation::plugins::runtime::begin(&f.s, &connection, &mut session)
+        .await
+        .unwrap();
+    assert_eq!(common::plugin_timers(&f.s.store).await.unwrap().len(), 2);
+
+    // The first answers only mark where to start.
+    tick(&f, &connection, &mut session).await;
+    assert!(
+        common::queued_hooks(&f.s.store, &connection.id)
+            .await
+            .is_empty()
+    );
+    // Unchanged answers are asked with their validators and cost nothing.
+    tick(&f, &connection, &mut session).await;
+    let polls = f
+        .github
+        .calls()
+        .into_iter()
+        .filter(|call| [EVENTS, RUNS, NOTIFICATIONS].contains(&text(call, "path")))
+        .collect::<Vec<_>>();
+    assert_eq!(polls.len(), 6, "{polls:?}");
+    assert!(
+        polls[3..]
+            .iter()
+            .all(|call| call["ifNoneMatch"].is_string() || call["ifModifiedSince"].is_string())
+    );
+    assert!(polls.iter().all(|call| call["token"] == "gho_watch"));
+    assert!(
+        common::queued_hooks(&f.s.store, &connection.id)
+            .await
+            .is_empty()
+    );
+
+    f.github.respond(EVENTS, &json!([
+        event("104", "WatchEvent", json!({ "action": "started" })),
+        event("103", "IssueCommentEvent", json!({
+            "action": "created",
+            "issue": { "number": 12, "title": "Add rules", "pull_request": {} },
+            "comment": { "body": "Looks good", "html_url": "https://github.com/octo/app/pull/12#issuecomment-1" },
+        })),
+        event("102", "PullRequestEvent", json!({
+            "action": "opened", "number": 12,
+            "pull_request": { "number": 12, "title": "Add rules", "user": { "login": "ada" },
+                "base": { "ref": "main" }, "head": { "ref": "feature" }, "draft": false, "body": "x".repeat(5000) },
+        })),
+        event("101", "PushEvent", json!({
+            "ref": "refs/heads/main", "before": "b".repeat(40), "head": "c".repeat(40), "size": 1,
+            "commits": [{ "sha": "c".repeat(40), "message": "Fix", "author": { "name": "Ada" } }],
+        })),
+        event("100", "PushEvent", json!({ "ref": "refs/heads/main" })),
+    ]));
+    f.github.respond(
+        RUNS,
+        &json!({ "workflow_runs": [
+        run_of(8, "failure", json!([{ "number": 12 }])),
+        run_of(7, "success", json!([])),
+    ] }),
+    );
+    f.github.respond(
+        NOTIFICATIONS,
+        &json!([
+            notification_of("n2", "2026-11-28T10:10:00Z"),
+            notification_of("n1", "2026-11-28T09:00:00Z"),
+        ]),
+    );
+    tick(&f, &connection, &mut session).await;
+    let queued = common::queued_hooks(&f.s.store, &connection.id).await;
+    let hook = |id: &str| {
+        queued
+            .iter()
+            .find(|event| event["id"] == id)
+            .unwrap_or_else(|| panic!("{id} in {queued:?}"))
+            .clone()
+    };
+    assert_eq!(queued.len(), 5, "{queued:?}");
+    let pushed = hook("event:101");
+    assert_eq!(pushed["name"], "pushed");
+    assert_eq!(pushed["payload"]["branch"], "main");
+    assert_eq!(pushed["payload"]["repository"], "octo/app");
+    assert_eq!(pushed["payload"]["commits"][0]["message"], "Fix");
+    let opened = hook("event:102");
+    assert_eq!(opened["name"], "pull-request-opened");
+    assert_eq!(opened["payload"]["number"], 12);
+    assert_eq!(opened["payload"]["authorLogin"], "ada");
+    assert_eq!(opened["payload"]["body"].as_str().unwrap().len(), 4000);
+    let commented = hook("event:103");
+    assert_eq!(commented["payload"]["isPullRequest"], true);
+    assert_eq!(commented["payload"]["body"], "Looks good");
+    let run = hook("run:8:1");
+    assert_eq!(run["payload"]["conclusion"], "failure");
+    assert_eq!(run["payload"]["pullRequests"], json!([12]));
+    let notified = hook("notification:n2:2026-11-28T10:10:00Z");
+    assert_eq!(notified["payload"]["reason"], "review_requested");
+    assert_eq!(
+        notified["payload"]["url"],
+        "https://github.com/octo/app/pull/12"
+    );
+    assert_eq!(notified["payload"]["number"], 12);
+    // Nobody listens to stars: nothing was recorded for them.
+    assert!(queued.iter().all(|event| event["name"] != "starred"));
+
+    // A restarted worker replaces its timers instead of adding to them.
+    cairn_installation::plugins::runtime::begin(&f.s, &connection, &mut session)
+        .await
+        .unwrap();
+    assert_eq!(common::plugin_timers(&f.s.store).await.unwrap().len(), 2);
+    tick(&f, &connection, &mut session).await;
+    assert_eq!(
+        common::queued_hooks(&f.s.store, &connection.id).await.len(),
+        5
+    );
+    session.stop().await;
+}

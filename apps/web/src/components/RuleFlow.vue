@@ -47,6 +47,10 @@ const props = defineProps<{
   problems?: HookRuleProblem[]
   // Steps that ran in a triggering, for the history view.
   ran?: Record<string, 'completed' | 'failed' | 'running' | 'retrying' | 'waiting'>
+  // The step to draw attention to, as a path: it shakes once.
+  attention?: string | null
+  // The graph fills its container and pans by dragging its background.
+  fill?: boolean
 }>()
 const emit = defineEmits<{
   select: [path: string]
@@ -75,6 +79,42 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
 
 function fit() {
   manualZoom.value = null
+  viewport.value?.scrollTo({ left: 0, top: 0, behavior: 'smooth' })
+}
+
+// Dragging the dotted background moves around the graph, as on a canvas.
+let drag: {
+  x: number
+  y: number
+  left: number
+  top: number
+  id: number
+} | undefined
+
+function startPan(event: PointerEvent) {
+  const target = event.target instanceof Element ? event.target : null
+  if (!props.fill || event.button !== 0 || !viewport.value || target?.closest('button, a, input, select, textarea, [role="menu"]'))
+    return
+  drag = {
+    x: event.clientX,
+    y: event.clientY,
+    left: viewport.value.scrollLeft,
+    top: viewport.value.scrollTop,
+    id: event.pointerId,
+  }
+  viewport.value.setPointerCapture(event.pointerId)
+}
+
+function pan(event: PointerEvent) {
+  if (!drag || event.pointerId !== drag.id || !viewport.value)
+    return
+  viewport.value.scrollLeft = drag.left - (event.clientX - drag.x)
+  viewport.value.scrollTop = drag.top - (event.clientY - drag.y)
+}
+
+function endPan(event: PointerEvent) {
+  if (drag?.id === event.pointerId)
+    drag = undefined
 }
 
 const choices = computed(() => stepChoices.filter((choice) => {
@@ -110,7 +150,7 @@ const ranTone: Record<string, string> = {
 </script>
 
 <template>
-  <div :class="root ? 'rule-graph' : 'subgraph'">
+  <div :class="root ? ['rule-graph', fill ? 'fill' : ''] : 'subgraph'">
     <div v-if="root" class="graph-toolbar">
       <span>{{ editable ? 'Follow the arrows · select a node to edit' : 'Follow the arrows from the event to the end' }}</span>
       <div class="flex items-center gap-1">
@@ -126,9 +166,19 @@ const ranTone: Record<string, string> = {
         </button>
       </div>
     </div>
-    <div ref="viewport" :class="root ? 'graph-viewport' : ''">
+    <div
+      ref="viewport"
+      :class="root ? 'graph-viewport' : ''"
+      @pointerdown="startPan"
+      @pointermove="pan"
+      @pointerup="endPan"
+      @pointercancel="endPan"
+    >
       <ol class="rule-flow mx-auto! my-0! grid list-none gap-0 p-0!" :style="{ width: `${width}px`, zoom: root ? zoom : undefined }" :aria-label="root ? 'Steps' : undefined">
-        <li v-if="root" class="graph-terminal">
+        <li v-if="root && $slots.start" class="flow-start justify-self-center">
+          <slot name="start" />
+        </li>
+        <li v-else-if="root" class="graph-terminal">
           Event received
         </li>
         <li v-if="root && !editable" aria-hidden="true">
@@ -167,6 +217,7 @@ const ranTone: Record<string, string> = {
               :class="[
                 selected === `${container}/${index}` ? 'border-accent ring-3 ring-accent/15' : hasProblems(`${container}/${index}`) ? 'border-coral/70' : 'border-line',
                 ran?.[node.id] ? ranTone[ran[node.id]] : '',
+                attention === `${container}/${index}` ? 'attention' : '',
               ]"
             >
               <div class="relative">
@@ -260,6 +311,7 @@ const ranTone: Record<string, string> = {
                     :selected="selected"
                     :problems="problems"
                     :ran="ran"
+                    :attention="attention"
                     @select="path => emit('select', path)"
                     @insert="(at, position, kind) => emit('insert', at, position, kind)"
                     @remove="path => emit('remove', path)"
@@ -285,6 +337,7 @@ const ranTone: Record<string, string> = {
                     :selected="selected"
                     :problems="problems"
                     :ran="ran"
+                    :attention="attention"
                     @select="path => emit('select', path)"
                     @insert="(at, position, kind) => emit('insert', at, position, kind)"
                     @remove="path => emit('remove', path)"
@@ -314,6 +367,7 @@ const ranTone: Record<string, string> = {
                   :selected="selected"
                   :problems="problems"
                   :ran="ran"
+                  :attention="attention"
                   @select="path => emit('select', path)"
                   @insert="(at, position, kind) => emit('insert', at, position, kind)"
                   @remove="path => emit('remove', path)"
@@ -368,6 +422,12 @@ const ranTone: Record<string, string> = {
 .graph-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--color-line); color: var(--color-muted); font-size: 12px; }
 .graph-toolbar button { display: grid; place-items: center; min-width: 28px; height: 28px; border: 1px solid var(--color-line); border-radius: 8px; background: var(--color-raised); color: var(--color-ink); font-size: 18px; }
 .graph-viewport {  min-height: 320px; overflow-x: auto; padding: 28px 24px; background-image: radial-gradient(var(--color-line) 1px, transparent 1px); background-size: 18px 18px; }
+.rule-graph.fill { display: flex; flex-direction: column; height: 100%; }
+.rule-graph.fill .graph-viewport { flex: 1; min-height: 0; overflow: auto; padding-bottom: 96px; cursor: grab; touch-action: pan-x pan-y; }
+.rule-graph.fill .graph-viewport:active { cursor: grabbing; }
+.attention { animation: rule-attention .5s ease; }
+@keyframes rule-attention { 20%, 60% { transform: translateX(-6px) } 40%, 80% { transform: translateX(6px) } }
+@media (prefers-reduced-motion: reduce) { .attention { animation: none; outline: 2px solid var(--color-accent); } }
 .rule-flow { position: relative; margin-inline: auto !important; }
 .graph-terminal { justify-self: center; padding: 8px 18px; border: 1px solid var(--color-line); border-radius: 30px; background: var(--color-raised); color: var(--color-muted); font-size: 12px; font-weight: 600; }
 .flow-node { min-width: 0; }.node-card { z-index: 1; }

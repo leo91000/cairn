@@ -1,7 +1,9 @@
 -- The Gateway session, in the instance's transport worker: identify or resume,
--- heartbeats, the threads under the channel, and admission of what is addressed to the
--- bot. Cairn keeps the socket and only what allowed people wrote.
+-- heartbeats, the threads under the channel, admission of what is addressed to the
+-- bot, and hooks for what happens in the server. Cairn keeps the socket and only what
+-- allowed people wrote.
 local discord = require("./lib/discord")
+local events = require("./events")
 
 local API, HEADERS = discord.API, discord.HEADERS
 local snowflake, displayName = discord.snowflake, discord.displayName
@@ -24,7 +26,9 @@ local OVERSIZED = cairn.array({
     "d.threads.*.id", "d.threads.*.guild_id", "d.threads.*.parent_id", "d.threads.*.thread_metadata.archived",
 })
 local settings: any = {}
-local gateway: any = { acked = true, threads = {} }
+-- `threads` routes the configured channel's threads to the bot; `parents` names every
+-- thread's channel in hooks.
+local gateway: any = { acked = true, threads = {}, parents = {} }
 
 local function resumable(): boolean
     return gateway.session ~= nil and gateway.sequence ~= nil
@@ -109,8 +113,15 @@ local function identify()
         reconnect()
         return
     end
-    -- Guilds and guild messages. Mentions carry their text without Message Content.
-    local intents = if settings.messageContent then 513 + 32768 else 513
+    -- Guilds, guild messages and reactions. Mentions carry their text without Message
+    -- Content; members joining and leaving need Server Members, a privileged intent.
+    local intents = 1 + 512 + 1024
+    if settings.messageContent then
+        intents += 32768
+    end
+    if settings.memberEvents then
+        intents += 2
+    end
     local payload = {
         op = 2,
         d = { token = "{{secret}}", intents = intents, properties = { os = "linux", browser = "cairn", device = "cairn" } },
@@ -191,17 +202,16 @@ local function received(message: any)
 end
 
 -- Button clicks must be acknowledged within three seconds: answer Discord first, then
--- queue the click like any other message.
+-- emit the press as a hook and, in the bot's channel, queue it like any other message.
 local function clicked(interaction: any)
     local channel = interaction.channel_id
     local message = interaction.message or {}
-    local inScope = interaction.guild_id == settings.guildId
-        and (channel == settings.channelId or gateway.threads[channel] == true)
+    local ours = interaction.guild_id == settings.guildId
         and interaction.type == 3
         and type(message.author) == "table"
         and message.author.id == gateway.bot
     local id, token = interaction.id, interaction.token
-    if not inScope or not snowflake(id) or type(token) ~= "string" or token == "" or #token > 500 then
+    if not ours or not snowflake(id) or type(token) ~= "string" or token == "" or #token > 500 then
         return
     end
     -- Type 6: acknowledge without changing the message; the handler updates it later.
@@ -212,8 +222,10 @@ local function clicked(interaction: any)
         json = { type = 6 },
     })
     local author = person(interaction.member and interaction.member.user)
+    events.pressed(gateway, interaction, author)
+    local inScope = channel == settings.channelId or gateway.threads[channel] == true
     local custom = interaction.data and interaction.data.custom_id
-    if not author or type(custom) ~= "string" or custom == "" or #custom > 100 then
+    if not inScope or not author or type(custom) ~= "string" or custom == "" or #custom > 100 then
         return
     end
     cairn.inbound.accept({
@@ -231,7 +243,7 @@ local function clicked(interaction: any)
     })
 end
 
-local function dispatched(name: string, data: any)
+local function dispatched(name: string, data: any, sequence: number?)
     if name == "READY" then
         if type(data.user) ~= "table" or not data.user.bot then
             cairn.fail("Use a Discord bot token, not a user account token.")
@@ -245,8 +257,6 @@ local function dispatched(name: string, data: any)
         cairn.instance.status("connected", if gateway.name then "Signed in as " .. gateway.name else nil)
     elseif not gateway.bot then
         return
-    elseif name == "MESSAGE_CREATE" then
-        received(data)
     elseif name == "INTERACTION_CREATE" then
         clicked(data)
     elseif name == "GUILD_CREATE" or name == "THREAD_LIST_SYNC" then
@@ -257,11 +267,17 @@ local function dispatched(name: string, data: any)
         for _, thread in data.threads or {} do
             thread.guild_id = thread.guild_id or guild
             track(thread)
+            events.track(gateway, thread)
         end
-    elseif name == "THREAD_CREATE" or name == "THREAD_UPDATE" then
-        track(data)
-    elseif name == "THREAD_DELETE" and type(data.id) == "string" then
-        gateway.threads[data.id] = nil
+    else
+        if name == "MESSAGE_CREATE" then
+            received(data)
+        elseif name == "THREAD_CREATE" or name == "THREAD_UPDATE" then
+            track(data)
+        elseif name == "THREAD_DELETE" and type(data.id) == "string" then
+            gateway.threads[data.id] = nil
+        end
+        events.dispatch(gateway, name, data, sequence)
     end
 end
 
@@ -291,7 +307,8 @@ local function frame(payload: any)
         end
         reconnect(1 + math.random() * 4)
     elseif op == 0 and type(payload.t) == "string" then
-        dispatched(payload.t, if type(payload.d) == "table" then payload.d else {})
+        local sequence = if type(payload.s) == "number" then payload.s else nil
+        dispatched(payload.t, if type(payload.d) == "table" then payload.d else {}, sequence)
         -- Advance only after admission: a failed admission is replayed on resume, and
         -- replays deduplicate.
         if type(payload.s) == "number" and (gateway.sequence == nil or payload.s > gateway.sequence) then
@@ -304,6 +321,7 @@ return {
     socket = function(event)
         if event.type == "start" then
             settings = event.settings or {}
+            gateway.guildId = settings.guildId
             -- Connect from a timer, so a slow GET /gateway/bot never delays the start.
             cairn.socket.after("connect", 0)
         elseif event.type == "open" then

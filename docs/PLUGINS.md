@@ -189,9 +189,13 @@ later, for example after a platform rate limit. Capabilities exposed to scripts:
   `multipart` sends a JSON part and deliverables of the reply being handled (by
   artifact ID, 25 MB each); nothing else can be uploaded. HTTPS to declared
   hosts only, no redirects followed, 15-second timeout, 1 MB responses. Requests
-  carry `user-agent: Cairn` unless the script sets one. Responses include the
-  `content-type`, `retry-after`, `link` and `x-*` headers (rate limits, granted
-  scopes, pagination), never cookies.
+  carry `user-agent: Cairn` unless the script sets one. Scripts may set
+  `content-type`, `accept`, `user-agent`, `if-none-match`, `if-modified-since` and
+  `x-*` headers. Responses include the `content-type`, `retry-after`, `link`, `etag`,
+  `last-modified` and `x-*` headers (rate limits, granted scopes, pagination,
+  validators for conditional requests), never cookies. A poller sends back the
+  validators it received so an unchanged answer is a 304, which services such as
+  GitHub do not count against the rate limit.
 - `cairn.timers.after(seconds, name, payload)` / `cancel(id)`: 1 s to 7 days, 100 per
   connection.
 
@@ -253,6 +257,11 @@ Commands apply in order once the handler returns. Frames, ticks and connection
 changes run in the transport worker, separate from the worker handling queued events,
 so a slow reply never delays a heartbeat or a three-second acknowledgement. Transport
 handlers still run sequentially: avoid synchronous REST hydration in them.
+
+Hook IDs must identify the service's event, not the emission: replays after a
+resume, a retried timer or a restarted worker then deduplicate. Events without an ID of
+their own can use their position in a resumable stream (Discord's session and
+sequence), or the resource and its change time (`edit:<message>:<edited_at>`).
 
 `cairn.inbound.accept{ kind?, id, author: { id, name }, context?, body? }` (capability
 `inbound`) hands Cairn something a person wrote, from the transport worker or from a
@@ -971,6 +980,35 @@ The bundled GitHub package (`plugins/github/`) is an ordinary package built on t
   address. Large repositories need the folder: a recursive listing over 1 MB is
   reported as partial.
 
+- **Hooks for rules.** “Repositories rules watch” (chosen among the account's most
+  recently pushed repositories, at most 40 are polled) and “Notifications for rules”
+  turn GitHub activity into [hooks](HOOK-RULES.md). GitHub pushes only to webhooks
+  Cairn cannot receive, so the worker keeps a durable timer per repository: each
+  poll reads the repository's Events API and its completed workflow runs, and the
+  notifications timer reads `/notifications`, every minute or as `X-Poll-Interval`
+  asks. Requests carry the previous `ETag` or `Last-Modified`, so a quiet repository
+  answers 304 and spends no rate limit; 403 and 429 back off. The first poll only
+  records where to start: nothing before the watch began becomes a hook. A worker
+  restart cancels and replaces its timers. The Events API reports with a delay of
+  30 seconds to several hours and keeps 300 events; rules see what it shows.
+
+  | Hook | From |
+  | --- | --- |
+  | `pushed` | `PushEvent`: ref, branch or tag, before/head, up to 20 commits |
+  | `branch-created`, `branch-deleted`, `tag-created`, `tag-deleted` | `CreateEvent`, `DeleteEvent` |
+  | `pull-request-opened`, `pull-request-closed` (`merged`), `pull-request-reopened` | `PullRequestEvent` |
+  | `pull-request-reviewed`, `pull-request-review-comment` | review and review comment events |
+  | `issue-opened`, `issue-closed`, `issue-reopened`, `issue-labeled`, `issue-commented` | `IssuesEvent`, `IssueCommentEvent` (`isPullRequest`) |
+  | `commit-commented`, `release-published`, `starred`, `forked` | the matching events |
+  | `workflow-run-completed` | completed runs: conclusion, branch, head SHA, pull requests |
+  | `notification` | review requests, mentions, assignments… (`reason`, `type`, `number`, `url`) |
+
+  Every payload names `repository` (`owner/name`) and, but for notifications, the
+  `actorLogin`. Resources are `repository` (listed from the account, resolved with
+  GET `/repos`) and `person` (a login, searched and resolved through GitHub), so a
+  hook can be restricted to repositories and `authorIn` can name people. Bodies are
+  cut at 4000 characters.
+
 Plugin HTTP follows no redirects: a repository renamed or transferred on GitHub answers
 with a redirect, which the package reports as unavailable. Register the project again
 with its new name.
@@ -1098,6 +1136,36 @@ reading channel history are deliberately out of scope. A bot runs one shard: bot
 2,500 servers or more stop with Discord's “sharding required” close. Transport
 compression and presence updates are not used. Button presses arrive over the Gateway
 only when the application has no Interactions Endpoint URL in the Developer Portal.
+
+### Discord hooks
+
+Besides the conversational bot, the transport emits what happens in the configured
+server as [hooks](HOOK-RULES.md), for rules of agents granted the bot (setup step
+“Agents for rules”; grants can be restricted to channels and threads):
+
+| Hook | Gateway event | Notes |
+| --- | --- | --- |
+| `message` | `MESSAGE_CREATE` | every channel and thread, other bots and webhooks included (`authorBot`), not the bot's own; text needs Message Content unless it mentions the bot |
+| `message-edited`, `message-deleted` | `MESSAGE_UPDATE` with `edited_timestamp`, `MESSAGE_DELETE` | link previews are not edits |
+| `reaction-added`, `reaction-removed` | `MESSAGE_REACTION_ADD/REMOVE` | `emoji` is the character or `name:id` |
+| `button-pressed` | component `INTERACTION_CREATE` on the bot's messages | acknowledged first, in any channel |
+| `thread-created`, `thread-deleted` | `THREAD_CREATE` (`newly_created`), `THREAD_DELETE` | |
+| `channel-created`, `channel-deleted` | `CHANNEL_CREATE/DELETE` | `kind`: text, voice, forum… |
+| `member-joined`, `member-left` | `GUILD_MEMBER_ADD/REMOVE` | only with “Members joining and leaving” |
+
+Payloads name `guildId`, `channelId` and, inside a thread, `threadId` with the
+thread's channel as `channelId`: the worker tracks every thread's parent from
+`GUILD_CREATE`, `THREAD_LIST_SYNC` and thread events. Messages have an ID of their own;
+reactions and members use the session and sequence of their dispatch, which a resume
+replays unchanged. Emissions never interrupt the session. The bot identifies with the
+Guilds, Guild Messages and Guild Message Reactions intents, plus Message Content and
+Server Members (privileged, enabled in the Developer Portal first) when their settings
+are on.
+
+Resources are `server` (the configured one), its `channel`s (text, voice,
+announcement, stage, forum and media), their `thread`s (active ones are listed) and
+`person` (members, listed with Server Members Intent). Resolution reads Discord: a
+channel or thread of another server, or a thread named as a channel, is refused.
 
 ## Validation
 
@@ -1340,7 +1408,11 @@ finish protocol acknowledgements before emitting; asynchronous rules cannot meet
 service protocol deadlines.
 
 Admission is atomic and durable in SQLite: event plus receipt, per instance.
-`true` means queued; `false` means duplicate ID or full queue/receipt ledger. IDs
+`true` means queued; `false` means duplicate ID, full queue/receipt ledger, or that no
+enabled rule listens to this hook on the instance. In that last case nothing is
+recorded, not even the ID: a package can emit everything its service reports (every
+message of a busy server) without filling the queue or the ledger, and an ID emitted
+before a rule listened is admitted once one does. IDs
 are deduplicated across hook names for 30 days, even after acknowledgement and
 manager restart. A full queue does not record the ID, so a producer can retry it.
 The separate hook queue holds at most 50 events per instance. The receipt ledger

@@ -109,10 +109,20 @@ optional author or conversation key removes it; meaningful whitespace and numeri
 identifiers are kept. Agent/instance lists use the server filters, including rules
 that direct conversations bound by their creator’s keys. Confirmed state changes
 invalidate earlier polling responses on both apps.
+Both editors draw the rule on a full canvas: a new rule starts from an empty
+starting node that opens an event picker (grouped by plugin instance with the
+plugin's mark, searchable), then an agent picker when several agents hold the
+hook; the node then shows the event, its instance and the agent. Description and
+limits move to a sheet. A new rule is not judged before its first save attempt
+(status Draft / Brouillon); saving too early shows a short message naming what is
+missing and shakes the node concerned, and an unnamed rule takes its event's
+title. Creating a rule shows three stones settling before its page opens. The web
+uses dialogs and English copy; Android uses Material bottom sheets and French
+copy, and keeps the rule name as a field above the canvas.
 The installation validates drafts and reports
 errors at their step. On compact web screens the title has its own row, which
 keeps the header height stable when validation changes from Checking to Ready.
-Android already shows validation below the rule name. On the web, a check that
+Android shows validation in its header. On the web, a check that
 answers while a button, field or other clickable control is pressed waits for
 the click that ends the press, for at most two seconds after it answers, so its
 status and messages do not move that control from under the pointer, as in the

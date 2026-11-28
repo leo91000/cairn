@@ -1,9 +1,14 @@
 id = "github"
 name = "GitHub"
-version = "1.0.0"
-description = "Agents clone, push and open pull requests as your account; import repositories and skills, and wait for CI."
+version = "1.1.0"
+description = "Agents clone, push and open pull requests as your account; import repositories and skills, wait for CI, and let rules react to repository activity."
 apiVersion = 2
-capabilities = [ "http", ]
+capabilities = [
+  "http",
+  "timers",
+  "storage",
+  "hooks",
+]
 hosts = [
   "github.com",
   "api.github.com",
@@ -63,6 +68,21 @@ title = "Commit email"
 type = "string"
 hidden = true
 maxLength = 200
+
+[[settings]]
+key = "watchRepositories"
+title = "Repositories rules watch"
+type = "multiselect"
+dynamic = true
+maxLength = 201
+description = "Pushes, pull requests, issues, reviews, releases and finished workflow runs of these repositories reach rules within a minute or two. Polling uses conditional requests, so a quiet repository costs no rate limit."
+
+[[settings]]
+key = "watchNotifications"
+title = "Notifications for rules"
+type = "boolean"
+default = false
+description = "Review requests, mentions and assignments of this account reach rules. Needs a token with the repo or notifications scope."
 
 [agentAccess]
 description = "Off by default, including for Main agent. Granted agents' runs push and use the GitHub CLI as this account, and can wait for its CI. Grant one account per agent; repository access follows the account or token, not the agent's projects."
@@ -138,3 +158,601 @@ maximum = 2147483647
 [conditions.inputSchema.properties.headSha]
 type = "string"
 pattern = "^[a-fA-F0-9]{40}$"
+
+[[resources]]
+name = "repository"
+description = "A repository this account can read, as owner/name."
+
+[[resources]]
+name = "person"
+description = "A GitHub account, by login."
+
+[[hooks]]
+name = "pushed"
+title = "Commits are pushed"
+description = "Commits are pushed to a branch or tag of a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "ref",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+ref = { type = "string", description = "The full ref, such as refs/heads/main." }
+branch = { type = "string", description = "The branch, for a branch push." }
+tag = { type = "string", description = "The tag, for a tag push." }
+before = { type = "string", description = "The previous commit SHA." }
+head = { type = "string", description = "The new commit SHA." }
+commitCount = { type = "integer", description = "How many commits, when GitHub says." }
+url = { type = "string", description = "A link comparing before and head." }
+
+[hooks.payloadSchema.properties.commits]
+type = "array"
+description = "Up to twenty commits: sha, message (500 characters at most) and authorName."
+maxItems = 20
+
+[hooks.payloadSchema.properties.commits.items]
+type = "object"
+properties = { sha = { type = "string" }, message = { type = "string" }, authorName = { type = "string" } }
+
+[[hooks]]
+name = "branch-created"
+title = "A branch is created"
+description = "A branch is created in a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "name",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+name = { type = "string", description = "The branch's name." }
+url = { type = "string", description = "A link to the repository." }
+
+[[hooks]]
+name = "tag-created"
+title = "A tag is created"
+description = "A tag is created in a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "name",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+name = { type = "string", description = "The tag's name." }
+url = { type = "string", description = "A link to the repository." }
+
+[[hooks]]
+name = "branch-deleted"
+title = "A branch is deleted"
+description = "A branch is deleted in a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "name",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+name = { type = "string", description = "The branch's name." }
+url = { type = "string", description = "A link to the repository." }
+
+[[hooks]]
+name = "tag-deleted"
+title = "A tag is deleted"
+description = "A tag is deleted in a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "name",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+name = { type = "string", description = "The tag's name." }
+url = { type = "string", description = "A link to the repository." }
+
+[[hooks]]
+name = "pull-request-opened"
+title = "A pull request is opened"
+description = "A pull request is opened in a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+  { path = "/authorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "number",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+number = { type = "integer", description = "The pull request's number." }
+title = { type = "string", description = "Its title, when GitHub includes it." }
+url = { type = "string", description = "A link to it." }
+authorLogin = { type = "string", description = "Who opened it, when GitHub includes it." }
+base = { type = "string", description = "The branch it merges into." }
+head = { type = "string", description = "The branch it merges from." }
+draft = { type = "boolean", description = "Whether it is a draft." }
+body = { type = "string", description = "Its description, at most 4000 characters." }
+
+[[hooks]]
+name = "pull-request-closed"
+title = "A pull request is closed"
+description = "A pull request of a watched repository is closed, merged or not."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+  { path = "/authorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "number",
+  "merged",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+number = { type = "integer", description = "The pull request's number." }
+title = { type = "string", description = "Its title, when GitHub includes it." }
+url = { type = "string", description = "A link to it." }
+authorLogin = { type = "string", description = "Who opened it, when GitHub includes it." }
+base = { type = "string", description = "The branch it merges into." }
+head = { type = "string", description = "The branch it merges from." }
+draft = { type = "boolean", description = "Whether it is a draft." }
+body = { type = "string", description = "Its description, at most 4000 characters." }
+merged = { type = "boolean", description = "Whether it was merged." }
+
+[[hooks]]
+name = "pull-request-reopened"
+title = "A pull request is reopened"
+description = "A pull request of a watched repository is reopened."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+  { path = "/authorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "number",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+number = { type = "integer", description = "The pull request's number." }
+title = { type = "string", description = "Its title, when GitHub includes it." }
+url = { type = "string", description = "A link to it." }
+authorLogin = { type = "string", description = "Who opened it, when GitHub includes it." }
+base = { type = "string", description = "The branch it merges into." }
+head = { type = "string", description = "The branch it merges from." }
+draft = { type = "boolean", description = "Whether it is a draft." }
+body = { type = "string", description = "Its description, at most 4000 characters." }
+
+[[hooks]]
+name = "pull-request-reviewed"
+title = "A pull request is reviewed"
+description = "A review is submitted on a pull request of a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "number",
+  "state",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+number = { type = "integer", description = "The pull request's number." }
+title = { type = "string", description = "Its title, when GitHub includes it." }
+state = { type = "string", description = "approved, changes_requested or commented." }
+body = { type = "string", description = "The review's text, at most 4000 characters." }
+url = { type = "string", description = "A link to the review." }
+
+[[hooks]]
+name = "pull-request-review-comment"
+title = "Someone comments on a pull request’s changes"
+description = "Someone comments on the changes of a pull request of a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "number",
+  "body",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+number = { type = "integer", description = "The pull request's number." }
+path = { type = "string", description = "The file commented on." }
+line = { type = "integer", description = "The line, when there is one." }
+body = { type = "string", description = "The comment, at most 4000 characters." }
+url = { type = "string", description = "A link to the comment." }
+
+[[hooks]]
+name = "issue-opened"
+title = "An issue is opened"
+description = "An issue is opened in a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+  { path = "/authorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "number",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+number = { type = "integer", description = "The issue's number." }
+title = { type = "string", description = "Its title." }
+url = { type = "string", description = "A link to it." }
+authorLogin = { type = "string", description = "Who opened it." }
+body = { type = "string", description = "Its description, at most 4000 characters." }
+labels = { type = "array", description = "Its label names." }
+
+[[hooks]]
+name = "issue-closed"
+title = "An issue is closed"
+description = "An issue of a watched repository is closed."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+  { path = "/authorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "number",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+number = { type = "integer", description = "The issue's number." }
+title = { type = "string", description = "Its title." }
+url = { type = "string", description = "A link to it." }
+authorLogin = { type = "string", description = "Who opened it." }
+body = { type = "string", description = "Its description, at most 4000 characters." }
+labels = { type = "array", description = "Its label names." }
+reason = { type = "string", description = "completed or not_planned, when GitHub says." }
+
+[[hooks]]
+name = "issue-reopened"
+title = "An issue is reopened"
+description = "An issue of a watched repository is reopened."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+  { path = "/authorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "number",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+number = { type = "integer", description = "The issue's number." }
+title = { type = "string", description = "Its title." }
+url = { type = "string", description = "A link to it." }
+authorLogin = { type = "string", description = "Who opened it." }
+body = { type = "string", description = "Its description, at most 4000 characters." }
+labels = { type = "array", description = "Its label names." }
+
+[[hooks]]
+name = "issue-labeled"
+title = "An issue is labeled"
+description = "A label is added to an issue of a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+  { path = "/authorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "number",
+  "label",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+number = { type = "integer", description = "The issue's number." }
+title = { type = "string", description = "Its title." }
+url = { type = "string", description = "A link to it." }
+authorLogin = { type = "string", description = "Who opened it." }
+body = { type = "string", description = "Its description, at most 4000 characters." }
+labels = { type = "array", description = "Its label names." }
+label = { type = "string", description = "The label added." }
+
+[[hooks]]
+name = "issue-commented"
+title = "Someone comments on an issue or pull request"
+description = "Someone comments on an issue or pull request of a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "number",
+  "body",
+  "isPullRequest",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+number = { type = "integer", description = "The issue or pull request's number." }
+title = { type = "string", description = "Its title." }
+isPullRequest = { type = "boolean", description = "Whether it is a pull request." }
+body = { type = "string", description = "The comment, at most 4000 characters." }
+url = { type = "string", description = "A link to the comment." }
+
+[[hooks]]
+name = "commit-commented"
+title = "Someone comments on a commit"
+description = "Someone comments on a commit of a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "sha",
+  "body",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+sha = { type = "string", description = "The commit." }
+path = { type = "string", description = "The file commented on, if any." }
+body = { type = "string", description = "The comment, at most 4000 characters." }
+url = { type = "string", description = "A link to the comment." }
+
+[[hooks]]
+name = "release-published"
+title = "A release is published"
+description = "A release is published in a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "tag",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+tag = { type = "string", description = "Its tag." }
+name = { type = "string", description = "Its title." }
+prerelease = { type = "boolean", description = "Whether it is a pre-release." }
+body = { type = "string", description = "Its notes, at most 4000 characters." }
+url = { type = "string", description = "A link to it." }
+
+[[hooks]]
+name = "starred"
+title = "Someone stars a repository"
+description = "Someone stars a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+
+[[hooks]]
+name = "forked"
+title = "Someone forks a repository"
+description = "Someone forks a watched repository."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "actorLogin",
+  "fork",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+actorLogin = { type = "string", description = "Who did it." }
+createdAt = { type = "string", description = "When GitHub recorded it (ISO 8601)." }
+fork = { type = "string", description = "The new fork, as owner/name." }
+url = { type = "string", description = "A link to the fork." }
+
+[[hooks]]
+name = "workflow-run-completed"
+title = "A CI run finishes"
+description = "A GitHub Actions workflow run of a watched repository finishes, whatever its conclusion."
+resourceFields = [
+  { path = "/repository", resourceType = "repository" },
+  { path = "/actorLogin", resourceType = "person" },
+]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "repository",
+  "runId",
+  "conclusion",
+  "headSha",
+]
+
+[hooks.payloadSchema.properties]
+repository = { type = "string", description = "owner/name." }
+runId = { type = "integer", description = "The run." }
+attempt = { type = "integer", description = "Its attempt." }
+workflow = { type = "string", description = "The workflow's name." }
+conclusion = { type = "string", description = "success, failure, cancelled, skipped, timed_out, neutral or action_required." }
+branch = { type = "string", description = "The branch it ran on." }
+headSha = { type = "string", description = "The commit it ran on." }
+event = { type = "string", description = "What started it, such as push or pull_request." }
+actorLogin = { type = "string", description = "Who started it." }
+pullRequests = { type = "array", description = "Numbers of the pull requests it ran for." }
+url = { type = "string", description = "A link to the run." }
+completedAt = { type = "string", description = "When it finished (ISO 8601)." }
+
+[[hooks]]
+name = "notification"
+title = "You are asked for a review, mentioned or assigned"
+description = "A notification reaches this account: a review request, a mention, an assignment or activity it follows. Needs “Notifications for rules”."
+resourceFields = [ { path = "/repository", resourceType = "repository" }, ]
+
+[hooks.payloadSchema]
+type = "object"
+required = [
+  "threadId",
+  "reason",
+  "title",
+  "repository",
+  "type",
+]
+
+[hooks.payloadSchema.properties]
+threadId = { type = "string", description = "The notification thread." }
+reason = { type = "string", description = "review_requested, mention, team_mention, assign, author, comment, ci_activity, state_change, subscribed…" }
+title = { type = "string", description = "What it is about." }
+type = { type = "string", description = "PullRequest, Issue, Release, Commit, Discussion, CheckSuite…" }
+repository = { type = "string", description = "owner/name." }
+number = { type = "integer", description = "The issue or pull request's number, when it is one." }
+url = { type = "string", description = "A link to it on GitHub." }
+updatedAt = { type = "string", description = "When it was updated (ISO 8601)." }
