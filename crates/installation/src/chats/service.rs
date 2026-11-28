@@ -224,6 +224,13 @@ impl Service {
             if busy {
                 continue;
             }
+            // The provider-active snapshot may predate the final handoff from
+            // a held worker. It still owns admission until housekeeping ends.
+            if let Some(run_id) = chat.run_id.as_deref()
+                && self.worker.has_native_cleanup_handoff(run_id).await
+            {
+                continue;
+            }
             let id = chat.id.clone();
             if let Some(run) = run.as_ref().filter(|run| needs_attention(&chat, Some(run))) {
                 self.chat_cancel_wait(&id).await?;
@@ -262,6 +269,14 @@ impl Service {
                 if chat.paused {
                     continue;
                 }
+            }
+            if let Some(run_id) = chat.run_id.clone()
+                && self
+                    .store
+                    .read(move |db| RunCheckpoint::awaiting_native_retirement_in(db, &run_id))
+                    .await?
+            {
+                continue;
             }
             // A scheduled wait continues the current task before queued follow-ups.
             let (waiting_chat, waiting_run) = (chat.clone(), run.clone());

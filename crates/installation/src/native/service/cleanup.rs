@@ -154,7 +154,7 @@ impl Controller {
         let Ok(bytes) = tokio::fs::read(self.file(id, "exit")).await else {
             return json!({});
         };
-        let Ok(result) = serde_json::from_slice::<Value>(&bytes) else {
+        let Ok(mut result) = serde_json::from_slice::<Value>(&bytes) else {
             return json!({});
         };
         if crate::runner::client_cleanup_result(&result, id).is_some()
@@ -164,17 +164,36 @@ impl Controller {
             tracing::debug!(attempt = id, "Ignoring superseded native cleanup receipt");
             return json!({ "NativeCleanupRetired": { "attemptId": id } });
         }
+        if result["PhysicalFinalized"] == true
+            && result["FinalizationFailed"] != true
+            && self
+                .cleanup_status(id)
+                .await
+                .is_ok_and(|status| status["flushed"] == true)
+        {
+            // Physical finalization also covers an aborted disk. Keep the
+            // legacy exit fields and attest native flush separately.
+            result["NativeCleanupRetired"] = json!({ "attemptId": id });
+        }
         result
     }
 
     pub(super) async fn reconcile_wait_result(&self, id: &str, mut result: Value) -> Value {
         if crate::runner::client_cleanup_result(&result, id).is_some() {
-            let retired = tokio::time::timeout(
-                WAIT_RETIREMENT_PROBE,
-                self.cleanup_receipt_superseded(id, Some(id)),
-            )
-            .await
-            .unwrap_or(false);
+            result
+                .as_object_mut()
+                .unwrap()
+                .remove("NativeCleanupReusable");
+            let (retired, reusable_without_flush) =
+                tokio::time::timeout(WAIT_RETIREMENT_PROBE, async {
+                    if self.cleanup_flushed(id).await {
+                        (self.cleanup_reusable(id, Some(id)).await, false)
+                    } else {
+                        (false, self.cleanup_reusable(id, None).await)
+                    }
+                })
+                .await
+                .unwrap_or_default();
             let cleanup = result["NativeCleanup"].as_object_mut().unwrap();
             cleanup.remove("retired");
             if retired {
@@ -182,27 +201,46 @@ impl Controller {
                 // suppress replay. The attempt-bound extension attests closure.
                 cleanup.insert("retired".into(), true.into());
             }
+            if reusable_without_flush {
+                result["NativeCleanupReusable"] = json!({ "attemptId": id });
+            }
         }
         result
     }
 
     async fn cleanup_receipt_superseded(&self, id: &str, attempt: Option<&str>) -> bool {
+        self.cleanup_flushed(id).await && self.cleanup_reusable(id, attempt).await
+    }
+
+    pub(super) async fn cleanup_status(&self, id: &str) -> Result<Value> {
+        uuid(id)?;
+        let check = async {
+            let flushed = self.cleanup_flushed(id).await;
+            let reusable = self.cleanup_reusable(id, None).await;
+            (flushed && reusable, reusable)
+        };
+        let (flushed, reusable) = tokio::time::timeout(WAIT_RETIREMENT_PROBE, check)
+            .await
+            .unwrap_or_default();
+        Ok(json!({ "attemptId": id, "flushed": flushed, "reusable": reusable }))
+    }
+
+    async fn cleanup_flushed(&self, id: &str) -> bool {
         let Ok(Some(bytes)) =
             read_attempt_evidence(&self.file(id, "cleanup-result"), 1024, false).await
         else {
             return false;
         };
-        if !bytes.trim_ascii_start().starts_with(b"{")
-            || !matches!(
+        bytes.trim_ascii_start().starts_with(b"{")
+            && matches!(
                 serde_json::from_slice::<Completed>(&bytes),
                 Ok(Completed {
                     completion: block::Completion::Flushed,
                 })
             )
-        {
-            return false;
-        }
+    }
 
+    async fn cleanup_reusable(&self, id: &str, attempt: Option<&str>) -> bool {
         let Ok(Some(owner)) = read_attempt_evidence(&self.file(id, "run"), 36, false).await else {
             return false;
         };
@@ -744,6 +782,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_plain_native_exit_attests_flush_only_when_the_disk_was_flushed() {
+        let (_root, controller) = super::super::tests::fixture().await;
+        private_dir(&controller.state.join("native-cleanup"))
+            .await
+            .unwrap();
+        for completion in [block::Completion::Aborted, block::Completion::Flushed] {
+            let run = crate::config::id();
+            let attempt = crate::config::id();
+            std::fs::write(controller.file(&attempt, "run"), run).unwrap();
+            let exit = json!({ "StatusCode": 0, "PhysicalFinalized": true });
+            std::fs::write(controller.file(&attempt, "exit"), exit.to_string()).unwrap();
+            std::fs::write(
+                controller.file(&attempt, "cleanup-result"),
+                serde_json::to_vec(&Completed { completion }).unwrap(),
+            )
+            .unwrap();
+            let stopped = controller.stopped_result(&attempt).await;
+            let mut expected = exit;
+            if completion == block::Completion::Flushed {
+                expected["NativeCleanupRetired"] = json!({ "attemptId": attempt });
+            }
+            assert_eq!(stopped, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_status_distinguishes_reusable_workspace_from_clean_flush() {
+        let (_root, controller) = super::super::tests::fixture().await;
+        private_dir(&controller.state.join("native-cleanup"))
+            .await
+            .unwrap();
+        let run = crate::config::id();
+        let attempt = crate::config::id();
+        atomic_write(&controller.file(&attempt, "run"), run.as_bytes())
+            .await
+            .unwrap();
+        atomic_write(&controller.file(&attempt, "active"), run.as_bytes())
+            .await
+            .unwrap();
+        controller
+            .record_cleanup_pending(&attempt, "cleanup pending")
+            .await
+            .unwrap();
+        let exit = controller.stopped_result(&attempt).await;
+        super::super::super::cleanup::quarantine(&controller.state, &run, &attempt).unwrap();
+
+        let status = |flushed, reusable| json!({ "attemptId": attempt, "flushed": flushed, "reusable": reusable });
+        assert_eq!(
+            controller.cleanup_status(&attempt).await.unwrap(),
+            status(false, false)
+        );
+        assert_eq!(
+            controller
+                .reconcile_wait_result(&attempt, exit.clone())
+                .await,
+            exit
+        );
+        tokio::fs::remove_file(controller.file(&attempt, "active"))
+            .await
+            .unwrap();
+        assert_eq!(
+            controller.cleanup_status(&attempt).await.unwrap(),
+            status(false, false)
+        );
+        tokio::fs::remove_file(
+            controller
+                .state
+                .join("native-cleanup")
+                .join(format!("{run}.json")),
+        )
+        .await
+        .unwrap();
+
+        // On restart, orphan recovery can release the workspace without a
+        // receipt from the controller that attempted the original flush.
+        assert_eq!(
+            controller.cleanup_status(&attempt).await.unwrap(),
+            status(false, true)
+        );
+        for (completion, flushed) in [
+            (block::Completion::FailedFlush, false),
+            (block::Completion::Aborted, false),
+            (block::Completion::Flushed, true),
+        ] {
+            atomic_write(
+                &controller.file(&attempt, "cleanup-result"),
+                &serde_json::to_vec(&Completed { completion }).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                controller.cleanup_status(&attempt).await.unwrap(),
+                status(flushed, true)
+            );
+            let observation = controller
+                .reconcile_wait_result(&attempt, exit.clone())
+                .await;
+            assert_eq!(observation["NativeCleanup"]["retired"] == true, flushed);
+            assert_eq!(
+                observation["NativeCleanupReusable"]["attemptId"].as_str(),
+                (!flushed).then_some(attempt.as_str()),
+            );
+        }
+        let other = crate::config::id();
+        super::super::super::cleanup::quarantine(&controller.state, &run, &other).unwrap();
+        assert_eq!(
+            controller.cleanup_status(&attempt).await.unwrap(),
+            status(false, false)
+        );
+    }
+
+    #[tokio::test]
     async fn stop_reconciles_only_retired_cleanup_for_the_same_attempt() {
         let (_root, controller) = super::super::tests::fixture().await;
         private_dir(&controller.state.join("native-cleanup"))
@@ -761,31 +911,33 @@ mod tests {
             .unwrap();
         let pending = controller.stopped_result(&attempt).await;
         assert!(crate::runner::client_cleanup_result(&pending, &attempt).is_some());
+        let mut reusable = pending.clone();
+        reusable["NativeCleanupReusable"] = json!({ "attemptId": attempt });
         let waiting = async || {
             let body = axum::body::to_bytes(controller.wait(&attempt, true).into_body(), 4096)
                 .await
                 .unwrap();
             serde_json::from_slice::<Value>(&body).unwrap()
         };
-        assert_eq!(waiting().await, pending);
+        assert_eq!(waiting().await, reusable);
 
         let completion = controller.file(&attempt, "cleanup-result");
         let flushed = br#"{"completion":"Flushed"}"#;
         let other_completion = controller.file(&other_attempt, "cleanup-result");
         tokio::fs::write(&other_completion, flushed).await.unwrap();
         assert_eq!(controller.stopped_result(&attempt).await, pending);
-        assert_eq!(waiting().await, pending);
+        assert_eq!(waiting().await, reusable);
         tokio::fs::hard_link(&other_completion, &completion)
             .await
             .unwrap();
         assert_eq!(controller.stopped_result(&attempt).await, pending);
-        assert_eq!(waiting().await, pending);
+        assert_eq!(waiting().await, reusable);
         tokio::fs::remove_file(&completion).await.unwrap();
         tokio::fs::symlink(&other_completion, &completion)
             .await
             .unwrap();
         assert_eq!(controller.stopped_result(&attempt).await, pending);
-        assert_eq!(waiting().await, pending);
+        assert_eq!(waiting().await, reusable);
         tokio::fs::remove_file(&completion).await.unwrap();
         for bytes in [
             b"malformed".as_slice(),
@@ -797,7 +949,7 @@ mod tests {
         ] {
             tokio::fs::write(&completion, bytes).await.unwrap();
             assert_eq!(controller.stopped_result(&attempt).await, pending);
-            assert_eq!(waiting().await, pending);
+            assert_eq!(waiting().await, reusable);
         }
 
         tokio::fs::write(&completion, flushed).await.unwrap();

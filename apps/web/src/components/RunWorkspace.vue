@@ -30,7 +30,12 @@ import {
 import { useMissionRuns } from '../mission-runs'
 import { localReads, useReadWhileOpen } from '../reads'
 import { useRetryState } from '../run-retry'
-import { exclusiveSuspensionLabel, isExclusivelySuspended, runDisplayStatus } from '../run-status'
+import {
+  canStopRun,
+  exclusiveSuspensionLabel,
+  isExclusivelySuspended,
+  runDisplayStatus,
+} from '../run-status'
 import { filOf } from '../signal'
 import { useLiveRun } from '../use-live-run'
 import ActivityFeed from './ActivityFeed.vue'
@@ -207,7 +212,7 @@ async function copy() {
       <RouterLink :to="back.to" class="back-link inline-flex items-center gap-[7px] text-muted text-xs mb-[25px]">
         <Icon :name="ArrowLeft" :size="16" />{{ back.label }}
       </RouterLink>
-      <UiButton v-if="run && active" variant="danger-outline" @click="confirm = true">
+      <UiButton v-if="canStopRun(run)" variant="danger-outline" @click="confirm = true">
         <Icon :name="Square" :size="15" />Stop run
       </UiButton>
       <div v-else-if="run" class="flex flex-wrap justify-end gap-2">
@@ -364,7 +369,7 @@ async function copy() {
     </template><Modal v-if="confirm" title="Stop this run?" @close="confirm = false">
       <div class="modal-body px-6.5 py-6 phone:p-5">
         <p>
-          The running process will stop. Files and external changes already made
+          The run will stop. Files and external changes already made
           will remain, so review them before running the task again.
         </p>
       </div>

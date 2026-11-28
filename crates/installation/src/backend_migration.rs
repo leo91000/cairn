@@ -222,6 +222,21 @@ fn change_expired_backend(
     required_tags: &Value,
 ) -> Result<()> {
     let run_id = text(&chat, "runId");
+    if crate::environment_expiration::pending(db, run_id)? {
+        let run = required(db.run_state(run_id)?, "Run not found")?;
+        let completing_chat = run.trigger == "chat"
+            && run.status == crate::run_status::RunStatus::Succeeded
+            && run.recovery_pending;
+        if crate::worker::checkpoint::RunCheckpoint::finishing_native_turn_in(
+            db,
+            run_id,
+            completing_chat,
+        )? {
+            return Err(Error::conflict(
+                "The working environment is already being retired.",
+            ));
+        }
+    }
     let mut boundary = json!({
         "requiredRuntime": node["runtimeId"],
         "environmentAdmissionRevision": crate::config::id(),
@@ -581,6 +596,60 @@ mod tests {
         run_fixture::DbRunFixture,
         run_status::RunStatus,
     };
+
+    #[tokio::test]
+    async fn expired_backend_selection_preserves_a_pending_native_cleanup_verdict() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let run = id();
+                db.add_run_fixture(
+                    &json!({
+                        "id": run, "taskId": run, "trigger": "chat", "status": "succeeded",
+                        "recoveryPending": true
+                    }),
+                    None,
+                )?;
+                let attempt = id();
+                let mut checkpoint = json!({
+                    "runnerId": attempt,
+                    "prepared": { "backend": "native", "isolated": true },
+                    "settled": { "status": "succeeded", "finishedAt": 42 },
+                });
+                db.save_checkpoint_boundary(&run, &checkpoint)?;
+                crate::environment_expiration::request_in(
+                    db,
+                    &run,
+                    &crate::environment_expiration::Expiration::new(
+                        cairn_contracts::EnvironmentExpirationCause::NodeChange,
+                    ),
+                    true,
+                )?;
+                for receipt_recorded in [false, true] {
+                    if receipt_recorded {
+                        checkpoint["pendingNativeCleanup"] = json!({
+                            "attempt": attempt, "state": "observing", "until": now() + 5_000,
+                            "message": "Cleanup in progress",
+                        });
+                        db.save_checkpoint_boundary(&run, &checkpoint)?;
+                    }
+                    let error = change_expired_backend(
+                        db,
+                        json!({ "runId": run }),
+                        &Value::Null,
+                        &Value::Null,
+                        &Value::Null,
+                    )
+                    .unwrap_err();
+                    assert!(error.is_conflict(), "receipt recorded: {receipt_recorded}");
+                    assert!(db.run_state(&run)?.unwrap().recovery_pending);
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn delegated_migration_keeps_historical_principals_and_parent_bounds() {

@@ -293,13 +293,14 @@ fn retirements(db: &Db<'_>, run: &str) -> Result<Vec<Retirement>> {
 }
 
 /// Detaches the environment immediately. A live worker retains its execution
-/// checkpoint solely to finish stopping; admission waits for that fence.
+/// checkpoint solely to finish stopping; admission waits for that fence. Returns
+/// whether the caller must signal a live worker to stop.
 pub(crate) fn request_in(
     db: &Db<'_>,
     run_id: &str,
     expiration: &Expiration,
     live: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let run = crate::error::required(db.run(run_id)?, "Run not found")?;
     if db.get(PENDING, run_id)?.is_some() {
         return Err(Error::conflict(
@@ -336,9 +337,14 @@ pub(crate) fn request_in(
         && (expiration.continue_turn
             || run["trigger"] != "chat" && executing && !run["wakeup"].is_object());
     if !live {
-        return detach_in(db, run_id, &expiration, expired_at);
+        detach_in(db, run_id, &expiration, expired_at)?;
+        return Ok(false);
     }
-    if run["cancelRequestedAt"].is_null() {
+    let completing_chat = run["trigger"] == "chat"
+        && RunStatus::of(&run) == Some(RunStatus::Succeeded)
+        && run["recoveryPending"] == true;
+    let finishing_native = RunCheckpoint::finishing_native_turn_in(db, run_id, completing_chat)?;
+    if !stopped && !finishing_native {
         db.change_run(
             run_id,
             crate::runs::RunChanges {
@@ -385,7 +391,7 @@ pub(crate) fn request_in(
         },
     )?;
     db.put(PENDING, &serde_json::to_value(pending)?)?;
-    Ok(())
+    Ok(!finishing_native)
 }
 
 /// Applies an expiration recorded while its execution was still live.
@@ -449,14 +455,17 @@ fn detach_environment_in(
 ) -> Result<()> {
     let stopped_live_worker = environment.is_some();
     db.remove(PENDING, run_id)?;
-    let Some(run) = db.run(run_id)? else {
+    let Some(mut run) = db.run(run_id)? else {
         return Ok(());
     };
     crate::nodes::placement::release_unclaimed(db, Some(run_id))?;
+    let checkpoint = RunCheckpoint::load_in(db, run_id)?.unwrap_or_default();
+    if crate::worker::finish_native_cleanup_before_detach(db, run_id, &checkpoint)? {
+        run = crate::error::required(db.run(run_id)?, "Run not found")?;
+    }
     let environment = environment
         .filter(Value::is_object)
         .unwrap_or_else(|| run.clone());
-    let checkpoint = RunCheckpoint::load_in(db, run_id)?.unwrap_or_default();
     let placement = db.run_placement(run_id)?;
 
     let mut nodes = db
@@ -770,13 +779,14 @@ impl Service {
         let active = self.worker.active.lock().await;
         let live = idle.is_none() || active.contains_key(run);
         let owner = run.to_owned();
-        self.store
+        let interrupt = self
+            .store
             .transaction(move |db| {
                 authorize(db)?;
                 request_in(db, &owner, &expiration, live)
             })
             .await?;
-        if let Some(cancel) = active.get(run) {
+        if interrupt && let Some(cancel) = active.get(run) {
             cancel.cancel();
         }
         drop(active);
@@ -1108,6 +1118,80 @@ fn save_progress(
 mod tests {
     use super::*;
     use crate::run_fixture::DbRunFixture;
+
+    #[tokio::test]
+    async fn environment_detachment_settles_the_old_native_cleanup_before_replacing_its_checkpoint()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        for (live, explicit_stop, verdict, status, published) in [
+            (false, false, "unobserved", RunStatus::Failed, false),
+            (true, false, "unobserved", RunStatus::Failed, false),
+            (false, true, "unobserved", RunStatus::Cancelled, false),
+            (true, true, "unobserved", RunStatus::Cancelled, false),
+            (false, false, "flushed", RunStatus::Succeeded, false),
+            (true, false, "known-failure", RunStatus::Failed, false),
+            (false, false, "observing", RunStatus::Failed, false),
+            (false, false, "unconfirmed", RunStatus::Failed, false),
+            (false, false, "retired", RunStatus::Succeeded, false),
+            (true, false, "unconfirmed", RunStatus::Failed, false),
+            (true, false, "retired", RunStatus::Succeeded, false),
+            (true, true, "retired", RunStatus::Cancelled, false),
+            (false, false, "retired", RunStatus::Failed, true),
+        ] {
+            store.transaction(move |db| {
+                let (run, attempt) = (id(), id());
+                db.add_run_fixture(&json!({
+                    "id": run, "taskId": run, "trigger": "chat",
+                    "status": if published { RunStatus::Failed } else { RunStatus::Succeeded },
+                    "summary": "Provider result", "finishedAt": 42, "isolated": true,
+                    "recoveryPending": !published, "cancelRequestedAt": explicit_stop.then_some(43),
+                    "error": published.then_some("Native cleanup is still pending"),
+                }), None)?;
+                let mut checkpoint = json!({
+                    "runnerId": attempt,
+                    "prepared": { "backend": "native", "isolated": true },
+                    "settled": { "status": "succeeded", "summary": "Provider result", "finishedAt": 42 },
+                });
+                match verdict {
+                    "unobserved" => {}
+                    "flushed" => checkpoint["nativeFlushedAttempt"] = json!(attempt),
+                    "known-failure" => {
+                        checkpoint["finalizationFailureAttempt"] = json!(attempt);
+                        checkpoint["lastError"] = json!("Native cleanup: Flush failed");
+                    }
+                    _ => checkpoint["pendingNativeCleanup"] = json!({
+                        "attempt": attempt, "state": verdict, "until": now() + 5_000,
+                        "message": "Native cleanup is still pending",
+                    }),
+                }
+                db.save_checkpoint_boundary(&run, &checkpoint)?;
+                let interrupt = request_in(db, &run, &Expiration {
+                    cause: Cause::NodeChange, destination: Some(id()), continue_turn: false,
+                }, live)?;
+                assert!(!interrupt);
+                if live {
+                    let stopping = db.run_state(&run)?.unwrap();
+                    assert_eq!(stopping.cancel_requested_at, explicit_stop.then_some(43));
+                    assert!(stopping.recovery_pending);
+                    detach_pending_in(db, &run)?;
+                }
+
+                let changed = db.run_state(&run)?.unwrap();
+                assert_eq!(changed.status, status);
+                assert_eq!(changed.finished_at, Some(42));
+                assert!(!changed.recovery_pending);
+                let expected_error = (status == RunStatus::Failed).then_some(match verdict {
+                    "unobserved" => "Native disk cleanup could not be confirmed before the environment expired.",
+                    "known-failure" => "Flush failed",
+                    _ => "Native cleanup is still pending",
+                });
+                assert_eq!(changed.error.as_deref(), expected_error);
+                assert!(RunCheckpoint::load_in(db, &run)?.unwrap().pending_native_cleanup().is_none());
+                Ok(())
+            }).await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn an_older_retirement_cannot_replace_or_clear_the_new_environments_error() {

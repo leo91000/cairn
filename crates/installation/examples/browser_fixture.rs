@@ -219,6 +219,43 @@ async fn main() -> Result<()> {
                 "runs" => db.runs(None, None, 10000, 0, true)?.into(),
                 "addRun" => db.add_run_fixture(&arg(0), None)?,
                 "updateRun" => run_fixture::change_run_fixture(&db, string(0), &arg(1))?,
+                "deferNativeCleanup" => {
+                    let id = string(0);
+                    let run = db
+                        .run_state(id)?
+                        .ok_or_else(|| Error::not_found("Run not found."))?;
+                    if run.status != cairn_contracts::RunStatus::Succeeded || run.recovery_pending {
+                        return Err(Error::conflict("Use a settled successful fixture run."));
+                    }
+                    let attempt = cairn_installation::config::id();
+                    db.save_checkpoint_boundary(id, &json!({
+                        "runnerId": attempt,
+                        "prepared": { "backend": "native", "isolated": true },
+                        "settled": {
+                            "status": "succeeded", "summary": run.summary, "finishedAt": run.finished_at
+                        },
+                        "pendingNativeCleanup": {
+                            "attempt": attempt,
+                            "state": "observing",
+                            "until": cairn_installation::config::now() + 60_000,
+                            "message": "Native disk cleanup is still pending."
+                        }
+                    }))?;
+                    db.change_run(
+                        id,
+                        cairn_installation::runs::RunChanges {
+                            recovery_pending: Some(true),
+                            placement: Some(Box::new(
+                                cairn_installation::nodes::run_placement::PlacementChanges {
+                                    execution_backend: Some(Some("firecracker".to_owned())),
+                                    ..Default::default()
+                                },
+                            )),
+                            ..Default::default()
+                        },
+                    )?;
+                    Value::Null
+                }
                 "events" => db
                     .events_fixture(
                         string(0),

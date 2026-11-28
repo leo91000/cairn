@@ -23,6 +23,10 @@ export interface Run {
   snapshot: RunSnapshot | null
   sourceTaskId?: string | null
   isolated: boolean
+  /**
+   * A completed chat can still be stopped while its native attempt closes.
+   */
+  nativeCleanupPending?: boolean
   workspaces: Array<RunWorkspace>
   taskName: string
   agentName: string
