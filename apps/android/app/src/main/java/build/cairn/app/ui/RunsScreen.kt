@@ -118,6 +118,7 @@ fun RunScreen(
 ) {
     val live = rememberLive(vm, state, "/runs/${segment(id)}/stream", streaming = selected)
     val run = live.state?.run
+    val waiting = run?.status == "waiting" || (run?.status == "succeeded" && run.wakeup != null)
     var tab by rememberSaveable(id) { mutableIntStateOf(1) }
     // A delegated conversation can be directed through its requester, but cleanup needs
     // access to the run's own agent.
@@ -191,7 +192,7 @@ fun RunScreen(
             live.error?.let { ErrorNotice(it) {} }
             run?.let { current ->
                 val headerActions: @Composable RowScope.() -> Unit = {
-                    if (current.active)
+                    if (current.active || waiting)
                         ActionIcon("Arrêter", CairnIcons.Stop, !state.busy) { confirm = "cancel" }
                     Box {
                         ActionIcon("Options de l’exécution", CairnIcons.More) { menu = true }
@@ -258,7 +259,7 @@ fun RunScreen(
                 RunWaitingReason(current, state.busy || current.cancelRequestedAt != null) {
                     vm.perform { api.cancelRun(RunInput(id)) }
                 }
-                if (current.status == "waiting")
+                if (waiting)
                     current.wakeup?.let { wakeup ->
                         Notice(
                             wakeup.reason,
@@ -350,7 +351,7 @@ fun RunScreen(
                                             LiveWait(
                                                 current.wakeup,
                                                 paused = false,
-                                                settled = current.status == "waiting",
+                                                settled = waiting,
                                                 canPause = false,
                                                 openRun = openRun,
                                                 openChat = openChat,
@@ -364,7 +365,7 @@ fun RunScreen(
                                             },
                                             rendering,
                                             hideRunning = current.status == "running",
-                                            active = current.active && current.status != "waiting",
+                                            active = current.active && !waiting,
                                             livePlan = livePlan,
                                         )
                                     }
@@ -390,7 +391,7 @@ fun RunScreen(
                                             color = signal.warning,
                                         )
                                     }
-                                else if (current.status == "waiting")
+                                else if (waiting)
                                     item(key = "run-waiting") {
                                         Text(
                                             "Attente programmée · ${current.wakeup?.reason.orEmpty()}"
@@ -518,10 +519,13 @@ fun RunScreen(
         confirm?.let { action ->
             Confirm(
                 if (action == "cancel") "Arrêter cette exécution ?" else "Nettoyer ce worktree ?",
-                if (action == "cancel")
-                    "Le processus s’arrêtera. Les fichiers et les effets déjà produits resteront en place."
-                else
-                    "Le répertoire sera supprimé. La branche Git et l’historique restent disponibles. Le serveur refuse de supprimer un worktree contenant des changements.",
+                when {
+                    action == "cancel" && waiting -> "La reprise programmée sera annulée."
+                    action == "cancel" ->
+                        "Le processus s’arrêtera. Les fichiers et les effets déjà produits resteront en place."
+                    else ->
+                        "Le répertoire sera supprimé. La branche Git et l’historique restent disponibles. Le serveur refuse de supprimer un worktree contenant des changements."
+                },
                 state.busy,
                 state.error,
                 { confirm = null },

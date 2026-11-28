@@ -339,6 +339,7 @@ test('owner shares an installation and member works without management controls'
     })
     seed!.store.put('chats', { id: delegated.id, wakeup })
     await page.reload()
+    await expect(page.getByRole('button', { name: 'Stop run', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Run details', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Original instructions', exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toHaveCount(0)

@@ -6,7 +6,7 @@ import type { TimelineChange } from './generated/typescript/TimelineChange'
 
 export interface LiveState {
   planTurnsEnabled?: boolean
-  /** The run's conversation has a pending question or queued input. */
+  /** The run's conversation has a pending question, queued input or coding agent change. */
   workspaceCleanupBlockedByInput?: boolean
   /** The trash revision clients without `compact=1` follow. */
   cacheRevision?: string

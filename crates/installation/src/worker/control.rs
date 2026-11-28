@@ -316,7 +316,7 @@ fn require_cleanup_ready(db: &Db<'_>, run: &crate::runs::RunRecord) -> Result<()
     }
     if db.conversation_has_pending_work(&run.state.id)? {
         return Err(Error::conflict(
-            "Resolve pending questions and messages before cleaning up.",
+            "Resolve pending questions and messages and finish any coding agent change before cleaning up.",
         ));
     }
     Ok(())
@@ -433,6 +433,7 @@ pub(crate) fn requeue(
         ));
     }
     crate::conversation_lifecycle::require_active_run(db, id)?;
+    crate::chats::require_workspace_not_cleaned(&run)?;
     let replay_refused = db.conversations_boundary()?.iter().any(|chat| {
         chat["runId"] == id
             && (chat["cancelledByDeletion"] == true
@@ -450,7 +451,6 @@ pub(crate) fn requeue(
     // probe fails. Require evidence from that same attempt before retrying it.
     let antigravity_retry = if status == RunStatus::Failed
         && state.session_id.is_none()
-        && state.workspace_cleaned_at.is_none()
         && crate::provider::Provider::of_run(&run).ok()
             == Some(crate::provider::Provider::Antigravity)
         && let Some(progress) = checkpoint.as_ref().and_then(|saved| {
@@ -484,8 +484,7 @@ pub(crate) fn requeue(
         && (checkpoint.as_ref().is_none_or(|c| !c.launched()) || antigravity_probe_failed);
     let resumable = status.is_resumable()
         && state.resume_available
-        && checkpoint.as_ref().is_some_and(|c| c.prepared().is_some())
-        && state.workspace_cleaned_at.is_none();
+        && checkpoint.as_ref().is_some_and(|c| c.prepared().is_some());
     if !before_launch && !resumable {
         return Err(Error::conflict(
             "This run has no saved conversation available to resume.",
@@ -1381,6 +1380,10 @@ mod tests {
     #[tokio::test]
     async fn cleanup_preserves_the_workspace_needed_to_answer_a_question() {
         let f = crate::plugin_grant_fixture::Fixture::new().await;
+        let running = f.s.store.run(&f.run).await.unwrap();
+        f.s.chat_acknowledge(&f.run, text(&running["chatExecution"], "messageId"))
+            .await
+            .unwrap();
         let run = f.run.clone();
         f.s.store
             .transaction(move |db| {
@@ -1400,7 +1403,10 @@ mod tests {
                     blocking: true,
                     source: String::new(),
                     status: crate::chats::QuestionStatus::Pending,
-                    fields: Vec::new(),
+                    fields: vec![serde_json::from_value(json!({
+                        "id": "review",
+                        "title": "What should I review next?",
+                    }))?],
                     created_at: Some(now()),
                     message_id: None,
                 })
@@ -1419,6 +1425,10 @@ mod tests {
     #[tokio::test]
     async fn cleanup_can_retry_after_revocation_between_managed_directories() {
         let f = crate::plugin_grant_fixture::Fixture::new().await;
+        let running = f.s.store.run(&f.run).await.unwrap();
+        f.s.chat_acknowledge(&f.run, text(&running["chatExecution"], "messageId"))
+            .await
+            .unwrap();
         let root =
             f.s.config
                 .data_dir
@@ -1508,6 +1518,29 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn cleanup_claim_prevents_resuming_a_run_that_has_not_launched() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({
+                        "id": "run", "taskId": "chat", "trigger": "chat", "status": "cancelled",
+                        "workspace": "/saved/workspace", "workspaceCleanedAt": 10,
+                        "chatExecution": { "messageId": "held-turn" },
+                    }),
+                    None,
+                )?;
+                let error = requeue(db, "run", Some("held-turn"), None, None, None).unwrap_err();
+                assert!(error.message.contains("workspace has been cleaned up"));
+                assert_eq!(db.run("run")?.unwrap()["status"], "cancelled");
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

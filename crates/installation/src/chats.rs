@@ -797,10 +797,14 @@ fn require_sendable(
     )?;
     crate::nodes::require_node(&agent)?;
     task_projects(&agent, &serde_json::to_value(chat)?, &db.projects()?)?;
-    let cleaned = db
-        .run(chat.run_id.as_deref().unwrap_or(""))?
-        .is_some_and(|run| !run["workspaceCleanedAt"].is_null());
-    if cleaned {
+    if let Some(run) = db.run(chat.run_id.as_deref().unwrap_or(""))? {
+        require_workspace_not_cleaned(&run)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn require_workspace_not_cleaned(run: &Value) -> Result<()> {
+    if !run["workspaceCleanedAt"].is_null() {
         return Err(Error::conflict(
             "This workspace has been cleaned up. Start a new chat.",
         ));

@@ -415,6 +415,7 @@ pub(super) fn continue_run(
     mut execution: ChatExecution,
     wakeup_id: Option<&str>,
 ) -> Result<()> {
+    require_workspace_not_cleaned(run)?;
     let agent = &snapshot["snapshot"]["agent"];
     // The workspace keeps what earlier turns could reach, so reduced access needs a new chat.
     if !crate::service::covers(agent, &run["snapshot"]["agent"]) {

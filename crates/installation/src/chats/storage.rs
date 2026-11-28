@@ -412,7 +412,11 @@ impl Db<'_> {
         let Some(chat) = self.conversation_id_for_run(run)? else {
             return Ok(false);
         };
-        Ok(self.has_pending_messages(&chat)? || self.pending_question_summary(&chat)?.0 > 0)
+        Ok(self.has_pending_messages(&chat)?
+            || self.pending_question_summary(&chat)?.0 > 0
+            || self
+                .engine_switch(&chat)?
+                .is_some_and(|change| change.pending))
     }
 
     pub fn chat_id_for_slug(&self, slug: &str) -> Result<Option<String>> {

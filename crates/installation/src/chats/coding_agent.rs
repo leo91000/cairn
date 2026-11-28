@@ -33,7 +33,10 @@ pub(crate) fn progress(
 
 pub(crate) fn quota_blocked(db: &Db<'_>, run: &Value) -> Result<bool> {
     // A turn whose message went back to its author is over: the next message picks the agent.
-    if run["environmentState"].is_string() || super::turn_returned(db, text(run, "id"))? {
+    if run["environmentState"].is_string()
+        || !run["workspaceCleanedAt"].is_null()
+        || super::turn_returned(db, text(run, "id"))?
+    {
         return Ok(false);
     }
     if is_compaction(run)
@@ -606,6 +609,7 @@ async fn pending_run(
                 return Err(Error::conflict("The conversation changed while switching."));
             }
             let run = required(db.run(&current.run_id)?, "Run not found")?;
+            super::require_workspace_not_cleaned(&run)?;
             if run["chatExecution"]["messageId"].as_str() != Some(current.turn_id.as_str()) {
                 return Err(Error::conflict("The pending turn changed."));
             }

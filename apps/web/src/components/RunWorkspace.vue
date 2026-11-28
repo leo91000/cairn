@@ -53,12 +53,15 @@ const {
   catchingUp: loading,
 } = live
 const run = computed(() => live.snapshot.value?.run ?? undefined)
+const waiting = computed(() =>
+  run.value?.status === 'waiting' || (run.value?.status === 'succeeded' && !!run.value.wakeup),
+)
 const suspended = computed(() => isExclusivelySuspended(run.value))
 const recovery = useRetryState(() => run.value)
 // What the run waits for, above its tabs: its scheduled continuation, a retry or an account.
 const waitNotice = computed(() => {
   const wakeup = run.value?.wakeup
-  if (run.value?.status === 'waiting' && wakeup)
+  if (waiting.value && wakeup)
     return { title: recordedTitle(wakeup), detail: wakeup.reason }
   if (recovery.value)
     return undefined
@@ -73,7 +76,7 @@ const tab = ref('events')
 const confirm = ref(false)
 const confirmCleanup = ref(false)
 const active = computed(
-  () => run.value && ['running', 'queued', 'waiting'].includes(run.value.status),
+  () => run.value && (waiting.value || ['running', 'queued'].includes(run.value.status)),
 )
 // A delegated conversation can be readable through its requester, but cleanup needs
 // access to the run's own agent.
@@ -200,8 +203,8 @@ async function copy() {
           />
           <Markdown v-if="run.summary" :content="run.summary" />
           <div v-else class="mini-empty flex flex-col items-center text-center pt-7 pb-8.5 text-subtle px-6">
-            <span v-if="!suspended && run.status !== 'waiting'" class="pulse-ring w-8 h-8 rounded-full border-2 border-line [border-top-color:light-dark(#6660a5,_var(--dark-border))] animate-spin mb-[17px]" />
-            <h3>{{ run.status === 'waiting' ? 'Waiting for scheduled continuation' : suspended ? exclusiveSuspensionLabel : active ? "Work is underway" : "No summary yet" }}</h3>
+            <span v-if="!suspended && !waiting && active" class="pulse-ring w-8 h-8 rounded-full border-2 border-line [border-top-color:light-dark(#6660a5,_var(--dark-border))] animate-spin mb-[17px]" />
+            <h3>{{ waiting ? 'Waiting for scheduled continuation' : suspended ? exclusiveSuspensionLabel : active ? "Work is underway" : "No summary yet" }}</h3>
             <p>
               Open Conversation to follow this run.
             </p>
@@ -215,8 +218,8 @@ async function copy() {
           :deliverables="deliverables"
           :events="events"
           :timeline="timeline"
-          :active="!!active && run.status !== 'waiting'"
-          :wakeup="{ wakeup: run.wakeup ?? null, paused: false, settled: run.status === 'waiting', canPause: false }"
+          :active="!!active && !waiting"
+          :wakeup="{ wakeup: run.wakeup ?? null, paused: false, settled: waiting, canPause: false }"
           :suspended="suspended"
           :agent-id="run.snapshot.agent.id"
           :agent="run.snapshot.agent.name"
@@ -254,9 +257,12 @@ async function copy() {
       </p>
     </template><Modal v-if="confirm" title="Stop this run?" @close="confirm = false">
       <div class="modal-body px-6.5 py-6 phone:p-5">
-        <p>
+        <p v-if="waiting">
+          This cancels the scheduled continuation.
+        </p>
+        <p v-else>
           The running process will stop. Files and external changes already made
-          will remain, so review them before running the task again.
+          will remain, so review them before continuing the conversation.
         </p>
       </div>
       <footer class="modal-actions flex justify-end gap-2.5 bg-surface border-t border-line sticky bottom-0 phone:flex-wrap px-6.5 py-4.5 phone:px-5 phone:py-4">
